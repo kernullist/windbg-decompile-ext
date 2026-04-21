@@ -1,0 +1,6 @@
+LIBRARY decomp
+EXPORTS
+    DebugExtensionInitialize
+    DebugExtensionUninitialize
+    decomp=DecompCommand
+

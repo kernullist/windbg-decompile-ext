@@ -1,0 +1,14 @@
+{
+    "endpoint": "https://api.openai.com/v1/chat/completions",
+    "model": "gpt-5.4-2026-03-05",
+    "api_key_env": "OPENAI_API_KEY",
+    "timeout_ms": 120000,
+    "max_completion_tokens": 4000,
+    "chunk_trigger_instructions": 512,
+    "chunk_trigger_blocks": 24,
+    "chunk_block_limit": 14,
+    "chunk_count_limit": 20,
+    "chunk_completion_tokens": 3500,
+    "merge_completion_tokens": 9000
+}
+
