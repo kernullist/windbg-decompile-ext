@@ -1,0 +1,33 @@
+#include <winres.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @DECOMP_FILE_VERSION_COMMAS@
+ PRODUCTVERSION @DECOMP_FILE_VERSION_COMMAS@
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS VS_FF_DEBUG
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS VOS__WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "kernullist\0"
+            VALUE "FileDescription", "WinDbg LLM decompiler extension\0"
+            VALUE "FileVersion", "@DECOMP_FILE_VERSION@\0"
+            VALUE "InternalName", "decomp\0"
+            VALUE "OriginalFilename", "decomp.dll\0"
+            VALUE "ProductName", "WindbgLlmDecomp\0"
+            VALUE "ProductVersion", "@DECOMP_FILE_VERSION@\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

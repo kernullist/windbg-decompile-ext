@@ -54,6 +54,8 @@ Once `third_party\dbgeng` exists, `Build.ps1` will prefer it automatically and y
 
 Recommended path is a Visual Studio Developer PowerShell or Developer Command Prompt.
 
+The built `decomp.dll` now embeds a Windows file version taken from `version.txt`.
+
 ### Normal build
 
 ```powershell
@@ -65,6 +67,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Build.ps1 -Reconfigure
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\Build-Legacy.ps1 -Reconfigure
 ```
+
+### Release build with auto-incremented DLL file version
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Invoke-ReleaseBuild.ps1
+```
+
+This script increments the last component in `version.txt` by `1`, forces a reconfigure, and then builds the Release DLL. For example, `1.0.0.7` becomes `1.0.0.8`.
 
 ### Common options
 

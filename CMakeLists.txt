@@ -10,6 +10,27 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+set(DECOMP_VERSION_FILE "${CMAKE_CURRENT_SOURCE_DIR}/version.txt")
+if (NOT EXISTS "${DECOMP_VERSION_FILE}")
+    message(FATAL_ERROR "Missing version file: ${DECOMP_VERSION_FILE}")
+endif()
+
+file(READ "${DECOMP_VERSION_FILE}" DECOMP_FILE_VERSION_RAW)
+string(STRIP "${DECOMP_FILE_VERSION_RAW}" DECOMP_FILE_VERSION)
+
+if (NOT DECOMP_FILE_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "version.txt must contain a four-part numeric version such as 1.0.0.0")
+endif()
+
+string(REPLACE "." "," DECOMP_FILE_VERSION_COMMAS "${DECOMP_FILE_VERSION}")
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(DECOMP_VERSION_RESOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/decomp_version.rc")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/extension/version.rc.in"
+    "${DECOMP_VERSION_RESOURCE}"
+    @ONLY
+)
+
 set(DEBUGGERS_ROOT "" CACHE PATH "Root directory of Debugging Tools for Windows x64")
 set(DBGENG_INCLUDE_DIR "" CACHE PATH "Explicit directory containing dbgeng.h")
 set(DBGENG_LIBRARY "" CACHE FILEPATH "Explicit path to dbgeng.lib")
@@ -147,6 +168,7 @@ add_library(
     src/extension/extension.cpp
     src/extension/llm_client.cpp
     src/extension/decomp.def
+    ${DECOMP_VERSION_RESOURCE}
 )
 
 target_include_directories(
