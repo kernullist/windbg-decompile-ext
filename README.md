@@ -1,4 +1,4 @@
-# WindbgLlmDecomp
+# Windbg Decompile Extension via LLM
 
 ![screenshot](demo/screenshot.png)
 
