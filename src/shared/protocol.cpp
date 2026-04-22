@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include "decomp/pseudo_tokens.h"
 #include "decomp/string_utils.h"
 
 namespace decomp
@@ -113,6 +114,14 @@ JsonValue ToJson(const MemoryAccess& access)
     JsonValue object = JsonValue::MakeObject();
     object.Set("site", JsonValue::MakeString(HexU64(access.Site)));
     object.Set("access", JsonValue::MakeString(access.Access));
+    object.Set("kind", JsonValue::MakeString(access.Kind));
+    object.Set("size", JsonValue::MakeString(access.Size));
+    object.Set("width_bits", JsonValue::MakeNumber(static_cast<double>(access.WidthBits)));
+    object.Set("base_register", JsonValue::MakeString(access.BaseRegister));
+    object.Set("index_register", JsonValue::MakeString(access.IndexRegister));
+    object.Set("scale", JsonValue::MakeNumber(static_cast<double>(access.Scale)));
+    object.Set("displacement", JsonValue::MakeString(access.Displacement));
+    object.Set("rip_relative", JsonValue::MakeBoolean(access.RipRelative));
     return object;
 }
 
@@ -122,6 +131,14 @@ JsonValue ToJson(const TypedNameConfidence& value)
     object.Set("name", JsonValue::MakeString(value.Name));
     object.Set("type", JsonValue::MakeString(value.Type));
     object.Set("confidence", JsonValue::MakeNumber(value.Confidence));
+    return object;
+}
+
+JsonValue ToJson(const PseudoCodeToken& token)
+{
+    JsonValue object = JsonValue::MakeObject();
+    object.Set("kind", JsonValue::MakeString(token.Kind));
+    object.Set("text", JsonValue::MakeString(token.Text));
     return object;
 }
 
@@ -308,6 +325,13 @@ bool ParseTypedNameConfidence(const JsonValue& object, TypedNameConfidence& valu
     return true;
 }
 
+bool ParsePseudoCodeToken(const JsonValue& object, PseudoCodeToken& token)
+{
+    TryGetString(object, "kind", token.Kind);
+    TryGetString(object, "text", token.Text);
+    return true;
+}
+
 bool ParseEvidenceItem(const JsonValue& object, EvidenceItem& evidence)
 {
     TryGetString(object, "claim", evidence.Claim);
@@ -415,6 +439,8 @@ JsonValue ToJson(const AnalyzeRequest& request)
     object.Set("arch", JsonValue::MakeString(request.Facts.Arch));
     object.Set("session", JsonValue::MakeString(SessionKindToString(request.Facts.Session)));
     object.Set("mode", JsonValue::MakeString(AnalysisModeToString(request.Facts.Mode)));
+    object.Set("preferred_natural_language_tag", JsonValue::MakeString(request.Facts.PreferredNaturalLanguageTag));
+    object.Set("preferred_natural_language_name", JsonValue::MakeString(request.Facts.PreferredNaturalLanguageName));
     object.Set("query_text", JsonValue::MakeString(request.Facts.QueryText));
     object.Set("module", ToJson(request.Facts.Module));
     object.Set("query_address", JsonValue::MakeString(HexU64(request.Facts.QueryAddress)));
@@ -442,6 +468,7 @@ JsonValue ToJson(const AnalyzeResponse& response)
     JsonValue object = JsonValue::MakeObject();
     JsonValue params = JsonValue::MakeArray();
     JsonValue locals = JsonValue::MakeArray();
+    JsonValue pseudoCTokens = JsonValue::MakeArray();
     JsonValue uncertainties = JsonValue::MakeArray();
     JsonValue evidence = JsonValue::MakeArray();
 
@@ -453,6 +480,11 @@ JsonValue ToJson(const AnalyzeResponse& response)
     for (const auto& item : response.Locals)
     {
         locals.PushBack(ToJson(item));
+    }
+
+    for (const auto& item : response.PseudoCTokens)
+    {
+        pseudoCTokens.PushBack(ToJson(item));
     }
 
     for (const auto& item : response.Uncertainties)
@@ -467,6 +499,7 @@ JsonValue ToJson(const AnalyzeResponse& response)
 
     object.Set("status", JsonValue::MakeString(response.Status));
     object.Set("pseudo_c", JsonValue::MakeString(response.PseudoC));
+    object.Set("pseudo_c_tokens", pseudoCTokens);
     object.Set("summary", JsonValue::MakeString(response.Summary));
     object.Set("params", params);
     object.Set("locals", locals);
@@ -510,6 +543,8 @@ bool ParseAnalyzeRequest(const std::string& text, AnalyzeRequest& request, std::
     std::string mode;
     TryGetString(object, "session", session);
     TryGetString(object, "mode", mode);
+    TryGetString(object, "preferred_natural_language_tag", request.Facts.PreferredNaturalLanguageTag);
+    TryGetString(object, "preferred_natural_language_name", request.Facts.PreferredNaturalLanguageName);
     request.Facts.Session = ParseSessionKind(session);
     request.Facts.Mode = ParseAnalysisMode(mode);
     TryGetString(object, "query_text", request.Facts.QueryText);
@@ -725,6 +760,14 @@ bool ParseAnalyzeRequest(const std::string& text, AnalyzeRequest& request, std::
             MemoryAccess access;
             TryGetU64(item, "site", access.Site);
             TryGetString(item, "access", access.Access);
+            TryGetString(item, "kind", access.Kind);
+            TryGetString(item, "size", access.Size);
+            TryGetU32(item, "width_bits", access.WidthBits);
+            TryGetString(item, "base_register", access.BaseRegister);
+            TryGetString(item, "index_register", access.IndexRegister);
+            TryGetU32(item, "scale", access.Scale);
+            TryGetString(item, "displacement", access.Displacement);
+            TryGetBool(item, "rip_relative", access.RipRelative);
             request.Facts.MemoryAccesses.push_back(access);
         }
     }
@@ -811,6 +854,23 @@ bool ParseAnalyzeResponse(const std::string& text, AnalyzeResponse& response, st
         }
     }
 
+    const JsonValue* pseudoCTokens = object.Find("pseudo_c_tokens");
+
+    if (pseudoCTokens != nullptr && pseudoCTokens->IsArray())
+    {
+        for (const auto& item : pseudoCTokens->GetArray())
+        {
+            if (!item.IsObject())
+            {
+                continue;
+            }
+
+            PseudoCodeToken token;
+            ParsePseudoCodeToken(item, token);
+            response.PseudoCTokens.push_back(token);
+        }
+    }
+
     const JsonValue* uncertainties = object.Find("uncertainties");
 
     if (uncertainties != nullptr && uncertainties->IsArray())
@@ -848,6 +908,7 @@ bool ParseAnalyzeResponse(const std::string& text, AnalyzeResponse& response, st
         ParseVerifyReport(*verifier, response.Verifier);
     }
 
+    EnsurePseudoCodeTokens(response);
     return true;
 }
 }

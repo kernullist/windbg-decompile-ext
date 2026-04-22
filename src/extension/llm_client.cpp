@@ -18,6 +18,7 @@
 
 #include "decomp/json.h"
 #include "decomp/llm_client.h"
+#include "decomp/pseudo_tokens.h"
 #include "decomp/protocol.h"
 #include "decomp/string_utils.h"
 
@@ -311,6 +312,32 @@ bool TryReadFirstStringMember(
     return true;
 }
 
+const JsonValue* FindFirstObjectMember(
+    const JsonValue& root,
+    const std::vector<const char*>& names,
+    std::string& error)
+{
+    for (const char* name : names)
+    {
+        const JsonValue* member = root.Find(name);
+
+        if (member == nullptr)
+        {
+            continue;
+        }
+
+        if (!member->IsObject())
+        {
+            error = std::string("config field '") + name + "' must be an object";
+            return nullptr;
+        }
+
+        return member;
+    }
+
+    return nullptr;
+}
+
 bool TryParseBooleanString(
     const std::string& text,
     bool& value)
@@ -513,6 +540,8 @@ bool TryLoadConfigFile(LlmClientConfig& config, std::string& error)
         uint32_t chunkCountLimitValue = config.ChunkCountLimit;
         uint32_t chunkCompletionTokensValue = config.ChunkCompletionTokens;
         uint32_t mergeCompletionTokensValue = config.MergeCompletionTokens;
+        DisplayLanguageConfig displayLanguageValue = config.DisplayLanguage;
+        PseudoCodeHighlightConfig highlightValue = config.Highlight;
 
         if (!TryReadFirstStringMember(parsed.Value, { "endpoint", "url" }, endpointValue, error))
         {
@@ -579,6 +608,69 @@ bool TryLoadConfigFile(LlmClientConfig& config, std::string& error)
             break;
         }
 
+        const JsonValue* displayLanguage = FindFirstObjectMember(parsed.Value, { "display_language", "displayLanguage" }, error);
+
+        if (!error.empty())
+        {
+            break;
+        }
+
+        if (displayLanguage != nullptr)
+        {
+            if (!TryReadFirstStringMember(*displayLanguage, { "mode" }, displayLanguageValue.Mode, error)
+                || !TryReadFirstStringMember(*displayLanguage, { "tag", "locale", "locale_tag", "localeTag" }, displayLanguageValue.Tag, error)
+                || !TryReadFirstStringMember(*displayLanguage, { "name", "language", "language_name", "languageName" }, displayLanguageValue.Name, error))
+            {
+                break;
+            }
+
+            displayLanguageValue.Mode = ToLowerAscii(TrimCopy(displayLanguageValue.Mode));
+
+            if (displayLanguageValue.Mode.empty())
+            {
+                displayLanguageValue.Mode = "auto";
+            }
+
+            if (displayLanguageValue.Mode != "auto" && displayLanguageValue.Mode != "fixed")
+            {
+                error = "config field 'display_language.mode' must be 'auto' or 'fixed'";
+                break;
+            }
+
+            if (displayLanguageValue.Mode == "fixed"
+                && TrimCopy(displayLanguageValue.Tag).empty()
+                && TrimCopy(displayLanguageValue.Name).empty())
+            {
+                error = "config field 'display_language' requires 'tag' or 'name' when mode is 'fixed'";
+                break;
+            }
+        }
+
+        const JsonValue* syntaxHighlighting = FindFirstObjectMember(parsed.Value, { "syntax_highlighting", "syntaxHighlighting" }, error);
+
+        if (!error.empty())
+        {
+            break;
+        }
+
+        if (syntaxHighlighting != nullptr)
+        {
+            if (!TryReadFirstStringMember(*syntaxHighlighting, { "keyword_color", "keywordColor" }, highlightValue.KeywordColor, error)
+                || !TryReadFirstStringMember(*syntaxHighlighting, { "type_color", "typeColor" }, highlightValue.TypeColor, error)
+                || !TryReadFirstStringMember(*syntaxHighlighting, { "function_name_color", "functionNameColor" }, highlightValue.FunctionNameColor, error)
+                || !TryReadFirstStringMember(*syntaxHighlighting, { "identifier_color", "identifierColor" }, highlightValue.IdentifierColor, error)
+                || !TryReadFirstStringMember(*syntaxHighlighting, { "number_color", "numberColor" }, highlightValue.NumberColor, error)
+                || !TryReadFirstStringMember(*syntaxHighlighting, { "string_color", "stringColor" }, highlightValue.StringColor, error)
+                || !TryReadFirstStringMember(*syntaxHighlighting, { "char_color", "charColor" }, highlightValue.CharColor, error)
+                || !TryReadFirstStringMember(*syntaxHighlighting, { "comment_color", "commentColor" }, highlightValue.CommentColor, error)
+                || !TryReadFirstStringMember(*syntaxHighlighting, { "preprocessor_color", "preprocessorColor" }, highlightValue.PreprocessorColor, error)
+                || !TryReadFirstStringMember(*syntaxHighlighting, { "operator_color", "operatorColor" }, highlightValue.OperatorColor, error)
+                || !TryReadFirstStringMember(*syntaxHighlighting, { "punctuation_color", "punctuationColor" }, highlightValue.PunctuationColor, error))
+            {
+                break;
+            }
+        }
+
         if (!endpointValue.empty())
         {
             config.Endpoint = endpointValue;
@@ -603,6 +695,8 @@ bool TryLoadConfigFile(LlmClientConfig& config, std::string& error)
         config.ChunkCountLimit = chunkCountLimitValue;
         config.ChunkCompletionTokens = chunkCompletionTokensValue;
         config.MergeCompletionTokens = mergeCompletionTokensValue;
+        config.DisplayLanguage = displayLanguageValue;
+        config.Highlight = highlightValue;
 
         if (config.ApiKey.empty() && !apiKeyEnvironmentName.empty())
         {
@@ -1402,6 +1496,14 @@ JsonValue BuildMemoryAccessesJson(const AnalyzeRequest& request, bool* truncated
         JsonValue item = JsonValue::MakeObject();
         item.Set("site", JsonValue::MakeString(HexU64(access.Site)));
         item.Set("access", JsonValue::MakeString(access.Access));
+        item.Set("kind", JsonValue::MakeString(access.Kind));
+        item.Set("size", JsonValue::MakeString(access.Size));
+        item.Set("width_bits", JsonValue::MakeNumber(static_cast<double>(access.WidthBits)));
+        item.Set("base_register", JsonValue::MakeString(access.BaseRegister));
+        item.Set("index_register", JsonValue::MakeString(access.IndexRegister));
+        item.Set("scale", JsonValue::MakeNumber(static_cast<double>(access.Scale)));
+        item.Set("displacement", JsonValue::MakeString(access.Displacement));
+        item.Set("rip_relative", JsonValue::MakeBoolean(access.RipRelative));
         const DisassembledInstruction* instruction = FindInstructionByAddress(request, access.Site);
         item.Set("instruction", JsonValue::MakeString(instruction != nullptr ? BuildInstructionPreview(*instruction) : std::string()));
         array.PushBack(item);
@@ -1428,6 +1530,7 @@ JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
 {
     JsonValue root = JsonValue::MakeObject();
     JsonValue module = JsonValue::MakeObject();
+    JsonValue naturalLanguage = JsonValue::MakeObject();
     JsonValue stackFrame = JsonValue::MakeObject();
     JsonValue truncation = JsonValue::MakeObject();
     JsonValue selection = JsonValue::MakeObject();
@@ -1446,6 +1549,9 @@ JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
     module.Set("size", JsonValue::MakeNumber(static_cast<double>(request.Facts.Module.Size)));
     module.Set("symbol_type", JsonValue::MakeNumber(static_cast<double>(request.Facts.Module.SymbolType)));
 
+    naturalLanguage.Set("tag", JsonValue::MakeString(request.Facts.PreferredNaturalLanguageTag));
+    naturalLanguage.Set("name", JsonValue::MakeString(request.Facts.PreferredNaturalLanguageName));
+
     stackFrame.Set("stack_alloc", JsonValue::MakeNumber(static_cast<double>(request.Facts.StackFrame.StackAlloc)));
     stackFrame.Set("saved_nonvolatile", BuildStringArray(request.Facts.StackFrame.SavedNonvolatile, 8, nullptr));
     stackFrame.Set("uses_cookie", JsonValue::MakeBoolean(request.Facts.StackFrame.UsesCookie));
@@ -1461,6 +1567,7 @@ JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
     root.Set("query_address", JsonValue::MakeString(HexU64(request.Facts.QueryAddress)));
     root.Set("entry_address", JsonValue::MakeString(HexU64(request.Facts.EntryAddress)));
     root.Set("rva", JsonValue::MakeString(HexU64(request.Facts.Rva)));
+    root.Set("natural_language", naturalLanguage);
     root.Set("calling_convention", JsonValue::MakeString(request.Facts.CallingConvention));
     root.Set("module", module);
     root.Set("regions", BuildRegionsJson(request, &regionsTruncated));
@@ -1505,7 +1612,7 @@ struct ChunkPlan
 struct ChunkAnalysis
 {
     std::string ChunkId;
-    std::string SummaryKo;
+    std::string SummaryLocalized;
     std::vector<std::string> PseudoSteps;
     std::vector<std::string> StateUpdates;
     std::vector<std::string> ObservedCalls;
@@ -1519,6 +1626,26 @@ constexpr size_t kChunkOverlapBlocks = 2;
 constexpr size_t kChunkPromptFactLimit = 16;
 constexpr size_t kChunkPromptUncertaintyLimit = 8;
 
+std::string DescribePreferredNaturalLanguage(const AnalyzeRequest& request)
+{
+    if (!request.Facts.PreferredNaturalLanguageName.empty() && !request.Facts.PreferredNaturalLanguageTag.empty())
+    {
+        return request.Facts.PreferredNaturalLanguageName + " (" + request.Facts.PreferredNaturalLanguageTag + ")";
+    }
+
+    if (!request.Facts.PreferredNaturalLanguageName.empty())
+    {
+        return request.Facts.PreferredNaturalLanguageName;
+    }
+
+    if (!request.Facts.PreferredNaturalLanguageTag.empty())
+    {
+        return request.Facts.PreferredNaturalLanguageTag;
+    }
+
+    return "English (en-US)";
+}
+
 std::vector<ChunkPlan> BuildChunkPlans(
     const AnalyzeRequest& request,
     const LlmClientConfig& config)
@@ -1531,28 +1658,22 @@ std::vector<ChunkPlan> BuildChunkPlans(
         return plans;
     }
 
-    const size_t blocksPerChunk = (std::max)(static_cast<size_t>(4), static_cast<size_t>(config.ChunkBlockLimit));
+    const size_t minimumBlocksPerChunk = (std::max)(static_cast<size_t>(4), static_cast<size_t>(config.ChunkBlockLimit));
     const size_t maxChunkCount = (std::max)(static_cast<size_t>(1), static_cast<size_t>(config.ChunkCountLimit));
-    const size_t slotCount = (totalBlocks + blocksPerChunk - 1) / blocksPerChunk;
-    std::vector<size_t> selectedSlots;
+    size_t blocksPerChunk = minimumBlocksPerChunk;
 
-    if (slotCount <= maxChunkCount)
+    if ((totalBlocks + blocksPerChunk - 1) / blocksPerChunk > maxChunkCount)
     {
-        for (size_t slot = 0; slot < slotCount; ++slot)
-        {
-            selectedSlots.push_back(slot);
-        }
+        blocksPerChunk = (totalBlocks + maxChunkCount - 1) / maxChunkCount;
     }
-    else
-    {
-        selectedSlots = SelectSpreadIndices(slotCount, maxChunkCount);
-    }
+
+    const size_t slotCount = (totalBlocks + blocksPerChunk - 1) / blocksPerChunk;
 
     std::set<std::string> seenRanges;
 
-    for (size_t localIndex = 0; localIndex < selectedSlots.size(); ++localIndex)
+    for (size_t localIndex = 0; localIndex < slotCount; ++localIndex)
     {
-        const size_t slot = selectedSlots[localIndex];
+        const size_t slot = localIndex;
         size_t startBlock = slot * blocksPerChunk;
 
         if (startBlock > kChunkOverlapBlocks)
@@ -1586,7 +1707,7 @@ std::vector<ChunkPlan> BuildChunkPlans(
         ChunkPlan plan;
         plan.Id = "chunk_" + std::to_string(localIndex);
         plan.SlotIndex = localIndex;
-        plan.TotalChunks = selectedSlots.size();
+        plan.TotalChunks = slotCount;
 
         for (size_t blockIndex = startBlock; blockIndex < endBlock; ++blockIndex)
         {
@@ -1968,6 +2089,14 @@ JsonValue BuildMemoryAccessesJsonForAddresses(
         JsonValue item = JsonValue::MakeObject();
         item.Set("site", JsonValue::MakeString(HexU64(access.Site)));
         item.Set("access", JsonValue::MakeString(access.Access));
+        item.Set("kind", JsonValue::MakeString(access.Kind));
+        item.Set("size", JsonValue::MakeString(access.Size));
+        item.Set("width_bits", JsonValue::MakeNumber(static_cast<double>(access.WidthBits)));
+        item.Set("base_register", JsonValue::MakeString(access.BaseRegister));
+        item.Set("index_register", JsonValue::MakeString(access.IndexRegister));
+        item.Set("scale", JsonValue::MakeNumber(static_cast<double>(access.Scale)));
+        item.Set("displacement", JsonValue::MakeString(access.Displacement));
+        item.Set("rip_relative", JsonValue::MakeBoolean(access.RipRelative));
         const DisassembledInstruction* instruction = FindInstructionByAddress(request, access.Site);
         item.Set("instruction", JsonValue::MakeString(instruction != nullptr ? BuildInstructionPreview(*instruction) : std::string()));
         array.PushBack(item);
@@ -1983,6 +2112,7 @@ JsonValue BuildChunkFactsJson(
     JsonValue root = JsonValue::MakeObject();
     JsonValue functionOverview = JsonValue::MakeObject();
     JsonValue module = JsonValue::MakeObject();
+    JsonValue naturalLanguage = JsonValue::MakeObject();
     JsonValue stackFrame = JsonValue::MakeObject();
     JsonValue chunk = JsonValue::MakeObject();
     JsonValue truncation = JsonValue::MakeObject();
@@ -2007,6 +2137,9 @@ JsonValue BuildChunkFactsJson(
     module.Set("base", JsonValue::MakeString(HexU64(request.Facts.Module.Base)));
     module.Set("size", JsonValue::MakeNumber(static_cast<double>(request.Facts.Module.Size)));
 
+    naturalLanguage.Set("tag", JsonValue::MakeString(request.Facts.PreferredNaturalLanguageTag));
+    naturalLanguage.Set("name", JsonValue::MakeString(request.Facts.PreferredNaturalLanguageName));
+
     stackFrame.Set("stack_alloc", JsonValue::MakeNumber(static_cast<double>(request.Facts.StackFrame.StackAlloc)));
     stackFrame.Set("saved_nonvolatile", BuildStringArray(request.Facts.StackFrame.SavedNonvolatile, 8, nullptr));
     stackFrame.Set("uses_cookie", JsonValue::MakeBoolean(request.Facts.StackFrame.UsesCookie));
@@ -2014,6 +2147,7 @@ JsonValue BuildChunkFactsJson(
 
     functionOverview.Set("query_text", JsonValue::MakeString(request.Facts.QueryText));
     functionOverview.Set("entry_address", JsonValue::MakeString(HexU64(request.Facts.EntryAddress)));
+    functionOverview.Set("natural_language", naturalLanguage);
     functionOverview.Set("calling_convention", JsonValue::MakeString(request.Facts.CallingConvention));
     functionOverview.Set("live_bytes_differ_from_image", JsonValue::MakeBoolean(request.Facts.LiveBytesDifferFromImage));
     functionOverview.Set("counts", BuildCountsJson(request));
@@ -2295,13 +2429,19 @@ bool ParseChunkAnalysis(
         return false;
     }
 
-    if (!TryGetOptionalString(root, "summary_ko", analysis.SummaryKo))
+    if (!TryGetOptionalString(root, "summary_localized", analysis.SummaryLocalized))
+    {
+        error = "summary_localized must be a string";
+        return false;
+    }
+
+    if (analysis.SummaryLocalized.empty() && !TryGetOptionalString(root, "summary_ko", analysis.SummaryLocalized))
     {
         error = "summary_ko must be a string";
         return false;
     }
 
-    if (analysis.SummaryKo.empty() && !TryGetOptionalString(root, "summary", analysis.SummaryKo))
+    if (analysis.SummaryLocalized.empty() && !TryGetOptionalString(root, "summary", analysis.SummaryLocalized))
     {
         error = "summary must be a string";
         return false;
@@ -2349,9 +2489,9 @@ bool ParseChunkAnalysis(
         return false;
     }
 
-    if (analysis.SummaryKo.empty())
+    if (analysis.SummaryLocalized.empty())
     {
-        error = "chunk response is missing summary_ko";
+        error = "chunk response is missing summary_localized";
         return false;
     }
 
@@ -2367,7 +2507,7 @@ JsonValue BuildChunkSummariesJson(
     {
         JsonValue item = JsonValue::MakeObject();
         item.Set("chunk_id", JsonValue::MakeString(analysis.ChunkId));
-        item.Set("summary_ko", JsonValue::MakeString(analysis.SummaryKo));
+        item.Set("summary_localized", JsonValue::MakeString(analysis.SummaryLocalized));
         item.Set("pseudo_steps", BuildStringArray(analysis.PseudoSteps, 32, nullptr));
         item.Set("state_updates", BuildStringArray(analysis.StateUpdates, 32, nullptr));
         item.Set("observed_calls", BuildStringArray(analysis.ObservedCalls, 24, nullptr));
@@ -2399,6 +2539,7 @@ JsonValue BuildMergeFactsJson(
 {
     JsonValue root = JsonValue::MakeObject();
     JsonValue module = JsonValue::MakeObject();
+    JsonValue naturalLanguage = JsonValue::MakeObject();
     JsonValue stackFrame = JsonValue::MakeObject();
     JsonValue chunking = JsonValue::MakeObject();
     bool regionsTruncated = false;
@@ -2411,6 +2552,9 @@ JsonValue BuildMergeFactsJson(
     module.Set("image_name", JsonValue::MakeString(request.Facts.Module.ImageName));
     module.Set("base", JsonValue::MakeString(HexU64(request.Facts.Module.Base)));
     module.Set("size", JsonValue::MakeNumber(static_cast<double>(request.Facts.Module.Size)));
+
+    naturalLanguage.Set("tag", JsonValue::MakeString(request.Facts.PreferredNaturalLanguageTag));
+    naturalLanguage.Set("name", JsonValue::MakeString(request.Facts.PreferredNaturalLanguageName));
 
     stackFrame.Set("stack_alloc", JsonValue::MakeNumber(static_cast<double>(request.Facts.StackFrame.StackAlloc)));
     stackFrame.Set("saved_nonvolatile", BuildStringArray(request.Facts.StackFrame.SavedNonvolatile, 8, nullptr));
@@ -2434,6 +2578,7 @@ JsonValue BuildMergeFactsJson(
     root.Set("query_address", JsonValue::MakeString(HexU64(request.Facts.QueryAddress)));
     root.Set("entry_address", JsonValue::MakeString(HexU64(request.Facts.EntryAddress)));
     root.Set("rva", JsonValue::MakeString(HexU64(request.Facts.Rva)));
+    root.Set("natural_language", naturalLanguage);
     root.Set("calling_convention", JsonValue::MakeString(request.Facts.CallingConvention));
     root.Set("module", module);
     root.Set("stack_frame", stackFrame);
@@ -2457,12 +2602,12 @@ JsonValue BuildMergeFactsJson(
 
     return root;
 }
-std::string BuildChunkSystemPrompt()
+std::string BuildChunkSystemPrompt(const AnalyzeRequest& request)
 {
     return
         "You are a reverse-engineering assistant analyzing one high-coverage chunk of a larger x64 function. "
-        "Return only a JSON object with these keys: chunk_id, summary_ko, pseudo_steps, state_updates, observed_calls, observed_memory, uncertainties, evidence, confidence. "
-        "Write summary_ko and uncertainties in Korean. "
+        "Return only a JSON object with these keys: chunk_id, summary_localized, pseudo_steps, state_updates, observed_calls, observed_memory, uncertainties, evidence, confidence. "
+        "Write summary_localized and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_steps, state_updates, observed_calls, observed_memory, identifiers, and API names in English or C-style. "
         "Do not invent external call targets that are not present in the input. "
         "Prefer explicit memory reads, writes, compares, branches, and state transitions over vague summaries. "
@@ -2484,7 +2629,9 @@ std::string BuildChunkUserPrompt(
     prompt += SerializeJson(BuildChunkFactsJson(request, plan), false);
     prompt += "\n\nRules:\n";
     prompt += "1. Keep the output machine-readable JSON only.\n";
-    prompt += "2. Write summary_ko and uncertainties in Korean.\n";
+    prompt += "2. Write summary_localized and uncertainties in the configured display language: ";
+    prompt += DescribePreferredNaturalLanguage(request);
+    prompt += ".\n";
     prompt += "3. Keep pseudo_steps and state_updates concrete and operation-focused.\n";
     prompt += "4. Preserve visible reads, writes, comparisons, and branches instead of replacing them with generic comments.\n";
     prompt += "5. If the chunk is partial, say what is missing, but still describe the concrete work visible in this chunk.\n";
@@ -2493,12 +2640,12 @@ std::string BuildChunkUserPrompt(
     return prompt;
 }
 
-std::string BuildMergeSystemPrompt()
+std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
 {
     return
         "You are a reverse-engineering assistant combining multiple high-coverage chunk analyses for one x64 function. "
         "Return only a JSON object with these keys: status, pseudo_c, summary, params, locals, uncertainties, evidence, confidence. "
-        "Write summary and uncertainties in Korean. "
+        "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style. "
         "Use the chunk summaries to produce a fuller function-level pseudocode than a single-pass summary. "
         "Prefer reconstructing concrete reads, writes, branches, and helper interactions when the chunk evidence supports them. "
@@ -2519,7 +2666,9 @@ std::string BuildMergeUserPrompt(
     prompt += SerializeJson(BuildMergeFactsJson(request, chunkPlans, chunkAnalyses), false);
     prompt += "\n\nRules:\n";
     prompt += "1. Keep the output machine-readable JSON only.\n";
-    prompt += "2. Write summary and uncertainties in Korean.\n";
+    prompt += "2. Write summary and uncertainties in the configured display language: ";
+    prompt += DescribePreferredNaturalLanguage(request);
+    prompt += ".\n";
     prompt += "3. Build a richer pseudo_c than a short high-level summary; use the chunk evidence to cover the main body.\n";
     prompt += "4. Preserve unknowns with UNKNOWN_TYPE instead of omitting entire regions of logic.\n";
     prompt += "5. If chunks disagree or coverage remains partial, explain that in uncertainties, but still keep the visible operations explicit.\n";
@@ -2529,14 +2678,14 @@ std::string BuildMergeUserPrompt(
 }
 
 
-std::string BuildSystemPrompt()
+std::string BuildSystemPrompt(const AnalyzeRequest& request)
 {
     return
         "You are a reverse-engineering assistant. "
         "Return only a JSON object with these keys: status, pseudo_c, summary, params, locals, uncertainties, evidence, confidence. "
         "Do not invent external call targets that are not present in the input. "
         "Use UNKNOWN_TYPE for uncertain types. "
-        "Write summary and uncertainties in Korean. "
+        "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style as appropriate. "
         "Use evidence.blocks values that reference only valid basic block ids from the input. "
         "Blocks are a representative selection, not necessarily the first contiguous blocks in the function. "
@@ -2555,8 +2704,10 @@ std::string BuildUserPrompt(const AnalyzeRequest& request)
     prompt += "\n\nRules:\n";
     prompt += "1. Keep the output machine-readable JSON only.\n";
     prompt += "2. Do not invent function names or imported APIs.\n";
-    prompt += "3. Write summary and uncertainties in Korean.\n";
-    prompt += "4. Do not translate symbol names, API names, or code identifiers unless needed inside Korean prose.\n";
+    prompt += "3. Write summary and uncertainties in the configured display language: ";
+    prompt += DescribePreferredNaturalLanguage(request);
+    prompt += ".\n";
+    prompt += "4. Do not translate symbol names, API names, or code identifiers unless needed inside localized prose.\n";
     prompt += "5. evidence.blocks must reference existing basic block ids.\n";
     prompt += "6. Treat blocks as representative high-signal samples, not as the only reachable blocks in order.\n";
     prompt += "7. Use instruction_window_head, instruction_window_middle, and instruction_window_tail to infer prologue, body, and late-path behavior.\n";
@@ -2864,6 +3015,7 @@ AnalyzeResponse BuildMockResponse(const AnalyzeRequest& request)
         response.Evidence.push_back(evidence);
     }
 
+    EnsurePseudoCodeTokens(response);
     response.RawModelJson = SerializeAnalyzeResponse(response, true);
     return response;
 }
@@ -2871,7 +3023,8 @@ AnalyzeResponse BuildMockResponse(const AnalyzeRequest& request)
 
 bool LoadLlmClientConfig(
     LlmClientConfig& config,
-    std::string& error)
+    std::string& error,
+    bool validateProviderSettings)
 {
     bool success = false;
 
@@ -2884,7 +3037,7 @@ bool LoadLlmClientConfig(
 
         ApplyEnvironmentOverrides(config);
 
-        if (!config.Endpoint.empty() && config.ApiKey.empty() && ContainsInsensitive(config.Endpoint, "api.openai.com"))
+        if (validateProviderSettings && !config.Endpoint.empty() && config.ApiKey.empty() && ContainsInsensitive(config.Endpoint, "api.openai.com"))
         {
             error = "api key is empty; set api_key or api_key_env in " + BuildDefaultConfigPath() + ", or set DECOMP_LLM_API_KEY/OPENAI_API_KEY";
             break;
@@ -3050,12 +3203,12 @@ bool AnalyzeWithSinglePassLlm(
 {
     std::string modelJson;
 
-    if (!SubmitChatJsonWithRetry(
-            config,
-            BuildSystemPrompt(),
-            BuildUserPrompt(request),
-            config.MaxCompletionTokens,
-            (std::max)(static_cast<uint32_t>(4000), config.MaxCompletionTokens),
+        if (!SubmitChatJsonWithRetry(
+                config,
+                BuildSystemPrompt(request),
+                BuildUserPrompt(request),
+                config.MaxCompletionTokens,
+                (std::max)(static_cast<uint32_t>(4000), config.MaxCompletionTokens),
             modelJson,
             error))
     {
@@ -3099,7 +3252,7 @@ bool AnalyzeWithChunkedLlm(
 
         if (!SubmitChatJsonWithRetry(
                 config,
-                BuildChunkSystemPrompt(),
+                BuildChunkSystemPrompt(request),
                 BuildChunkUserPrompt(request, plan),
                 config.ChunkCompletionTokens,
                 (std::max)(static_cast<uint32_t>(4500), config.ChunkCompletionTokens),
@@ -3132,7 +3285,7 @@ bool AnalyzeWithChunkedLlm(
 
     if (!SubmitChatJsonWithRetry(
             config,
-            BuildMergeSystemPrompt(),
+            BuildMergeSystemPrompt(request),
             BuildMergeUserPrompt(request, chunkPlans, chunkAnalyses),
             config.MergeCompletionTokens,
             (std::max)(static_cast<uint32_t>(9000), config.MergeCompletionTokens),

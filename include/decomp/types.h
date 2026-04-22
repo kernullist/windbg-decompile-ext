@@ -27,7 +27,6 @@ struct DecompOptions
     bool DisableLlm = false;
     uint32_t TimeoutMs = 5000;
     uint32_t MaxInstructions = 4096;
-    
 };
 
 struct FunctionRegion
@@ -100,6 +99,14 @@ struct MemoryAccess
 {
     uint64_t Site = 0;
     std::string Access;
+    std::string Kind;
+    std::string Size;
+    uint32_t WidthBits = 0;
+    std::string BaseRegister;
+    std::string IndexRegister;
+    uint32_t Scale = 0;
+    std::string Displacement;
+    bool RipRelative = false;
 };
 
 struct AnalysisFacts
@@ -107,6 +114,8 @@ struct AnalysisFacts
     std::string Arch = "x64";
     DebugSessionKind Session = DebugSessionKind::Unknown;
     AnalysisMode Mode = AnalysisMode::LiveMemory;
+    std::string PreferredNaturalLanguageTag = "en-US";
+    std::string PreferredNaturalLanguageName = "English";
     std::string QueryText;
     ModuleInfo Module;
     uint64_t QueryAddress = 0;
@@ -149,6 +158,12 @@ struct EvidenceItem
     std::vector<std::string> Blocks;
 };
 
+struct PseudoCodeToken
+{
+    std::string Kind;
+    std::string Text;
+};
+
 struct VerifyReport
 {
     bool SchemaOk = false;
@@ -162,6 +177,7 @@ struct AnalyzeResponse
 {
     std::string Status = "error";
     std::string PseudoC;
+    std::vector<PseudoCodeToken> PseudoCTokens;
     std::string Summary;
     std::vector<TypedNameConfidence> Params;
     std::vector<TypedNameConfidence> Locals;

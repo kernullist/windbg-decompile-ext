@@ -19,6 +19,7 @@
 
 #include "decomp/analyzer.h"
 #include "decomp/llm_client.h"
+#include "decomp/pseudo_tokens.h"
 #include "decomp/protocol.h"
 #include "decomp/string_utils.h"
 #include "decomp/verifier.h"
@@ -32,6 +33,7 @@ struct DebugApi
     ComPtr<IDebugClient> Client;
     ComPtr<IDebugControl> Control;
     ComPtr<IDebugControl4> Control4;
+    ComPtr<IDebugAdvanced2> Advanced2;
     ComPtr<IDebugSymbols3> Symbols;
     ComPtr<IDebugDataSpaces4> DataSpaces;
 };
@@ -53,6 +55,148 @@ std::wstring Utf8ToWide(const std::string& text)
     std::wstring wide(static_cast<size_t>(count), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), wide.data(), count);
     return wide;
+}
+
+std::string WideToUtf8(const std::wstring& text)
+{
+    if (text.empty())
+    {
+        return std::string();
+    }
+
+    const int count = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+
+    if (count <= 0)
+    {
+        return std::string();
+    }
+
+    std::string utf8(static_cast<size_t>(count), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), utf8.data(), count, nullptr, nullptr);
+    return utf8;
+}
+
+bool TryGetPreferredUiLocaleName(std::wstring& localeName)
+{
+    ULONG languageCount = 0;
+    ULONG bufferChars = 0;
+
+    if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &languageCount, nullptr, &bufferChars) != FALSE && bufferChars > 1)
+    {
+        std::wstring buffer(static_cast<size_t>(bufferChars), L'\0');
+
+        if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &languageCount, buffer.data(), &bufferChars) != FALSE)
+        {
+            localeName.assign(buffer.c_str());
+
+            if (!localeName.empty())
+            {
+                return true;
+            }
+        }
+    }
+
+    const LANGID uiLanguage = GetUserDefaultUILanguage();
+
+    if (uiLanguage != 0)
+    {
+        std::array<wchar_t, LOCALE_NAME_MAX_LENGTH> buffer = {};
+
+        if (LCIDToLocaleName(MAKELCID(uiLanguage, SORT_DEFAULT), buffer.data(), static_cast<int>(buffer.size()), 0) > 0)
+        {
+            localeName = buffer.data();
+            return !localeName.empty();
+        }
+    }
+
+    std::array<wchar_t, LOCALE_NAME_MAX_LENGTH> fallback = {};
+
+    if (GetUserDefaultLocaleName(fallback.data(), static_cast<int>(fallback.size())) > 0)
+    {
+        localeName = fallback.data();
+        return !localeName.empty();
+    }
+
+    return false;
+}
+
+std::string QueryLocaleInfoUtf8(const std::wstring& localeName, LCTYPE type)
+{
+    if (localeName.empty())
+    {
+        return std::string();
+    }
+
+    const int count = GetLocaleInfoEx(localeName.c_str(), type, nullptr, 0);
+
+    if (count <= 1)
+    {
+        return std::string();
+    }
+
+    std::wstring buffer(static_cast<size_t>(count), L'\0');
+
+    if (GetLocaleInfoEx(localeName.c_str(), type, buffer.data(), count) <= 0)
+    {
+        return std::string();
+    }
+
+    return WideToUtf8(buffer.c_str());
+}
+
+void ApplyPreferredNaturalLanguage(const decomp::LlmClientConfig& config, decomp::AnalysisFacts& facts)
+{
+    const std::string mode = decomp::ToLowerAscii(decomp::TrimCopy(config.DisplayLanguage.Mode));
+
+    if (mode == "fixed")
+    {
+        const std::string configuredTag = decomp::TrimCopy(config.DisplayLanguage.Tag);
+        std::string configuredName = decomp::TrimCopy(config.DisplayLanguage.Name);
+
+        facts.PreferredNaturalLanguageTag.clear();
+
+        if (!configuredTag.empty())
+        {
+            facts.PreferredNaturalLanguageTag = configuredTag;
+        }
+
+        if (configuredName.empty() && !configuredTag.empty())
+        {
+            configuredName = QueryLocaleInfoUtf8(Utf8ToWide(configuredTag), LOCALE_SENGLISHDISPLAYNAME);
+        }
+
+        if (!configuredName.empty())
+        {
+            facts.PreferredNaturalLanguageName = configuredName;
+        }
+        else if (!configuredTag.empty())
+        {
+            facts.PreferredNaturalLanguageName = configuredTag;
+        }
+
+        return;
+    }
+
+    std::wstring localeName;
+
+    if (!TryGetPreferredUiLocaleName(localeName))
+    {
+        return;
+    }
+
+    const std::string localeTag = WideToUtf8(localeName);
+
+    if (!localeTag.empty())
+    {
+        facts.PreferredNaturalLanguageTag = localeTag;
+    }
+
+    const std::string englishDisplayName = QueryLocaleInfoUtf8(localeName, LOCALE_SENGLISHDISPLAYNAME);
+
+    if (!englishDisplayName.empty())
+    {
+        facts.PreferredNaturalLanguageName = englishDisplayName;
+    }
 }
 
 void OutputLine(IDebugControl* control, IDebugControl4* control4, const char* format, ...)
@@ -80,6 +224,239 @@ void OutputLine(IDebugControl* control, IDebugControl4* control4, const char* fo
     }
 }
 
+void OutputTextRaw(IDebugControl* control, IDebugControl4* control4, const std::string& text)
+{
+    if (text.empty())
+    {
+        return;
+    }
+
+    if (control4 != nullptr)
+    {
+        const std::wstring wide = Utf8ToWide(text);
+
+        if (!wide.empty())
+        {
+            control4->OutputWide(DEBUG_OUTPUT_NORMAL, L"%s", wide.c_str());
+            return;
+        }
+    }
+
+    if (control != nullptr)
+    {
+        control->Output(DEBUG_OUTPUT_NORMAL, "%s", text.c_str());
+    }
+}
+
+bool AreOutputCallbacksDmlAware(IDebugAdvanced2* advanced2)
+{
+    return advanced2 != nullptr
+        && advanced2->Request(DEBUG_REQUEST_CURRENT_OUTPUT_CALLBACKS_ARE_DML_AWARE, nullptr, 0, nullptr, 0, nullptr) == S_OK;
+}
+
+void OutputDmlRaw(IDebugControl* control, IDebugControl4* control4, const std::string& text)
+{
+    if (text.empty())
+    {
+        return;
+    }
+
+    if (control4 != nullptr)
+    {
+        const std::wstring wide = Utf8ToWide(text);
+
+        if (!wide.empty())
+        {
+            control4->ControlledOutputWide(DEBUG_OUTCTL_AMBIENT_DML, DEBUG_OUTPUT_NORMAL, L"%s", wide.c_str());
+            return;
+        }
+    }
+
+    if (control != nullptr)
+    {
+        control->ControlledOutput(DEBUG_OUTCTL_AMBIENT_DML, DEBUG_OUTPUT_NORMAL, "%s", text.c_str());
+    }
+}
+
+std::string EscapeDmlText(const std::string& text)
+{
+    std::string escaped;
+    escaped.reserve(text.size() + 16);
+
+    for (const char ch : text)
+    {
+        switch (ch)
+        {
+        case '&':
+            escaped += "&amp;";
+            break;
+        case '<':
+            escaped += "&lt;";
+            break;
+        case '>':
+            escaped += "&gt;";
+            break;
+        case '"':
+            escaped += "&quot;";
+            break;
+        default:
+            escaped.push_back(ch);
+            break;
+        }
+    }
+
+    return escaped;
+}
+
+struct PseudoCodeTokenStyle
+{
+    std::string Foreground;
+    bool Bold = false;
+    bool Italic = false;
+    bool Underline = false;
+};
+
+PseudoCodeTokenStyle GetPseudoCodeTokenStyle(const std::string& kind, const decomp::PseudoCodeHighlightConfig& highlight)
+{
+    if (kind == "keyword")
+    {
+        return { highlight.KeywordColor, true, false, false };
+    }
+
+    if (kind == "type")
+    {
+        return { highlight.TypeColor, true, false, false };
+    }
+
+    if (kind == "function_name")
+    {
+        return { highlight.FunctionNameColor, false, false, true };
+    }
+
+    if (kind == "identifier")
+    {
+        return { highlight.IdentifierColor, false, false, false };
+    }
+
+    if (kind == "number")
+    {
+        return { highlight.NumberColor, false, false, false };
+    }
+
+    if (kind == "string")
+    {
+        return { highlight.StringColor, false, false, false };
+    }
+
+    if (kind == "char")
+    {
+        return { highlight.CharColor, false, false, false };
+    }
+
+    if (kind == "comment")
+    {
+        return { highlight.CommentColor, false, true, false };
+    }
+
+    if (kind == "preprocessor")
+    {
+        return { highlight.PreprocessorColor, true, false, false };
+    }
+
+    if (kind == "operator")
+    {
+        return { highlight.OperatorColor, false, false, false };
+    }
+
+    if (kind == "punctuation")
+    {
+        return { highlight.PunctuationColor, false, false, false };
+    }
+
+    return {};
+}
+
+void PrintPseudoCodeHighlighted(
+    const decomp::AnalyzeResponse& response,
+    const decomp::LlmClientConfig& config,
+    IDebugControl* control,
+    IDebugControl4* control4,
+    IDebugAdvanced2* advanced2)
+{
+    if (response.PseudoC.empty())
+    {
+        return;
+    }
+
+    if (!AreOutputCallbacksDmlAware(advanced2) || response.PseudoCTokens.empty())
+    {
+        OutputTextRaw(control, control4, response.PseudoC);
+        return;
+    }
+
+    for (const auto& token : response.PseudoCTokens)
+    {
+        if (token.Text.empty())
+        {
+            continue;
+        }
+
+        if (token.Kind == "newline" || token.Kind == "whitespace")
+        {
+            OutputDmlRaw(control, control4, token.Text);
+            continue;
+        }
+
+        const PseudoCodeTokenStyle style = GetPseudoCodeTokenStyle(token.Kind, config.Highlight);
+        const std::string escapedText = EscapeDmlText(token.Text);
+
+        if (style.Foreground.empty())
+        {
+            OutputDmlRaw(control, control4, escapedText);
+            continue;
+        }
+
+        std::string markup = "<col fg=\"";
+        markup += style.Foreground;
+        markup += "\">";
+
+        if (style.Bold)
+        {
+            markup += "<b>";
+        }
+
+        if (style.Italic)
+        {
+            markup += "<i>";
+        }
+
+        if (style.Underline)
+        {
+            markup += "<u>";
+        }
+
+        markup += escapedText;
+
+        if (style.Underline)
+        {
+            markup += "</u>";
+        }
+
+        if (style.Italic)
+        {
+            markup += "</i>";
+        }
+
+        if (style.Bold)
+        {
+            markup += "</b>";
+        }
+
+        markup += "</col>";
+        OutputDmlRaw(control, control4, markup);
+    }
+}
+
 bool AcquireDebugApi(PDEBUG_CLIENT client, DebugApi& api)
 {
     bool success = false;
@@ -102,6 +479,7 @@ bool AcquireDebugApi(PDEBUG_CLIENT client, DebugApi& api)
         }
 
         client->QueryInterface(__uuidof(IDebugControl4), reinterpret_cast<void**>(api.Control4.GetAddressOf()));
+        client->QueryInterface(__uuidof(IDebugAdvanced2), reinterpret_cast<void**>(api.Advanced2.GetAddressOf()));
 
         if (FAILED(client->QueryInterface(__uuidof(IDebugSymbols3), reinterpret_cast<void**>(api.Symbols.GetAddressOf()))))
         {
@@ -131,6 +509,130 @@ bool ParseU32Value(const std::string& text, uint32_t& value)
 
     value = static_cast<uint32_t>(parsed);
     return true;
+}
+
+std::string ExtractOperationText(const std::string& line)
+{
+    const std::string trimmed = decomp::TrimCopy(line);
+    const size_t colon = trimmed.find(':');
+
+    if (colon != std::string::npos && colon + 1 < trimmed.size())
+    {
+        const std::string afterColon = decomp::TrimCopy(trimmed.substr(colon + 1));
+
+        if (!afterColon.empty() && std::isalpha(static_cast<unsigned char>(afterColon[0])) != 0)
+        {
+            return afterColon;
+        }
+    }
+
+    std::string best = trimmed;
+    size_t index = 0;
+
+    while (index < trimmed.size())
+    {
+        size_t runStart = index;
+
+        while (index < trimmed.size() && trimmed[index] == ' ')
+        {
+            ++index;
+        }
+
+        const size_t runLength = index - runStart;
+
+        if (runLength >= 2 && index < trimmed.size())
+        {
+            const std::string candidate = decomp::TrimCopy(trimmed.substr(index));
+
+            if (!candidate.empty() && std::isalpha(static_cast<unsigned char>(candidate[0])) != 0)
+            {
+                best = candidate;
+            }
+        }
+
+        while (index < trimmed.size() && trimmed[index] != ' ')
+        {
+            ++index;
+        }
+    }
+
+    return best;
+}
+
+std::string ExtractMnemonic(const std::string& operationText)
+{
+    const std::string trimmed = decomp::TrimCopy(operationText);
+    const size_t firstSpace = trimmed.find(' ');
+
+    if (firstSpace == std::string::npos)
+    {
+        return decomp::ToLowerAscii(trimmed);
+    }
+
+    return decomp::ToLowerAscii(trimmed.substr(0, firstSpace));
+}
+
+std::string ExtractOperandText(const std::string& operationText)
+{
+    const std::string trimmed = decomp::TrimCopy(operationText);
+    const size_t firstSpace = trimmed.find(' ');
+
+    if (firstSpace == std::string::npos)
+    {
+        return std::string();
+    }
+
+    return decomp::TrimCopy(trimmed.substr(firstSpace + 1));
+}
+
+bool IsReturnMnemonic(const std::string& mnemonic)
+{
+    return mnemonic == "ret" || mnemonic == "retn" || mnemonic == "retf";
+}
+
+bool IsCallMnemonic(const std::string& mnemonic)
+{
+    return mnemonic == "call";
+}
+
+bool IsUnconditionalJumpMnemonic(const std::string& mnemonic)
+{
+    return mnemonic == "jmp";
+}
+
+bool IsTrapMnemonic(const std::string& mnemonic)
+{
+    return mnemonic == "int3"
+        || mnemonic == "ud2"
+        || mnemonic == "icebp"
+        || mnemonic == "hlt";
+}
+
+bool IsNoReturnTarget(const std::string& target)
+{
+    return decomp::ContainsInsensitive(target, "__fastfail")
+        || decomp::ContainsInsensitive(target, "RtlFailFast")
+        || decomp::ContainsInsensitive(target, "RaiseFailFastException")
+        || decomp::ContainsInsensitive(target, "TerminateProcess")
+        || decomp::ContainsInsensitive(target, "ExitProcess");
+}
+
+bool ShouldStopFallbackDisassembly(const std::string& line)
+{
+    const std::string operationText = ExtractOperationText(line);
+    const std::string mnemonic = ExtractMnemonic(operationText);
+
+    if (IsReturnMnemonic(mnemonic) || IsUnconditionalJumpMnemonic(mnemonic) || IsTrapMnemonic(mnemonic))
+    {
+        return true;
+    }
+
+    if (IsCallMnemonic(mnemonic))
+    {
+        return IsNoReturnTarget(ExtractOperandText(operationText));
+    }
+
+    return false;
 }
 
 bool ParseCommandLine(const char* args, decomp::DecompOptions& options, std::string& target, std::string& error)
@@ -530,9 +1032,7 @@ uint64_t DisassembleUntilTerminal(IDebugControl* control, uint64_t entryAddress,
         instructions.push_back(instruction);
         lastEnd = nextAddress;
 
-        const std::string lower = decomp::ToLowerAscii(buffer.data());
-
-        if (lower.find(" ret") != std::string::npos || decomp::StartsWithInsensitive(lower, "ret"))
+        if (ShouldStopFallbackDisassembly(instruction.Text))
         {
             break;
         }
@@ -708,6 +1208,50 @@ decomp::AnalyzeResponse BuildAnalyzerOnlyResponse(const decomp::AnalyzeRequest& 
     return response;
 }
 
+std::string FormatSummaryForDisplay(const std::string& summary)
+{
+    std::string formatted;
+    formatted.reserve(summary.size() + 16);
+
+    for (size_t index = 0; index < summary.size();)
+    {
+        const char ch = summary[index];
+        formatted.push_back(ch);
+
+        if (ch == '.' || ch == '!' || ch == '?')
+        {
+            size_t next = index + 1;
+
+            while (next < summary.size() && (summary[next] == ' ' || summary[next] == '\t'))
+            {
+                ++next;
+            }
+
+            const bool decimalLike =
+                index > 0
+                && next < summary.size()
+                && std::isdigit(static_cast<unsigned char>(summary[index - 1])) != 0
+                && std::isdigit(static_cast<unsigned char>(summary[next])) != 0;
+
+            if (!decimalLike
+                && next < summary.size()
+                && summary[next] != '\r'
+                && summary[next] != '\n'
+                && summary[next] != '.')
+            {
+                formatted.push_back('\n');
+            }
+
+            index = next;
+            continue;
+        }
+
+        ++index;
+    }
+
+    return formatted;
+}
+
 void PrintUsage(IDebugControl* control, IDebugControl4* control4)
 {
     OutputLine(control, control4, "usage: !decomp [/live] [/brief] [/json] [/no-llm] [/deep] [/huge] [/timeout:N] [/maxinsn:N] <addr|module!symbol>\n");
@@ -715,7 +1259,14 @@ void PrintUsage(IDebugControl* control, IDebugControl4* control4)
     OutputLine(control, control4, "env  : DECOMP_LLM_*, OPENAI_API_KEY may override config values\n");
 }
 
-void PrintResponse(const decomp::AnalyzeRequest& request, const decomp::AnalyzeResponse& response, IDebugControl* control, IDebugControl4* control4, bool jsonOutput)
+void PrintResponse(
+    const decomp::AnalyzeRequest& request,
+    const decomp::AnalyzeResponse& response,
+    const decomp::LlmClientConfig& displayConfig,
+    IDebugControl* control,
+    IDebugControl4* control4,
+    IDebugAdvanced2* advanced2,
+    bool jsonOutput)
 {
     if (jsonOutput)
     {
@@ -724,7 +1275,6 @@ void PrintResponse(const decomp::AnalyzeRequest& request, const decomp::AnalyzeR
         return;
     }
 
-    OutputLine(control, control4, "[decomp] v0.01\n");
     OutputLine(control, control4, "target      : %s\n", request.Facts.QueryText.c_str());
     OutputLine(control, control4, "entry       : %s\n", decomp::HexU64(request.Facts.EntryAddress).c_str());
     OutputLine(control, control4, "query       : %s\n", decomp::HexU64(request.Facts.QueryAddress).c_str());
@@ -737,12 +1287,15 @@ void PrintResponse(const decomp::AnalyzeRequest& request, const decomp::AnalyzeR
 
     if (!response.Summary.empty())
     {
-        OutputLine(control, control4, "summary:\n%s\n\n", response.Summary.c_str());
+        const std::string formattedSummary = FormatSummaryForDisplay(response.Summary);
+        OutputLine(control, control4, "summary:\n%s\n\n", formattedSummary.c_str());
     }
 
     if (!response.PseudoC.empty())
     {
-        OutputLine(control, control4, "pseudo_c:\n%s\n", response.PseudoC.c_str());
+        OutputLine(control, control4, "pseudo_c:\n");
+        PrintPseudoCodeHighlighted(response, displayConfig, control, control4, advanced2);
+        OutputLine(control, control4, "\n");
     }
 
     if (!response.Uncertainties.empty())
@@ -805,6 +1358,7 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
     std::vector<decomp::DisassembledInstruction> instructions;
     decomp::AnalyzeRequest request;
     decomp::AnalyzeResponse response;
+    decomp::LlmClientConfig displayConfig;
 
     do
     {
@@ -818,6 +1372,12 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
             OutputLine(api.Control.Get(), api.Control4.Get(), "error: %s\n", error.c_str());
             PrintUsage(api.Control.Get(), api.Control4.Get());
             return E_INVALIDARG;
+        }
+
+        if (!decomp::LoadLlmClientConfig(displayConfig, error, false))
+        {
+            OutputLine(api.Control.Get(), api.Control4.Get(), "error: config load failed: %s\n", error.c_str());
+            return E_FAIL;
         }
 
         if (!ResolveTargetAddress(api.Symbols.Get(), target, queryAddress))
@@ -857,6 +1417,7 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
             regions,
             bytes,
             instructions);
+        ApplyPreferredNaturalLanguage(displayConfig, request.Facts);
 
         if (options.DisableLlm)
         {
@@ -883,8 +1444,9 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
             }
         }
 
+        decomp::EnsurePseudoCodeTokens(response);
         decomp::VerifyResponse(request, response);
-        PrintResponse(request, response, api.Control.Get(), api.Control4.Get(), options.JsonOutput);
+        PrintResponse(request, response, displayConfig, api.Control.Get(), api.Control4.Get(), api.Advanced2.Get(), options.JsonOutput);
         return S_OK;
     }
     while (false);

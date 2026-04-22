@@ -65,6 +65,23 @@ inline std::string HexU64(uint64_t value)
     return stream.str();
 }
 
+inline std::string HexS64(int64_t value)
+{
+    std::ostringstream stream;
+
+    if (value < 0)
+    {
+        const uint64_t magnitude = static_cast<uint64_t>(-(value + 1)) + 1ULL;
+        stream << "-0x" << std::hex << std::uppercase << magnitude;
+    }
+    else
+    {
+        stream << "0x" << std::hex << std::uppercase << static_cast<uint64_t>(value);
+    }
+
+    return stream.str();
+}
+
 inline double Clamp01(double value)
 {
     if (value < 0.0)

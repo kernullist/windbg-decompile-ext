@@ -141,9 +141,16 @@ With `DECOMP_USE_SYMBOL_ENTRY_APIS=OFF`, the extension falls back to:
 - `GetFunctionEntryByOffset` for x64 unwind-based range recovery
 - `GetNameByOffset` plus heuristic disassembly if unwind metadata is missing
 
-## LLM Configuration
+## Configuration
 
 Place `decomp.llm.json` beside `decomp.dll`.
+
+This file is not only for network LLM settings.
+
+- `endpoint`, `model`, token budgets, and chunking settings affect the LLM path.
+- `display_language` affects the natural language used in summaries and uncertainties.
+- `syntax_highlighting` affects pseudo-code rendering in WinDbg when DML-aware output is available.
+- `display_language` and `syntax_highlighting` are still used for `/no-llm` and mock-provider output.
 
 Example:
 
@@ -159,7 +166,25 @@ Example:
   "chunk_block_limit": 14,
   "chunk_count_limit": 20,
   "chunk_completion_tokens": 3500,
-  "merge_completion_tokens": 9000
+  "merge_completion_tokens": 9000,
+  "display_language": {
+    "mode": "auto",
+    "tag": "en-US",
+    "name": "English"
+  },
+  "syntax_highlighting": {
+    "keyword_color": "warnfg",
+    "type_color": "emphfg",
+    "function_name_color": "srcid",
+    "identifier_color": "wfg",
+    "number_color": "changed",
+    "string_color": "srcstr",
+    "char_color": "srcchar",
+    "comment_color": "subfg",
+    "preprocessor_color": "verbfg",
+    "operator_color": "srcannot",
+    "punctuation_color": "srcpair"
+  }
 }
 ```
 
@@ -178,6 +203,194 @@ Supported keys:
 - `chunk_count_limit`
 - `chunk_completion_tokens`
 - `merge_completion_tokens`
+- `display_language`
+- `syntax_highlighting`
+
+Supported `display_language` keys:
+
+- `mode`
+- `tag`
+- `name`
+
+`display_language.mode` accepts:
+
+- `auto`
+- `fixed`
+
+Supported `syntax_highlighting` keys:
+
+- `keyword_color`
+- `type_color`
+- `function_name_color`
+- `identifier_color`
+- `number_color`
+- `string_color`
+- `char_color`
+- `comment_color`
+- `preprocessor_color`
+- `operator_color`
+- `punctuation_color`
+
+How `syntax_highlighting` color values work:
+
+- These values are WinDbg DML color slot names, not fixed RGB or CSS color names.
+- The extension passes them through to WinDbg DML as `<col fg="...">`.
+- WinDbg resolves each slot name against its current theme and command window color settings.
+- Because of that, `verbfg`, `warnfg`, `emphfg`, `srcid`, and similar names do not map to one universal color across every machine.
+- There is currently no extension-side config for arbitrary RGB values such as `#FF8800`. The effective color comes from WinDbg, not from `decomp.llm.json`.
+
+Practical consequence:
+
+- If a symbol color looks too dark on one dark theme, the same slot may look acceptable on another machine or another WinDbg theme.
+- If two slots look almost identical in your current theme, change the slot names in `syntax_highlighting` rather than assuming the extension is ignoring your setting.
+- If you need a truly different final color, change WinDbg's theme or command window color settings so that the slot itself resolves differently.
+
+When highlighting is visible:
+
+- The extension emits DML-colored pseudo-code when WinDbg reports that the current output callbacks are DML-aware.
+- If the current debugger output path is not DML-aware, the extension falls back to plain text pseudo-code automatically.
+- `/json` output is not DML-rendered. Instead, it carries `pseudo_c_tokens` so external tools can apply their own syntax highlighting.
+
+Common DML foreground slots:
+
+- `wfg`
+  Default window foreground text.
+- `normfg`
+  Normal command window text.
+- `emphfg`
+  Emphasized text. Microsoft documents this as light blue by default, but the exact appearance still depends on theme.
+- `warnfg`
+  Warning text.
+- `errfg`
+  Error text.
+- `verbfg`
+  Verbose text.
+- `changed`
+  Changed data. Microsoft documents this as red by default.
+
+Common source-oriented DML foreground slots:
+
+- `srcnum`
+  Numeric constants.
+- `srcchar`
+  Character constants.
+- `srcstr`
+  String constants.
+- `srcid`
+  Identifiers.
+- `srckw`
+  Keywords.
+- `srcpair`
+  Brace or matching-symbol pairs.
+- `srccmnt`
+  Comments.
+- `srcdrct`
+  Directives.
+- `srcspid`
+  Special identifiers.
+- `srcannot`
+  Source annotations or annotation-like elements.
+
+Examples:
+
+- `verbfg` means "Verbose foreground slot", not "a specific named blue".
+- `warnfg` means "Warning foreground slot", not "always yellow or orange".
+- `function_name_color: "srcid"` means "render function names using WinDbg's identifier slot".
+
+If you are tuning colors on a dark theme:
+
+- Start with `function_name_color: "emphfg"` or `function_name_color: "verbfg"` if function names look too dim with `srcid`.
+- Use `identifier_color: "normfg"` or `identifier_color: "wfg"` for general symbols that should stay readable but not overpower keywords.
+- Keep `comment_color: "subfg"` if you want comments to recede without disappearing entirely.
+
+Official reference:
+
+- DML color slot behavior and examples: [Customizing Debugger Output Using DML](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/customizing-debugger-output-using-dml)
+- Command-window message classes such as normal, warning, error, and verbose: [.printf (WinDbg)](https://learn.microsoft.com/en-us/windows-hardware/drivers/debuggercmds/-printf)
+
+The checked-in [decomp.llm.json.example](F:/kernullist/windbg-decompile-ext/decomp.llm.json.example) contains only valid top-level settings that the extension actually reads.
+
+Reference-only examples:
+
+Follow the PC UI language:
+
+```json
+{
+  "display_language": {
+    "mode": "auto"
+  }
+}
+```
+
+Force English:
+
+```json
+{
+  "display_language": {
+    "mode": "fixed",
+    "tag": "en-US",
+    "name": "English"
+  }
+}
+```
+
+Force Korean:
+
+```json
+{
+  "display_language": {
+    "mode": "fixed",
+    "tag": "ko-KR",
+    "name": "Korean"
+  }
+}
+```
+
+Dark syntax-highlighting preset:
+
+```json
+{
+  "syntax_highlighting": {
+    "keyword_color": "warnfg",
+    "type_color": "emphfg",
+    "function_name_color": "srcid",
+    "identifier_color": "wfg",
+    "number_color": "changed",
+    "string_color": "verbfg",
+    "char_color": "srcchar",
+    "comment_color": "subfg",
+    "preprocessor_color": "normfg",
+    "operator_color": "srcannot",
+    "punctuation_color": "srcpair"
+  }
+}
+```
+
+Light syntax-highlighting preset:
+
+```json
+{
+  "syntax_highlighting": {
+    "keyword_color": "emphfg",
+    "type_color": "warnfg",
+    "function_name_color": "srcid",
+    "identifier_color": "normfg",
+    "number_color": "changed",
+    "string_color": "verbfg",
+    "char_color": "srcchar",
+    "comment_color": "subfg",
+    "preprocessor_color": "srcannot",
+    "operator_color": "wfg",
+    "punctuation_color": "subfg"
+  }
+}
+```
+
+Example `/json` response details:
+
+- The JSON response includes `pseudo_c` and `pseudo_c_tokens`.
+- `pseudo_c_tokens` is a deterministic token stream suitable for external syntax highlighting.
+- The serialized request includes `preferred_natural_language_tag` and `preferred_natural_language_name`, which reflect the resolved display language after applying `display_language.mode`.
 
 Optional environment overrides:
 
@@ -202,6 +415,7 @@ Quality-first note:
 - Keep `timeout_ms` high for cloud models. `120000` is a safer starting point than `15000`.
 - If quality is still weak on huge functions, raise `chunk_count_limit` before shrinking `/maxinsn`.
 - If no endpoint is configured, the extension falls back to the deterministic mock provider.
+- Even when the extension is using `/no-llm` or the mock provider, `display_language` and `syntax_highlighting` still affect what the user sees.
 ## WinDbg Usage
 
 ```text
@@ -240,7 +454,8 @@ Expected checks:
 - `target`, `entry`, and `module` should resolve consistently
 - `regions` should be non-zero for normal functions
 - `/no-llm` should still print analyzer confidence and pseudocode stub
-- LLM mode should fill `summary`, `pseudo_c`, and `verified`
+- LLM mode should fill `summary`, `pseudo_c`, `pseudo_c_tokens`, and `verified`
+- `/json` output should include `preferred_natural_language_tag` and `preferred_natural_language_name` in the serialized request
 
 ## Local LLM Endpoint Examples
 

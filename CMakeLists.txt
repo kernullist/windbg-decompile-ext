@@ -150,6 +150,7 @@ add_library(
     STATIC
     src/shared/json.cpp
     src/shared/protocol.cpp
+    src/shared/pseudo_tokens.cpp
     src/shared/analyzer.cpp
     src/shared/verifier.cpp
 )

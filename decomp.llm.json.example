@@ -9,6 +9,24 @@
     "chunk_block_limit": 14,
     "chunk_count_limit": 20,
     "chunk_completion_tokens": 3500,
-    "merge_completion_tokens": 9000
+    "merge_completion_tokens": 9000,
+    "display_language": {
+        "mode": "auto",
+        "tag": "en-US",
+        "name": "English"
+    },
+    "syntax_highlighting": {
+        "keyword_color": "warnfg",
+        "type_color": "emphfg",
+        "function_name_color": "srcid",
+        "identifier_color": "normfg",
+        "number_color": "changed",
+        "string_color": "verbfg",
+        "char_color": "verbfg",
+        "comment_color": "subfg",
+        "preprocessor_color": "srcannot",
+        "operator_color": "wfg",
+        "punctuation_color": "subfg"
+    }
 }
 

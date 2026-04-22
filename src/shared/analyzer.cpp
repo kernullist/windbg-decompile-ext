@@ -275,37 +275,127 @@ bool IsIndirectOperand(const std::string& operand)
     return false;
 }
 
+bool IsPotentialAddressTokenChar(const char ch)
+{
+    return std::isxdigit(static_cast<unsigned char>(ch)) != 0
+        || ch == '`'
+        || ch == 'x'
+        || ch == 'X'
+        || ch == 'h'
+        || ch == 'H';
+}
+
+size_t CountAddressTokenDigits(std::string token)
+{
+    token.erase(
+        std::remove(token.begin(), token.end(), '`'),
+        token.end());
+
+    if (StartsWithInsensitive(token, "0x"))
+    {
+        token = token.substr(2);
+    }
+
+    if (!token.empty() && (token.back() == 'h' || token.back() == 'H'))
+    {
+        token.pop_back();
+    }
+
+    if (token.empty())
+    {
+        return 0;
+    }
+
+    if (!std::all_of(
+            token.begin(),
+            token.end(),
+            [](const unsigned char ch)
+            {
+                return std::isxdigit(ch) != 0;
+            }))
+    {
+        return 0;
+    }
+
+    return token.size();
+}
+
+bool TryParseAbsoluteAddressToken(const std::string& token, uint64_t& address, size_t& digitCount)
+{
+    digitCount = CountAddressTokenDigits(token);
+
+    if (digitCount < 8)
+    {
+        return false;
+    }
+
+    return TryParseUnsigned(token, address);
+}
+
 bool TryExtractAddressToken(const std::string& text, uint64_t& address)
 {
-    std::string token;
-
-    for (const char ch : text)
+    if (text.find('[') != std::string::npos)
     {
-        const bool isHexChar = std::isxdigit(static_cast<unsigned char>(ch)) != 0 || ch == '`' || ch == 'x' || ch == 'X';
+        return false;
+    }
 
-        if (isHexChar)
+    struct AddressCandidate
+    {
+        uint64_t Value = 0;
+        size_t DigitCount = 0;
+    };
+
+    std::vector<AddressCandidate> candidates;
+
+    for (size_t start = 0; start < text.size();)
+    {
+        if (!IsPotentialAddressTokenChar(text[start]))
         {
-            token.push_back(ch);
+            ++start;
             continue;
         }
 
-        if (!token.empty())
+        size_t end = start;
+
+        while (end < text.size() && IsPotentialAddressTokenChar(text[end]))
         {
-            if (TryParseUnsigned(token, address))
-            {
-                return true;
-            }
-
-            token.clear();
+            ++end;
         }
+
+        const char before = start == 0 ? '\0' : text[start - 1];
+        const char after = end >= text.size() ? '\0' : text[end];
+
+        if ((start == 0 || std::isalnum(static_cast<unsigned char>(before)) == 0)
+            && (end >= text.size() || std::isalnum(static_cast<unsigned char>(after)) == 0))
+        {
+            const std::string token = text.substr(start, end - start);
+            uint64_t parsed = 0;
+            size_t digitCount = 0;
+
+            if (TryParseAbsoluteAddressToken(token, parsed, digitCount))
+            {
+                candidates.push_back({ parsed, digitCount });
+            }
+        }
+
+        start = end;
     }
 
-    if (!token.empty() && TryParseUnsigned(token, address))
+    if (candidates.empty())
     {
-        return true;
+        return false;
     }
 
-    return false;
+    const auto best = std::max_element(
+        candidates.begin(),
+        candidates.end(),
+        [](const AddressCandidate& left, const AddressCandidate& right)
+        {
+            return left.DigitCount < right.DigitCount;
+        });
+
+    address = best->Value;
+    return true;
 }
 
 bool IsNonvolatileRegisterPush(const std::string& operationText, std::string& reg)
@@ -336,6 +426,13 @@ bool IsNoReturnTarget(const std::string& target)
         || ContainsInsensitive(target, "ExitProcess");
 }
 
+bool IsNoReturnCall(const DisassembledInstruction& instruction)
+{
+    return instruction.IsCall
+        && !instruction.IsIndirect
+        && IsNoReturnTarget(instruction.OperandText);
+}
+
 bool LooksLikeSwitch(const DisassembledInstruction& instruction)
 {
     return instruction.IsIndirect
@@ -356,6 +453,440 @@ bool IsTrapInstruction(const DisassembledInstruction& instruction)
     return IsTrapMnemonic(instruction.Mnemonic);
 }
 
+bool InstructionTerminatesBasicBlock(const DisassembledInstruction& instruction)
+{
+    return instruction.IsConditionalBranch
+        || instruction.IsUnconditionalBranch
+        || instruction.IsReturn
+        || IsTrapInstruction(instruction)
+        || IsNoReturnCall(instruction);
+}
+
+std::vector<std::string> SplitOperands(const std::string& operandText)
+{
+    std::vector<std::string> operands;
+    std::string current;
+    int bracketDepth = 0;
+
+    for (const char ch : operandText)
+    {
+        if (ch == '[')
+        {
+            ++bracketDepth;
+        }
+        else if (ch == ']' && bracketDepth > 0)
+        {
+            --bracketDepth;
+        }
+
+        if (ch == ',' && bracketDepth == 0)
+        {
+            operands.push_back(TrimCopy(current));
+            current.clear();
+            continue;
+        }
+
+        current.push_back(ch);
+    }
+
+    if (!current.empty())
+    {
+        operands.push_back(TrimCopy(current));
+    }
+
+    return operands;
+}
+
+bool IsRegisterName(const std::string& token)
+{
+    static const std::array<const char*, 49> registers = {
+        "al", "ah", "ax", "eax", "rax",
+        "bl", "bh", "bx", "ebx", "rbx",
+        "cl", "ch", "cx", "ecx", "rcx",
+        "dl", "dh", "dx", "edx", "rdx",
+        "si", "esi", "rsi",
+        "di", "edi", "rdi",
+        "bp", "ebp", "rbp",
+        "sp", "esp", "rsp",
+        "r8", "r8d", "r9", "r9d", "r10", "r10d", "r11", "r11d",
+        "r12", "r12d", "r13", "r13d", "r14", "r14d", "r15", "r15d",
+        "rip"
+    };
+    const std::string lower = ToLowerAscii(TrimCopy(token));
+    return std::find_if(
+               registers.begin(),
+               registers.end(),
+               [&lower](const char* entry)
+               {
+                   return lower == entry;
+               })
+        != registers.end();
+}
+
+std::string DetectMemoryAccessSize(const std::string& operand, uint32_t& widthBits)
+{
+    widthBits = 0;
+    const std::string lower = ToLowerAscii(operand);
+
+    if (lower.find("zmmword ptr") != std::string::npos)
+    {
+        widthBits = 512;
+        return "zmmword";
+    }
+
+    if (lower.find("ymmword ptr") != std::string::npos)
+    {
+        widthBits = 256;
+        return "ymmword";
+    }
+
+    if (lower.find("xmmword ptr") != std::string::npos)
+    {
+        widthBits = 128;
+        return "xmmword";
+    }
+
+    if (lower.find("tbyte ptr") != std::string::npos)
+    {
+        widthBits = 80;
+        return "tbyte";
+    }
+
+    if (lower.find("qword ptr") != std::string::npos)
+    {
+        widthBits = 64;
+        return "qword";
+    }
+
+    if (lower.find("dword ptr") != std::string::npos)
+    {
+        widthBits = 32;
+        return "dword";
+    }
+
+    if (lower.find("word ptr") != std::string::npos)
+    {
+        widthBits = 16;
+        return "word";
+    }
+
+    if (lower.find("byte ptr") != std::string::npos)
+    {
+        widthBits = 8;
+        return "byte";
+    }
+
+    return "unknown";
+}
+
+bool IsReadModifyWriteMnemonic(const std::string& mnemonic)
+{
+    static const std::array<const char*, 26> mnemonics = {
+        "adc", "add", "and", "btc", "btr", "bts", "cmpxchg", "cmpxchg8b", "cmpxchg16b",
+        "dec", "inc", "neg", "not", "or", "rol", "ror", "rcl", "rcr", "sar", "sbb",
+        "shl", "shr", "sub", "xadd", "xchg", "xor"
+    };
+
+    return std::find_if(
+               mnemonics.begin(),
+               mnemonics.end(),
+               [&mnemonic](const char* entry)
+               {
+                   return mnemonic == entry;
+               })
+        != mnemonics.end();
+}
+
+std::string InferMemoryAccessKind(
+    const DisassembledInstruction& instruction,
+    size_t memoryOperandIndex,
+    size_t operandCount)
+{
+    const std::string mnemonic = instruction.Mnemonic;
+
+    if (mnemonic == "lea")
+    {
+        return "address";
+    }
+
+    if (mnemonic == "call" || mnemonic == "jmp" || mnemonic == "push" || mnemonic == "cmp" || mnemonic == "test")
+    {
+        return "read";
+    }
+
+    if (operandCount <= 1)
+    {
+        if (mnemonic == "pop" || StartsWithInsensitive(mnemonic, "set"))
+        {
+            return "write";
+        }
+
+        if (IsReadModifyWriteMnemonic(mnemonic))
+        {
+            return "read_write";
+        }
+
+        return "read";
+    }
+
+    if (memoryOperandIndex == 0)
+    {
+        if (mnemonic == "mov" || mnemonic == "movnti" || mnemonic == "movntdq" || mnemonic == "movntps" || mnemonic == "movntpd")
+        {
+            return "write";
+        }
+
+        if (StartsWithInsensitive(mnemonic, "set"))
+        {
+            return "write";
+        }
+
+        if (IsReadModifyWriteMnemonic(mnemonic))
+        {
+            return "read_write";
+        }
+
+        if (mnemonic == "cmp" || mnemonic == "test")
+        {
+            return "read";
+        }
+
+        return "write";
+    }
+
+    if (mnemonic == "xchg" || mnemonic == "cmpxchg" || mnemonic == "xadd")
+    {
+        return "read_write";
+    }
+
+    return "read";
+}
+
+bool TryExtractBracketExpression(const std::string& operand, std::string& expression)
+{
+    const size_t open = operand.find('[');
+    const size_t close = operand.rfind(']');
+
+    if (open == std::string::npos || close == std::string::npos || close <= open)
+    {
+        return false;
+    }
+
+    expression = TrimCopy(operand.substr(open + 1, close - open - 1));
+    return !expression.empty();
+}
+
+void ParseMemoryExpression(const std::string& expression, MemoryAccess& access)
+{
+    int sign = 1;
+    int64_t displacementValue = 0;
+    bool hasDisplacement = false;
+    std::string current;
+
+    auto flushTerm = [&]()
+    {
+        std::string term = TrimCopy(current);
+        current.clear();
+
+        if (term.empty())
+        {
+            return;
+        }
+
+        term.erase(
+            std::remove_if(
+                term.begin(),
+                term.end(),
+                [](const unsigned char ch)
+                {
+                    return std::isspace(ch) != 0;
+                }),
+            term.end());
+
+        if (term.empty())
+        {
+            return;
+        }
+
+        const size_t multiply = term.find('*');
+
+        if (multiply != std::string::npos)
+        {
+            const std::string left = ToLowerAscii(term.substr(0, multiply));
+            const std::string right = ToLowerAscii(term.substr(multiply + 1));
+            std::string indexRegister;
+            uint64_t scaleValue = 0;
+
+            if (IsRegisterName(left) && TryParseUnsigned(right, scaleValue))
+            {
+                indexRegister = left;
+            }
+            else if (IsRegisterName(right) && TryParseUnsigned(left, scaleValue))
+            {
+                indexRegister = right;
+            }
+
+            if (!indexRegister.empty())
+            {
+                access.IndexRegister = indexRegister;
+                access.Scale = static_cast<uint32_t>(scaleValue);
+            }
+
+            return;
+        }
+
+        const std::string lower = ToLowerAscii(term);
+
+        if (IsRegisterName(lower))
+        {
+            if (access.BaseRegister.empty())
+            {
+                access.BaseRegister = lower;
+            }
+            else if (access.IndexRegister.empty())
+            {
+                access.IndexRegister = lower;
+                access.Scale = access.Scale == 0 ? 1U : access.Scale;
+            }
+
+            access.RipRelative = access.RipRelative || lower == "rip";
+            return;
+        }
+
+        uint64_t immediate = 0;
+
+        if (TryParseUnsigned(term, immediate))
+        {
+            displacementValue += sign * static_cast<int64_t>(immediate);
+            hasDisplacement = true;
+        }
+    };
+
+    for (const char ch : expression)
+    {
+        if (ch == '+' || ch == '-')
+        {
+            flushTerm();
+            sign = (ch == '-') ? -1 : 1;
+            continue;
+        }
+
+        current.push_back(ch);
+    }
+
+    flushTerm();
+
+    if (hasDisplacement)
+    {
+        access.Displacement = HexS64(displacementValue);
+    }
+}
+
+bool TryBuildMemoryAccess(const DisassembledInstruction& instruction, MemoryAccess& access)
+{
+    const std::vector<std::string> operands = SplitOperands(instruction.OperandText);
+    size_t memoryOperandIndex = 0;
+    std::string memoryOperand;
+
+    for (size_t index = 0; index < operands.size(); ++index)
+    {
+        if (operands[index].find('[') != std::string::npos)
+        {
+            memoryOperand = operands[index];
+            memoryOperandIndex = index;
+            break;
+        }
+    }
+
+    if (memoryOperand.empty())
+    {
+        return false;
+    }
+
+    access.Site = instruction.Address;
+    access.Access = memoryOperand;
+    access.Kind = InferMemoryAccessKind(instruction, memoryOperandIndex, operands.size());
+    access.Size = DetectMemoryAccessSize(memoryOperand, access.WidthBits);
+
+    std::string expression;
+
+    if (TryExtractBracketExpression(memoryOperand, expression))
+    {
+        ParseMemoryExpression(expression, access);
+    }
+
+    if (!access.IndexRegister.empty() && access.Scale == 0)
+    {
+        access.Scale = 1;
+    }
+
+    return true;
+}
+
+bool TryParseImmediateOperand(const std::string& operand, uint64_t& value)
+{
+    const std::string trimmed = TrimCopy(operand);
+
+    if (trimmed.empty()
+        || trimmed.find('[') != std::string::npos
+        || trimmed.find('!') != std::string::npos
+        || trimmed.find('*') != std::string::npos)
+    {
+        return false;
+    }
+
+    return TryParseUnsigned(trimmed, value);
+}
+
+bool IsMaskValue(uint64_t value)
+{
+    return value != 0 && ((value + 1) & value) == 0;
+}
+
+uint32_t EstimateSwitchCaseCount(const std::vector<DisassembledInstruction>& instructions, size_t switchIndex)
+{
+    const size_t start = switchIndex > 8 ? switchIndex - 8 : 0;
+    bool sawGuardBranch = false;
+
+    for (size_t cursor = switchIndex; cursor > start; --cursor)
+    {
+        const DisassembledInstruction& candidate = instructions[cursor - 1];
+
+        if (candidate.IsConditionalBranch)
+        {
+            sawGuardBranch = true;
+            continue;
+        }
+
+        const std::vector<std::string> operands = SplitOperands(candidate.OperandText);
+
+        if (candidate.Mnemonic == "cmp" && operands.size() == 2)
+        {
+            uint64_t immediate = 0;
+
+            if (TryParseImmediateOperand(operands[1], immediate) && immediate < 0x10000ULL)
+            {
+                if (sawGuardBranch || cursor + 2 >= switchIndex)
+                {
+                    return static_cast<uint32_t>(immediate + 1ULL);
+                }
+            }
+        }
+
+        if (candidate.Mnemonic == "and" && operands.size() == 2)
+        {
+            uint64_t immediate = 0;
+
+            if (TryParseImmediateOperand(operands[1], immediate) && immediate < 0x10000ULL && IsMaskValue(immediate))
+            {
+                return static_cast<uint32_t>(immediate + 1ULL);
+            }
+        }
+    }
+
+    return 0;
+}
+
 void AddUniqueSuccessor(BasicBlock& block, const std::string& successorId)
 {
     if (successorId.empty())
@@ -368,6 +899,7 @@ void AddUniqueSuccessor(BasicBlock& block, const std::string& successorId)
         block.Successors.push_back(successorId);
     }
 }
+
 std::vector<DisassembledInstruction> NormalizeInstructions(const std::vector<DisassembledInstruction>& rawInstructions)
 {
     std::vector<DisassembledInstruction> normalized = rawInstructions;
@@ -470,11 +1002,7 @@ std::vector<BasicBlock> BuildBasicBlocks(const std::vector<DisassembledInstructi
 
         const DisassembledInstruction& nextInstruction = instructions[index + 1];
 
-        if (instruction.IsConditionalBranch
-            || instruction.IsUnconditionalBranch
-            || instruction.IsReturn
-            || instruction.IsCall
-            || IsTrapInstruction(instruction))
+        if (InstructionTerminatesBasicBlock(instruction))
         {
             leaders.insert(nextInstruction.Address);
         }
@@ -510,14 +1038,14 @@ std::vector<BasicBlock> BuildBasicBlocks(const std::vector<DisassembledInstructi
         current.InstructionAddresses.push_back(instruction.Address);
         current.EndAddress = instruction.EndAddress;
 
-        if (instruction.IsConditionalBranch || instruction.IsUnconditionalBranch || instruction.IsReturn || IsTrapInstruction(instruction))
+        if (InstructionTerminatesBasicBlock(instruction))
         {
             current.HasTerminal = true;
         }
 
         bool shouldSplit = false;
 
-        if (instruction.IsConditionalBranch || instruction.IsUnconditionalBranch || instruction.IsReturn || instruction.IsCall || IsTrapInstruction(instruction))
+        if (InstructionTerminatesBasicBlock(instruction))
         {
             shouldSplit = true;
         }
@@ -606,7 +1134,7 @@ std::vector<BasicBlock> BuildBasicBlocks(const std::vector<DisassembledInstructi
                 }
             }
         }
-        else if (!instruction.IsReturn && !IsTrapInstruction(instruction))
+        else if (!instruction.IsReturn && !IsTrapInstruction(instruction) && !IsNoReturnCall(instruction))
         {
             if (blockIndex + 1 < blocks.size())
             {
@@ -637,7 +1165,7 @@ std::vector<CallSite> CollectCalls(const std::vector<DisassembledInstruction>& i
         call.Site = instruction.Address;
         call.Target = instruction.OperandText.empty() ? (indirectOnly ? "<indirect>" : "<unknown>") : instruction.OperandText;
         call.Kind = indirectOnly ? "indirect" : "direct";
-        call.Returns = !IsNoReturnTarget(call.Target);
+        call.Returns = indirectOnly ? !IsNoReturnTarget(call.Target) : !IsNoReturnCall(instruction);
         calls.push_back(call);
     }
 
@@ -648,8 +1176,10 @@ std::vector<SwitchInfo> CollectSwitches(const std::vector<DisassembledInstructio
 {
     std::vector<SwitchInfo> switches;
 
-    for (const auto& instruction : instructions)
+    for (size_t index = 0; index < instructions.size(); ++index)
     {
+        const auto& instruction = instructions[index];
+
         if (!LooksLikeSwitch(instruction))
         {
             continue;
@@ -657,8 +1187,14 @@ std::vector<SwitchInfo> CollectSwitches(const std::vector<DisassembledInstructio
 
         SwitchInfo info;
         info.Site = instruction.Address;
-        info.CaseCount = 0;
+        info.CaseCount = EstimateSwitchCaseCount(instructions, index);
         info.Detail = instruction.OperandText;
+
+        if (info.CaseCount != 0)
+        {
+            info.Detail += " ; estimated_cases=" + std::to_string(info.CaseCount);
+        }
+
         switches.push_back(info);
     }
 
@@ -671,15 +1207,12 @@ std::vector<MemoryAccess> CollectMemoryAccesses(const std::vector<DisassembledIn
 
     for (const auto& instruction : instructions)
     {
-        if (instruction.OperandText.find('[') == std::string::npos)
-        {
-            continue;
-        }
-
         MemoryAccess access;
-        access.Site = instruction.Address;
-        access.Access = instruction.OperandText;
-        accesses.push_back(access);
+
+        if (TryBuildMemoryAccess(instruction, access))
+        {
+            accesses.push_back(access);
+        }
     }
 
     return accesses;
@@ -802,7 +1335,70 @@ AnalysisFacts BuildAnalysisFacts(
 
     if (!facts.Switches.empty())
     {
-        facts.Facts.push_back("switch candidates: " + std::to_string(facts.Switches.size()));
+        uint32_t maxCaseCount = 0;
+
+        for (const auto& info : facts.Switches)
+        {
+            maxCaseCount = (std::max)(maxCaseCount, info.CaseCount);
+        }
+
+        std::string switchFact = "switch candidates: " + std::to_string(facts.Switches.size());
+
+        if (maxCaseCount != 0)
+        {
+            switchFact += " (max estimated cases: " + std::to_string(maxCaseCount) + ")";
+        }
+
+        facts.Facts.push_back(switchFact);
+    }
+
+    if (!facts.MemoryAccesses.empty())
+    {
+        size_t reads = 0;
+        size_t writes = 0;
+        size_t readWrites = 0;
+        size_t addresses = 0;
+        size_t ripRelative = 0;
+
+        for (const auto& access : facts.MemoryAccesses)
+        {
+            if (access.Kind == "read")
+            {
+                ++reads;
+            }
+            else if (access.Kind == "write")
+            {
+                ++writes;
+            }
+            else if (access.Kind == "read_write")
+            {
+                ++readWrites;
+            }
+            else if (access.Kind == "address")
+            {
+                ++addresses;
+            }
+
+            if (access.RipRelative)
+            {
+                ++ripRelative;
+            }
+        }
+
+        facts.Facts.push_back(
+            "memory accesses: "
+            + std::to_string(facts.MemoryAccesses.size())
+            + " (read="
+            + std::to_string(reads)
+            + ", write="
+            + std::to_string(writes)
+            + ", read_write="
+            + std::to_string(readWrites)
+            + ", address="
+            + std::to_string(addresses)
+            + ", rip_relative="
+            + std::to_string(ripRelative)
+            + ")");
     }
 
     facts.PreLlmConfidence = ScoreConfidence(
