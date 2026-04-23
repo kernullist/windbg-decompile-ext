@@ -8,6 +8,7 @@
 #include <set>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 
 
 #include "decomp/string_utils.h"
@@ -499,17 +500,23 @@ std::vector<std::string> SplitOperands(const std::string& operandText)
 
 bool IsRegisterName(const std::string& token)
 {
-    static const std::array<const char*, 49> registers = {
+    static const std::array<const char*, 69> registers = {
         "al", "ah", "ax", "eax", "rax",
         "bl", "bh", "bx", "ebx", "rbx",
         "cl", "ch", "cx", "ecx", "rcx",
         "dl", "dh", "dx", "edx", "rdx",
-        "si", "esi", "rsi",
-        "di", "edi", "rdi",
-        "bp", "ebp", "rbp",
-        "sp", "esp", "rsp",
-        "r8", "r8d", "r9", "r9d", "r10", "r10d", "r11", "r11d",
-        "r12", "r12d", "r13", "r13d", "r14", "r14d", "r15", "r15d",
+        "sil", "si", "esi", "rsi",
+        "dil", "di", "edi", "rdi",
+        "bpl", "bp", "ebp", "rbp",
+        "spl", "sp", "esp", "rsp",
+        "r8b", "r8w", "r8d", "r8",
+        "r9b", "r9w", "r9d", "r9",
+        "r10b", "r10w", "r10d", "r10",
+        "r11b", "r11w", "r11d", "r11",
+        "r12b", "r12w", "r12d", "r12",
+        "r13b", "r13w", "r13d", "r13",
+        "r14b", "r14w", "r14d", "r14",
+        "r15b", "r15w", "r15d", "r15",
         "rip"
     };
     const std::string lower = ToLowerAscii(TrimCopy(token));
@@ -906,18 +913,28 @@ std::vector<DisassembledInstruction> NormalizeInstructions(const std::vector<Dis
 
     for (auto& instruction : normalized)
     {
-        instruction.OperationText = ExtractOperationText(instruction.Text);
-        instruction.Mnemonic = ExtractMnemonic(instruction.OperationText);
-        instruction.OperandText = ExtractOperandText(instruction.OperationText);
-        instruction.IsConditionalBranch = IsConditionalJumpMnemonic(instruction.Mnemonic);
-        instruction.IsUnconditionalBranch = IsUnconditionalJumpMnemonic(instruction.Mnemonic);
-        instruction.IsCall = IsCallMnemonic(instruction.Mnemonic);
-        instruction.IsReturn = IsReturnMnemonic(instruction.Mnemonic);
-        instruction.IsIndirect = IsIndirectOperand(instruction.OperandText);
-        instruction.HasBranchTarget = false;
-        instruction.BranchTarget = 0;
+        if (instruction.OperationText.empty())
+        {
+            instruction.OperationText = ExtractOperationText(instruction.Text);
+        }
 
-        if (instruction.IsConditionalBranch || instruction.IsUnconditionalBranch || instruction.IsCall)
+        if (instruction.Mnemonic.empty())
+        {
+            instruction.Mnemonic = ExtractMnemonic(instruction.OperationText);
+        }
+
+        if (instruction.OperandText.empty())
+        {
+            instruction.OperandText = ExtractOperandText(instruction.OperationText);
+        }
+
+        instruction.IsConditionalBranch = instruction.IsConditionalBranch || IsConditionalJumpMnemonic(instruction.Mnemonic);
+        instruction.IsUnconditionalBranch = instruction.IsUnconditionalBranch || IsUnconditionalJumpMnemonic(instruction.Mnemonic);
+        instruction.IsCall = instruction.IsCall || IsCallMnemonic(instruction.Mnemonic);
+        instruction.IsReturn = instruction.IsReturn || IsReturnMnemonic(instruction.Mnemonic);
+        instruction.IsIndirect = instruction.IsIndirect || IsIndirectOperand(instruction.OperandText);
+
+        if (!instruction.HasBranchTarget && (instruction.IsConditionalBranch || instruction.IsUnconditionalBranch || instruction.IsCall))
         {
             if (TryExtractAddressToken(instruction.OperandText, instruction.BranchTarget))
             {
@@ -1218,6 +1235,1287 @@ std::vector<MemoryAccess> CollectMemoryAccesses(const std::vector<DisassembledIn
     return accesses;
 }
 
+bool TryParseSignedValue(const std::string& text, int64_t& value)
+{
+    std::string clean = TrimCopy(text);
+
+    if (clean.empty())
+    {
+        return false;
+    }
+
+    bool negative = false;
+
+    if (clean.front() == '+')
+    {
+        clean = clean.substr(1);
+    }
+    else if (clean.front() == '-')
+    {
+        negative = true;
+        clean = clean.substr(1);
+    }
+
+    uint64_t parsed = 0;
+
+    if (!TryParseUnsigned(clean, parsed))
+    {
+        return false;
+    }
+
+    value = negative ? -static_cast<int64_t>(parsed) : static_cast<int64_t>(parsed);
+    return true;
+}
+
+std::string RemoveAllCopy(std::string text, const std::string& needle)
+{
+    size_t position = 0;
+
+    while ((position = text.find(needle, position)) != std::string::npos)
+    {
+        text.erase(position, needle.size());
+    }
+
+    return text;
+}
+
+std::string StripPointerDecorators(std::string operand)
+{
+    operand = ToLowerAscii(TrimCopy(operand));
+
+    static const std::array<const char*, 18> decorators = {
+        "byte ptr", "word ptr", "dword ptr", "qword ptr", "xmmword ptr", "ymmword ptr",
+        "zmmword ptr", "tbyte ptr", "ptr", "short ", "near ", "far ", "cs:", "ds:",
+        "es:", "fs:", "gs:", "ss:"
+    };
+
+    for (const char* decorator : decorators)
+    {
+        operand = RemoveAllCopy(operand, decorator);
+    }
+
+    while (operand.find("  ") != std::string::npos)
+    {
+        operand = RemoveAllCopy(operand, "  ");
+    }
+
+    return TrimCopy(operand);
+}
+
+std::string NormalizeRegisterAlias(const std::string& token)
+{
+    const std::string lower = ToLowerAscii(TrimCopy(token));
+
+    if (lower == "al" || lower == "ah" || lower == "ax" || lower == "eax" || lower == "rax")
+    {
+        return "rax";
+    }
+
+    if (lower == "bl" || lower == "bh" || lower == "bx" || lower == "ebx" || lower == "rbx")
+    {
+        return "rbx";
+    }
+
+    if (lower == "cl" || lower == "ch" || lower == "cx" || lower == "ecx" || lower == "rcx")
+    {
+        return "rcx";
+    }
+
+    if (lower == "dl" || lower == "dh" || lower == "dx" || lower == "edx" || lower == "rdx")
+    {
+        return "rdx";
+    }
+
+    if (lower == "sil" || lower == "si" || lower == "esi" || lower == "rsi")
+    {
+        return "rsi";
+    }
+
+    if (lower == "dil" || lower == "di" || lower == "edi" || lower == "rdi")
+    {
+        return "rdi";
+    }
+
+    if (lower == "bpl" || lower == "bp" || lower == "ebp" || lower == "rbp")
+    {
+        return "rbp";
+    }
+
+    if (lower == "spl" || lower == "sp" || lower == "esp" || lower == "rsp")
+    {
+        return "rsp";
+    }
+
+    if (StartsWithInsensitive(lower, "r8"))
+    {
+        return "r8";
+    }
+
+    if (StartsWithInsensitive(lower, "r9"))
+    {
+        return "r9";
+    }
+
+    if (StartsWithInsensitive(lower, "r10"))
+    {
+        return "r10";
+    }
+
+    if (StartsWithInsensitive(lower, "r11"))
+    {
+        return "r11";
+    }
+
+    if (StartsWithInsensitive(lower, "r12"))
+    {
+        return "r12";
+    }
+
+    if (StartsWithInsensitive(lower, "r13"))
+    {
+        return "r13";
+    }
+
+    if (StartsWithInsensitive(lower, "r14"))
+    {
+        return "r14";
+    }
+
+    if (StartsWithInsensitive(lower, "r15"))
+    {
+        return "r15";
+    }
+
+    return lower;
+}
+
+std::vector<std::string> ExtractOperandRegisterTokens(const std::string& operand)
+{
+    std::vector<std::string> tokens;
+    std::string current;
+    const std::string lower = ToLowerAscii(operand);
+
+    auto flushCurrent = [&tokens, &current]()
+    {
+        if (current.empty())
+        {
+            return;
+        }
+
+        if (IsRegisterName(current))
+        {
+            const std::string canonical = NormalizeRegisterAlias(current);
+
+            if (std::find(tokens.begin(), tokens.end(), canonical) == tokens.end())
+            {
+                tokens.push_back(canonical);
+            }
+        }
+
+        current.clear();
+    };
+
+    for (const char ch : lower)
+    {
+        if (std::isalnum(static_cast<unsigned char>(ch)) != 0)
+        {
+            current.push_back(ch);
+        }
+        else
+        {
+            flushCurrent();
+        }
+    }
+
+    flushCurrent();
+    return tokens;
+}
+
+bool OperandReferencesRegister(const std::string& operand, const std::string& canonicalRegister)
+{
+    const std::vector<std::string> registers = ExtractOperandRegisterTokens(operand);
+    return std::find(registers.begin(), registers.end(), canonicalRegister) != registers.end();
+}
+
+bool InstructionWritesDestinationOperand(const DisassembledInstruction& instruction, const std::vector<std::string>& operands)
+{
+    if (operands.empty())
+    {
+        return false;
+    }
+
+    if (instruction.IsConditionalBranch || instruction.IsUnconditionalBranch || instruction.IsReturn || instruction.IsCall)
+    {
+        return false;
+    }
+
+    return instruction.Mnemonic != "cmp"
+        && instruction.Mnemonic != "test"
+        && instruction.Mnemonic != "push";
+}
+
+bool DestinationOperandIsRead(const DisassembledInstruction& instruction, const std::vector<std::string>& operands)
+{
+    if (!InstructionWritesDestinationOperand(instruction, operands) || operands.empty())
+    {
+        return false;
+    }
+
+    if (instruction.Mnemonic == "mov"
+        || instruction.Mnemonic == "movzx"
+        || instruction.Mnemonic == "movsx"
+        || instruction.Mnemonic == "movsxd"
+        || instruction.Mnemonic == "lea"
+        || instruction.Mnemonic == "pop"
+        || StartsWithInsensitive(instruction.Mnemonic, "set"))
+    {
+        return false;
+    }
+
+    if (instruction.Mnemonic == "xor" && operands.size() >= 2)
+    {
+        const std::string left = StripPointerDecorators(operands[0]);
+        const std::string right = StripPointerDecorators(operands[1]);
+
+        if (!left.empty() && left == right)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool InstructionWritesRegister(
+    const DisassembledInstruction& instruction,
+    const std::vector<std::string>& operands,
+    const std::string& canonicalRegister)
+{
+    return !operands.empty()
+        && InstructionWritesDestinationOperand(instruction, operands)
+        && OperandReferencesRegister(operands[0], canonicalRegister);
+}
+
+bool InstructionReadsRegister(
+    const DisassembledInstruction& instruction,
+    const std::vector<std::string>& operands,
+    const std::string& canonicalRegister)
+{
+    if (operands.empty())
+    {
+        return false;
+    }
+
+    if (DestinationOperandIsRead(instruction, operands) && OperandReferencesRegister(operands[0], canonicalRegister))
+    {
+        return true;
+    }
+
+    const size_t startIndex = InstructionWritesDestinationOperand(instruction, operands) ? 1U : 0U;
+
+    for (size_t index = startIndex; index < operands.size(); ++index)
+    {
+        if (OperandReferencesRegister(operands[index], canonicalRegister))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::string InferTypeHintFromWidth(uint32_t widthBits, bool pointerLike)
+{
+    if (pointerLike)
+    {
+        return "UNKNOWN_TYPE*";
+    }
+
+    switch (widthBits)
+    {
+    case 8:
+        return "uint8_t";
+    case 16:
+        return "uint16_t";
+    case 32:
+        return "uint32_t";
+    case 64:
+        return "uint64_t";
+    default:
+        return "UNKNOWN_TYPE";
+    }
+}
+
+bool IsZeroLikeOperand(const std::string& operand)
+{
+    int64_t value = 0;
+    return TryParseSignedValue(StripPointerDecorators(operand), value) && value == 0;
+}
+
+std::string FormatHexMagnitude(uint64_t value)
+{
+    std::ostringstream stream;
+    stream << std::hex << std::uppercase << value;
+    return stream.str();
+}
+
+bool TryParseStackOperand(const std::string& operand, std::string& baseRegister, int64_t& offset)
+{
+    const std::string stripped = StripPointerDecorators(operand);
+    const size_t open = stripped.find('[');
+    const size_t close = stripped.rfind(']');
+
+    if (open == std::string::npos || close == std::string::npos || close <= open)
+    {
+        return false;
+    }
+
+    std::string expression = stripped.substr(open + 1, close - open - 1);
+    expression.erase(
+        std::remove_if(
+            expression.begin(),
+            expression.end(),
+            [](const unsigned char ch)
+            {
+                return std::isspace(ch) != 0;
+            }),
+        expression.end());
+
+    if (expression.empty() || expression.find('*') != std::string::npos)
+    {
+        return false;
+    }
+
+    baseRegister.clear();
+    offset = 0;
+    int sign = 1;
+    std::string current;
+
+    auto consumeToken = [&baseRegister, &offset](const std::string& token, int tokenSign) -> bool
+    {
+        if (token.empty())
+        {
+            return false;
+        }
+
+        if (IsRegisterName(token))
+        {
+            const std::string canonical = NormalizeRegisterAlias(token);
+
+            if (canonical != "rbp" && canonical != "rsp")
+            {
+                return false;
+            }
+
+            if (!baseRegister.empty() && baseRegister != canonical)
+            {
+                return false;
+            }
+
+            baseRegister = canonical;
+            return true;
+        }
+
+        uint64_t parsed = 0;
+
+        if (!TryParseUnsigned(token, parsed))
+        {
+            return false;
+        }
+
+        offset += static_cast<int64_t>(parsed) * static_cast<int64_t>(tokenSign);
+        return true;
+    };
+
+    for (const char ch : expression)
+    {
+        if (ch == '+' || ch == '-')
+        {
+            if (!current.empty())
+            {
+                if (!consumeToken(current, sign))
+                {
+                    return false;
+                }
+
+                current.clear();
+            }
+
+            sign = (ch == '-') ? -1 : 1;
+            continue;
+        }
+
+        current.push_back(ch);
+    }
+
+    if (!current.empty() && !consumeToken(current, sign))
+    {
+        return false;
+    }
+
+    return baseRegister == "rbp" || baseRegister == "rsp";
+}
+
+std::string BuildStackSlotKey(const std::string& baseRegister, int64_t offset)
+{
+    return baseRegister + ":" + std::to_string(offset);
+}
+
+std::string BuildStackSlotName(int64_t offset)
+{
+    const uint64_t magnitude = offset < 0 ? static_cast<uint64_t>(-(offset + 1)) + 1ULL : static_cast<uint64_t>(offset);
+    return std::string(offset < 0 ? "local_" : "slot_") + FormatHexMagnitude(magnitude);
+}
+
+std::string BuildArgumentName(const std::string& canonicalRegister)
+{
+    if (canonicalRegister == "rcx")
+    {
+        return "arg1";
+    }
+
+    if (canonicalRegister == "rdx")
+    {
+        return "arg2";
+    }
+
+    if (canonicalRegister == "r8")
+    {
+        return "arg3";
+    }
+
+    if (canonicalRegister == "r9")
+    {
+        return "arg4";
+    }
+
+    return "arg";
+}
+
+std::vector<RecoveredArgument> RecoverArguments(const std::vector<DisassembledInstruction>& instructions)
+{
+    struct ArgumentStats
+    {
+        uint64_t FirstUseSite = 0;
+        uint32_t UseCount = 0;
+        uint32_t MemoryBaseUseCount = 0;
+        uint32_t CompareUseCount = 0;
+        uint32_t ArithmeticUseCount = 0;
+    };
+
+    static const std::array<const char*, 4> registers = { "rcx", "rdx", "r8", "r9" };
+    std::unordered_map<std::string, ArgumentStats> stats;
+    std::unordered_set<std::string> defined;
+
+    for (const DisassembledInstruction& instruction : instructions)
+    {
+        const std::vector<std::string> operands = SplitOperands(instruction.OperandText);
+
+        for (const char* reg : registers)
+        {
+            const std::string canonicalRegister = reg;
+            const bool readsRegister = InstructionReadsRegister(instruction, operands, canonicalRegister);
+
+            if (readsRegister && defined.find(canonicalRegister) == defined.end())
+            {
+                ArgumentStats& argument = stats[canonicalRegister];
+
+                if (argument.FirstUseSite == 0)
+                {
+                    argument.FirstUseSite = instruction.Address;
+                }
+
+                ++argument.UseCount;
+
+                if (instruction.OperandText.find('[') != std::string::npos)
+                {
+                    for (const auto& operand : operands)
+                    {
+                        if (operand.find('[') != std::string::npos && OperandReferencesRegister(operand, canonicalRegister))
+                        {
+                            ++argument.MemoryBaseUseCount;
+                        }
+                    }
+                }
+
+                if (instruction.Mnemonic == "cmp" || instruction.Mnemonic == "test")
+                {
+                    ++argument.CompareUseCount;
+                }
+                else if (instruction.Mnemonic == "add"
+                    || instruction.Mnemonic == "sub"
+                    || instruction.Mnemonic == "imul"
+                    || instruction.Mnemonic == "shl"
+                    || instruction.Mnemonic == "shr")
+                {
+                    ++argument.ArithmeticUseCount;
+                }
+            }
+        }
+
+        for (const char* reg : registers)
+        {
+            const std::string canonicalRegister = reg;
+
+            if (InstructionWritesRegister(instruction, operands, canonicalRegister))
+            {
+                defined.insert(canonicalRegister);
+            }
+        }
+    }
+
+    std::vector<RecoveredArgument> arguments;
+
+    for (const char* reg : registers)
+    {
+        const std::string canonicalRegister = reg;
+        const auto it = stats.find(canonicalRegister);
+
+        if (it == stats.end())
+        {
+            continue;
+        }
+
+        const ArgumentStats& info = it->second;
+        RecoveredArgument argument;
+        argument.Name = BuildArgumentName(canonicalRegister);
+        argument.Register = canonicalRegister;
+        argument.TypeHint = InferTypeHintFromWidth(64, info.MemoryBaseUseCount != 0);
+        argument.RoleHint =
+            (info.MemoryBaseUseCount != 0) ? "pointer_like"
+            : (info.ArithmeticUseCount > info.CompareUseCount && info.ArithmeticUseCount != 0) ? "count_or_length"
+            : (info.CompareUseCount != 0) ? "scalar_or_flag"
+            : "scalar";
+        argument.FirstUseSite = info.FirstUseSite;
+        argument.UseCount = info.UseCount;
+        argument.Confidence = Clamp01(
+            0.55
+            + (info.MemoryBaseUseCount != 0 ? 0.12 : 0.0)
+            + (info.UseCount > 6 ? 0.18 : static_cast<double>(info.UseCount) * 0.03));
+        arguments.push_back(argument);
+    }
+
+    return arguments;
+}
+
+std::vector<RecoveredLocal> RecoverLocals(
+    const std::vector<MemoryAccess>& memoryAccesses,
+    const StackFrameFacts& stackFrame)
+{
+    struct LocalStats
+    {
+        std::string BaseRegister;
+        int64_t Offset = 0;
+        uint32_t WidthBits = 0;
+        uint64_t FirstSite = 0;
+        uint64_t LastSite = 0;
+        uint32_t ReadCount = 0;
+        uint32_t WriteCount = 0;
+        uint32_t AddressCount = 0;
+    };
+
+    std::unordered_map<std::string, LocalStats> statsByKey;
+
+    for (const MemoryAccess& access : memoryAccesses)
+    {
+        if (access.BaseRegister != "rbp" && access.BaseRegister != "rsp")
+        {
+            continue;
+        }
+
+        int64_t offset = 0;
+
+        if (!TryParseSignedValue(access.Displacement, offset))
+        {
+            offset = 0;
+        }
+
+        bool isCandidate = false;
+        std::string storage = "stack_slot";
+
+        if (access.BaseRegister == "rbp" && offset < 0)
+        {
+            isCandidate = true;
+            storage = "stack_local";
+        }
+        else if (access.BaseRegister == "rsp" && offset >= 0
+            && (stackFrame.StackAlloc == 0 || static_cast<uint32_t>(offset) < stackFrame.StackAlloc))
+        {
+            isCandidate = true;
+            storage = "stack_local";
+        }
+        else if ((access.BaseRegister == "rbp" && offset > 0 && offset <= 0x40)
+            || (access.BaseRegister == "rsp" && offset >= 0 && stackFrame.StackAlloc != 0 && static_cast<uint32_t>(offset) < stackFrame.StackAlloc + 0x40))
+        {
+            isCandidate = true;
+            storage = "stack_home";
+        }
+
+        if (!isCandidate)
+        {
+            continue;
+        }
+
+        const std::string key = BuildStackSlotKey(access.BaseRegister, offset);
+        LocalStats& stats = statsByKey[key];
+
+        if (stats.BaseRegister.empty())
+        {
+            stats.BaseRegister = access.BaseRegister;
+            stats.Offset = offset;
+            stats.FirstSite = access.Site;
+        }
+
+        stats.LastSite = access.Site;
+        stats.WidthBits = (std::max)(stats.WidthBits, access.WidthBits);
+
+        if (access.Kind == "read")
+        {
+            ++stats.ReadCount;
+        }
+        else if (access.Kind == "write")
+        {
+            ++stats.WriteCount;
+        }
+        else if (access.Kind == "read_write")
+        {
+            ++stats.ReadCount;
+            ++stats.WriteCount;
+        }
+        else if (access.Kind == "address")
+        {
+            ++stats.AddressCount;
+        }
+
+        (void)storage;
+    }
+
+    std::vector<RecoveredLocal> locals;
+
+    for (const auto& entry : statsByKey)
+    {
+        const LocalStats& stats = entry.second;
+        RecoveredLocal local;
+        local.Name = BuildStackSlotName(stats.Offset);
+        local.BaseRegister = stats.BaseRegister;
+        local.Offset = stats.Offset;
+        local.Storage = ((stats.BaseRegister == "rbp" && stats.Offset < 0)
+            || (stats.BaseRegister == "rsp" && stats.Offset >= 0 && (stackFrame.StackAlloc == 0 || static_cast<uint32_t>(stats.Offset) < stackFrame.StackAlloc)))
+            ? "stack_local"
+            : "stack_home";
+        local.TypeHint = InferTypeHintFromWidth(stats.WidthBits, stats.AddressCount != 0);
+        local.RoleHint =
+            (stats.AddressCount != 0) ? "address_taken_local"
+            : (stats.ReadCount != 0 && stats.WriteCount != 0) ? "mutable_local"
+            : (stats.WriteCount != 0) ? "spill_or_out_param"
+            : "incoming_home_or_saved";
+        local.FirstSite = stats.FirstSite;
+        local.LastSite = stats.LastSite;
+        local.ReadCount = stats.ReadCount;
+        local.WriteCount = stats.WriteCount;
+        local.Confidence = Clamp01(
+            0.45
+            + ((local.Storage == "stack_local") ? 0.15 : 0.05)
+            + static_cast<double>(stats.ReadCount + stats.WriteCount + stats.AddressCount) * 0.04);
+        locals.push_back(local);
+    }
+
+    std::sort(
+        locals.begin(),
+        locals.end(),
+        [](const RecoveredLocal& left, const RecoveredLocal& right)
+        {
+            return left.FirstSite < right.FirstSite;
+        });
+
+    return locals;
+}
+
+std::unordered_map<std::string, std::string> BuildArgumentRegisterNameMap(const std::vector<RecoveredArgument>& arguments)
+{
+    std::unordered_map<std::string, std::string> mapping;
+
+    for (const RecoveredArgument& argument : arguments)
+    {
+        mapping[argument.Register] = argument.Name;
+    }
+
+    return mapping;
+}
+
+std::unordered_map<std::string, std::string> BuildLocalKeyNameMap(const std::vector<RecoveredLocal>& locals)
+{
+    std::unordered_map<std::string, std::string> mapping;
+
+    for (const RecoveredLocal& local : locals)
+    {
+        mapping[BuildStackSlotKey(local.BaseRegister, local.Offset)] = local.Name;
+    }
+
+    return mapping;
+}
+
+std::string RewriteOperandWithRecoveredNames(
+    const std::string& operand,
+    const std::unordered_map<std::string, std::string>& argumentRegisterMap,
+    const std::unordered_map<std::string, std::string>& localKeyNameMap)
+{
+    std::string baseRegister;
+    int64_t offset = 0;
+
+    if (TryParseStackOperand(operand, baseRegister, offset))
+    {
+        const auto localIt = localKeyNameMap.find(BuildStackSlotKey(baseRegister, offset));
+
+        if (localIt != localKeyNameMap.end())
+        {
+            return localIt->second;
+        }
+    }
+
+    const std::string stripped = StripPointerDecorators(operand);
+    const std::vector<std::string> registers = ExtractOperandRegisterTokens(stripped);
+
+    if (registers.size() == 1)
+    {
+        const auto argumentIt = argumentRegisterMap.find(registers.front());
+
+        if (argumentIt != argumentRegisterMap.end())
+        {
+            return argumentIt->second;
+        }
+    }
+
+    return stripped;
+}
+
+std::unordered_map<std::string, std::vector<std::string>> BuildBlockPredecessors(const std::vector<BasicBlock>& blocks)
+{
+    std::unordered_map<std::string, std::vector<std::string>> predecessors;
+
+    for (const BasicBlock& block : blocks)
+    {
+        for (const std::string& successor : block.Successors)
+        {
+            predecessors[successor].push_back(block.Id);
+        }
+    }
+
+    return predecessors;
+}
+
+std::string DescribeAssignmentValue(
+    const DisassembledInstruction& instruction,
+    const std::vector<std::string>& operands,
+    const std::unordered_map<std::string, std::string>& argumentRegisterMap,
+    const std::unordered_map<std::string, std::string>& localKeyNameMap)
+{
+    if (instruction.Mnemonic == "xor" && operands.size() >= 2)
+    {
+        const std::string left = StripPointerDecorators(operands[0]);
+        const std::string right = StripPointerDecorators(operands[1]);
+
+        if (!left.empty() && left == right)
+        {
+            return "0";
+        }
+    }
+
+    if (instruction.IsCall)
+    {
+        return "call_result";
+    }
+
+    if (StartsWithInsensitive(instruction.Mnemonic, "set"))
+    {
+        return instruction.Mnemonic + "_result";
+    }
+
+    if (operands.size() >= 2)
+    {
+        const std::string left = RewriteOperandWithRecoveredNames(operands[0], argumentRegisterMap, localKeyNameMap);
+        const std::string right = RewriteOperandWithRecoveredNames(operands[1], argumentRegisterMap, localKeyNameMap);
+
+        if (instruction.Mnemonic == "mov"
+            || instruction.Mnemonic == "movzx"
+            || instruction.Mnemonic == "movsx"
+            || instruction.Mnemonic == "movsxd")
+        {
+            return right;
+        }
+
+        if (instruction.Mnemonic == "lea")
+        {
+            return "&" + right;
+        }
+
+        if (instruction.Mnemonic == "add")
+        {
+            return left + " + " + right;
+        }
+
+        if (instruction.Mnemonic == "sub")
+        {
+            return left + " - " + right;
+        }
+
+        if (instruction.Mnemonic == "and")
+        {
+            return left + " & " + right;
+        }
+
+        if (instruction.Mnemonic == "or")
+        {
+            return left + " | " + right;
+        }
+
+        if (instruction.Mnemonic == "shl")
+        {
+            return left + " << " + right;
+        }
+
+        if (instruction.Mnemonic == "shr")
+        {
+            return left + " >> " + right;
+        }
+
+        if (instruction.Mnemonic == "imul")
+        {
+            return left + " * " + right;
+        }
+    }
+
+    if (!operands.empty())
+    {
+        const std::string operand = RewriteOperandWithRecoveredNames(operands[0], argumentRegisterMap, localKeyNameMap);
+
+        if (instruction.Mnemonic == "inc")
+        {
+            return operand + " + 1";
+        }
+
+        if (instruction.Mnemonic == "dec")
+        {
+            return operand + " - 1";
+        }
+
+        if (instruction.Mnemonic == "neg")
+        {
+            return "-" + operand;
+        }
+    }
+
+    return instruction.Mnemonic;
+}
+
+std::vector<ValueMerge> CollectValueMerges(
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::vector<BasicBlock>& blocks,
+    const std::vector<MemoryAccess>& memoryAccesses,
+    const std::vector<RecoveredArgument>& arguments,
+    const std::vector<RecoveredLocal>& locals)
+{
+    std::unordered_map<uint64_t, const DisassembledInstruction*> instructionByAddress;
+    std::unordered_map<uint64_t, const MemoryAccess*> accessBySite;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::string>> blockDefinitions;
+    const std::unordered_map<std::string, std::string> argumentRegisterMap = BuildArgumentRegisterNameMap(arguments);
+    const std::unordered_map<std::string, std::string> localKeyNameMap = BuildLocalKeyNameMap(locals);
+
+    for (const DisassembledInstruction& instruction : instructions)
+    {
+        instructionByAddress[instruction.Address] = &instruction;
+    }
+
+    for (const MemoryAccess& access : memoryAccesses)
+    {
+        accessBySite[access.Site] = &access;
+    }
+
+    for (const BasicBlock& block : blocks)
+    {
+        std::unordered_map<std::string, std::string> definitions;
+
+        for (uint64_t address : block.InstructionAddresses)
+        {
+            const auto instructionIt = instructionByAddress.find(address);
+
+            if (instructionIt == instructionByAddress.end())
+            {
+                continue;
+            }
+
+            const DisassembledInstruction& instruction = *instructionIt->second;
+            const std::vector<std::string> operands = SplitOperands(instruction.OperandText);
+            const std::string value = DescribeAssignmentValue(instruction, operands, argumentRegisterMap, localKeyNameMap);
+
+            for (const auto& argument : argumentRegisterMap)
+            {
+                if (InstructionWritesRegister(instruction, operands, argument.first))
+                {
+                    definitions[argument.second] = value;
+                }
+            }
+
+            const auto accessIt = accessBySite.find(address);
+
+            if (accessIt != accessBySite.end())
+            {
+                const MemoryAccess& access = *accessIt->second;
+                int64_t offset = 0;
+
+                if ((access.Kind == "write" || access.Kind == "read_write")
+                    && (access.BaseRegister == "rbp" || access.BaseRegister == "rsp")
+                    && TryParseSignedValue(access.Displacement, offset))
+                {
+                    const auto localIt = localKeyNameMap.find(BuildStackSlotKey(access.BaseRegister, offset));
+
+                    if (localIt != localKeyNameMap.end())
+                    {
+                        definitions[localIt->second] = value;
+                    }
+                }
+            }
+        }
+
+        blockDefinitions[block.Id] = std::move(definitions);
+    }
+
+    const std::unordered_map<std::string, std::vector<std::string>> predecessors = BuildBlockPredecessors(blocks);
+    std::vector<ValueMerge> merges;
+
+    for (const BasicBlock& block : blocks)
+    {
+        const auto predecessorIt = predecessors.find(block.Id);
+
+        if (predecessorIt == predecessors.end() || predecessorIt->second.size() < 2)
+        {
+            continue;
+        }
+
+        std::unordered_map<std::string, std::vector<std::string>> valuesByVariable;
+        std::unordered_map<std::string, std::vector<std::string>> predecessorByVariable;
+
+        for (const std::string& predecessor : predecessorIt->second)
+        {
+            const auto definitionsIt = blockDefinitions.find(predecessor);
+
+            if (definitionsIt == blockDefinitions.end())
+            {
+                continue;
+            }
+
+            for (const auto& definition : definitionsIt->second)
+            {
+                valuesByVariable[definition.first].push_back(definition.second);
+                predecessorByVariable[definition.first].push_back(predecessor);
+            }
+        }
+
+        for (const auto& entry : valuesByVariable)
+        {
+            std::set<std::string> uniqueValues(entry.second.begin(), entry.second.end());
+
+            if (uniqueValues.size() < 2)
+            {
+                continue;
+            }
+
+            ValueMerge merge;
+            merge.BlockId = block.Id;
+            merge.Variable = entry.first;
+            merge.IncomingValues.assign(uniqueValues.begin(), uniqueValues.end());
+            merge.Predecessors = predecessorByVariable[entry.first];
+            merge.Confidence = Clamp01(0.55 + static_cast<double>(merge.IncomingValues.size()) * 0.08);
+            merges.push_back(std::move(merge));
+        }
+    }
+
+    return merges;
+}
+
+std::string NormalizeBooleanDestinationKey(const std::string& operand)
+{
+    return StripPointerDecorators(operand);
+}
+
+std::string NormalizeBranchMnemonic(std::string mnemonic)
+{
+    mnemonic = ToLowerAscii(TrimCopy(mnemonic));
+
+    if (mnemonic == "jz")
+    {
+        return "je";
+    }
+
+    if (mnemonic == "jnz")
+    {
+        return "jne";
+    }
+
+    if (mnemonic == "jnb")
+    {
+        return "jae";
+    }
+
+    if (mnemonic == "jc")
+    {
+        return "jb";
+    }
+
+    if (mnemonic == "jnc")
+    {
+        return "jae";
+    }
+
+    return mnemonic;
+}
+
+std::string NegateExpression(const std::string& expression)
+{
+    if (expression.empty())
+    {
+        return expression;
+    }
+
+    return "!(" + expression + ")";
+}
+
+struct ComparePattern
+{
+    std::string Kind;
+    std::string Left;
+    std::string Right;
+    std::string RawLeftKey;
+    std::string RawRightKey;
+    bool Valid = false;
+};
+
+std::string BuildCompareExpression(const ComparePattern& pattern, const std::string& branchMnemonic)
+{
+    const std::string branch = NormalizeBranchMnemonic(branchMnemonic);
+
+    if (pattern.Kind == "cmp")
+    {
+        if (branch == "je")
+        {
+            return pattern.Left + " == " + pattern.Right;
+        }
+
+        if (branch == "jne")
+        {
+            return pattern.Left + " != " + pattern.Right;
+        }
+
+        if (branch == "ja")
+        {
+            return pattern.Left + " >u " + pattern.Right;
+        }
+
+        if (branch == "jae")
+        {
+            return pattern.Left + " >=u " + pattern.Right;
+        }
+
+        if (branch == "jb")
+        {
+            return pattern.Left + " <u " + pattern.Right;
+        }
+
+        if (branch == "jbe")
+        {
+            return pattern.Left + " <=u " + pattern.Right;
+        }
+
+        if (branch == "jg")
+        {
+            return pattern.Left + " > " + pattern.Right;
+        }
+
+        if (branch == "jge")
+        {
+            return pattern.Left + " >= " + pattern.Right;
+        }
+
+        if (branch == "jl")
+        {
+            return pattern.Left + " < " + pattern.Right;
+        }
+
+        if (branch == "jle")
+        {
+            return pattern.Left + " <= " + pattern.Right;
+        }
+
+        if (branch == "js")
+        {
+            return "(" + pattern.Left + " - " + pattern.Right + ") < 0";
+        }
+
+        if (branch == "jns")
+        {
+            return "(" + pattern.Left + " - " + pattern.Right + ") >= 0";
+        }
+    }
+
+    if (pattern.Kind == "test")
+    {
+        if (branch == "je")
+        {
+            if (pattern.RawLeftKey == pattern.RawRightKey)
+            {
+                return pattern.Left + " == 0";
+            }
+
+            return "(" + pattern.Left + " & " + pattern.Right + ") == 0";
+        }
+
+        if (branch == "jne")
+        {
+            if (pattern.RawLeftKey == pattern.RawRightKey)
+            {
+                return pattern.Left + " != 0";
+            }
+
+            return "(" + pattern.Left + " & " + pattern.Right + ") != 0";
+        }
+
+        if (branch == "js")
+        {
+            return pattern.Left + " < 0";
+        }
+
+        if (branch == "jns")
+        {
+            return pattern.Left + " >= 0";
+        }
+    }
+
+    return std::string();
+}
+
+std::string BuildBranchExpression(
+    const ComparePattern& pattern,
+    const std::string& branchMnemonic,
+    const std::unordered_map<std::string, std::string>& booleanDestinations)
+{
+    if (!pattern.Valid)
+    {
+        return std::string();
+    }
+
+    const std::string branch = NormalizeBranchMnemonic(branchMnemonic);
+    const auto boolIt = booleanDestinations.find(pattern.RawLeftKey);
+
+    if (boolIt != booleanDestinations.end()
+        && ((pattern.Kind == "test" && pattern.RawLeftKey == pattern.RawRightKey)
+            || (pattern.Kind == "cmp" && IsZeroLikeOperand(pattern.Right))))
+    {
+        if (branch == "je")
+        {
+            return NegateExpression(boolIt->second);
+        }
+
+        if (branch == "jne")
+        {
+            return boolIt->second;
+        }
+    }
+
+    return BuildCompareExpression(pattern, branchMnemonic);
+}
+
+std::vector<NormalizedCondition> CollectNormalizedConditions(
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::vector<BasicBlock>& blocks,
+    const std::vector<RecoveredArgument>& arguments,
+    const std::vector<RecoveredLocal>& locals)
+{
+    std::unordered_map<uint64_t, const DisassembledInstruction*> instructionByAddress;
+    const std::unordered_map<std::string, std::string> argumentRegisterMap = BuildArgumentRegisterNameMap(arguments);
+    const std::unordered_map<std::string, std::string> localKeyNameMap = BuildLocalKeyNameMap(locals);
+    std::vector<NormalizedCondition> conditions;
+
+    for (const DisassembledInstruction& instruction : instructions)
+    {
+        instructionByAddress[instruction.Address] = &instruction;
+    }
+
+    for (const BasicBlock& block : blocks)
+    {
+        ComparePattern lastPattern;
+        std::unordered_map<std::string, std::string> booleanDestinations;
+
+        for (uint64_t address : block.InstructionAddresses)
+        {
+            const auto instructionIt = instructionByAddress.find(address);
+
+            if (instructionIt == instructionByAddress.end())
+            {
+                continue;
+            }
+
+            const DisassembledInstruction& instruction = *instructionIt->second;
+            const std::vector<std::string> operands = SplitOperands(instruction.OperandText);
+
+            if ((instruction.Mnemonic == "cmp" || instruction.Mnemonic == "test") && operands.size() >= 2)
+            {
+                lastPattern.Kind = instruction.Mnemonic;
+                lastPattern.Left = RewriteOperandWithRecoveredNames(operands[0], argumentRegisterMap, localKeyNameMap);
+                lastPattern.Right = RewriteOperandWithRecoveredNames(operands[1], argumentRegisterMap, localKeyNameMap);
+                lastPattern.RawLeftKey = NormalizeBooleanDestinationKey(operands[0]);
+                lastPattern.RawRightKey = NormalizeBooleanDestinationKey(operands[1]);
+                lastPattern.Valid = true;
+                continue;
+            }
+
+            if (StartsWithInsensitive(instruction.Mnemonic, "set") && operands.size() >= 1 && lastPattern.Valid)
+            {
+                std::string syntheticBranch = "j" + instruction.Mnemonic.substr(3);
+
+                if (instruction.Mnemonic == "setz")
+                {
+                    syntheticBranch = "je";
+                }
+                else if (instruction.Mnemonic == "setnz")
+                {
+                    syntheticBranch = "jne";
+                }
+
+                const std::string expression = BuildCompareExpression(lastPattern, syntheticBranch);
+
+                if (!expression.empty())
+                {
+                    booleanDestinations[NormalizeBooleanDestinationKey(operands[0])] = expression;
+                }
+
+                continue;
+            }
+
+            if (instruction.IsConditionalBranch)
+            {
+                const std::string expression = BuildBranchExpression(lastPattern, instruction.Mnemonic, booleanDestinations);
+
+                if (expression.empty())
+                {
+                    continue;
+                }
+
+                NormalizedCondition condition;
+                condition.Site = instruction.Address;
+                condition.BlockId = block.Id;
+                condition.BranchMnemonic = instruction.Mnemonic;
+                condition.Expression = expression;
+                condition.TrueTargetBlock = !block.Successors.empty() ? block.Successors.front() : std::string();
+                condition.FalseTargetBlock = block.Successors.size() > 1 ? block.Successors[1] : std::string();
+                condition.Confidence = Clamp01(0.58 + (StartsWithInsensitive(expression, "!(") ? 0.04 : 0.10));
+                conditions.push_back(std::move(condition));
+            }
+        }
+    }
+
+    return conditions;
+}
+
 double ScoreConfidence(
     const ModuleInfo& moduleInfo,
     const std::vector<FunctionRegion>& regions,
@@ -1303,6 +2601,10 @@ AnalysisFacts BuildAnalysisFacts(
     facts.IndirectCalls = CollectCalls(instructions, true);
     facts.Switches = CollectSwitches(instructions);
     facts.MemoryAccesses = CollectMemoryAccesses(instructions);
+    facts.RecoveredArguments = RecoverArguments(instructions);
+    facts.RecoveredLocals = RecoverLocals(facts.MemoryAccesses, facts.StackFrame);
+    facts.ValueMerges = CollectValueMerges(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
+    facts.NormalizedConditions = CollectNormalizedConditions(instructions, facts.Blocks, facts.RecoveredArguments, facts.RecoveredLocals);
     facts.BytesSha256 = ComputeSha256Hex(bytes);
 
     if (regions.empty())
@@ -1399,6 +2701,33 @@ AnalysisFacts BuildAnalysisFacts(
             + ", rip_relative="
             + std::to_string(ripRelative)
             + ")");
+    }
+
+    if (!facts.RecoveredArguments.empty())
+    {
+        std::vector<std::string> argumentNames;
+
+        for (const auto& argument : facts.RecoveredArguments)
+        {
+            argumentNames.push_back(argument.Name + ":" + argument.Register);
+        }
+
+        facts.Facts.push_back("recovered arguments: " + JoinStrings(argumentNames, ", "));
+    }
+
+    if (!facts.RecoveredLocals.empty())
+    {
+        facts.Facts.push_back("recovered stack locals: " + std::to_string(facts.RecoveredLocals.size()));
+    }
+
+    if (!facts.ValueMerges.empty())
+    {
+        facts.Facts.push_back("value merges detected: " + std::to_string(facts.ValueMerges.size()));
+    }
+
+    if (!facts.NormalizedConditions.empty())
+    {
+        facts.Facts.push_back("normalized branch conditions: " + std::to_string(facts.NormalizedConditions.size()));
     }
 
     facts.PreLlmConfidence = ScoreConfidence(

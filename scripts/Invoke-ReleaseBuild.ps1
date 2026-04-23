@@ -4,6 +4,9 @@ param(
     [string]$Configuration = 'Release',
     [string]$SourceDir = (Split-Path -Parent $PSScriptRoot),
     [string]$BuildDir,
+    [ValidateSet('Auto', 'Vendor', 'Fetch')]
+    [string]$ZydisSource = 'Auto',
+    [string]$ZydisVendorDir,
     [string]$DebuggersRoot = $env:DEBUGGERS_ROOT,
     [string]$DbgengIncludeDir,
     [string]$DbgengLibrary,
@@ -77,6 +80,7 @@ $buildParams = @{
     Architecture = $Architecture
     Configuration = $Configuration
     SourceDir = $SourceDir
+    ZydisSource = $ZydisSource
     DebuggersRoot = $DebuggersRoot
     Reconfigure = $true
     Clean = $Clean
@@ -86,6 +90,11 @@ $buildParams = @{
 if (-not [string]::IsNullOrWhiteSpace($BuildDir))
 {
     $buildParams.BuildDir = $BuildDir
+}
+
+if (-not [string]::IsNullOrWhiteSpace($ZydisVendorDir))
+{
+    $buildParams.ZydisVendorDir = $ZydisVendorDir
 }
 
 if (-not [string]::IsNullOrWhiteSpace($DbgengIncludeDir))

@@ -10,6 +10,53 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+set(DECOMP_VENDORED_ZYDIS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/zydis" CACHE PATH "Directory containing a vendored Zydis source tree")
+set(DECOMP_ZYDIS_SOURCE "auto" CACHE STRING "How to provide Zydis: auto, vendor, or fetch")
+set_property(CACHE DECOMP_ZYDIS_SOURCE PROPERTY STRINGS auto vendor fetch)
+
+string(TOLOWER "${DECOMP_ZYDIS_SOURCE}" DECOMP_ZYDIS_SOURCE)
+
+if (NOT DECOMP_ZYDIS_SOURCE STREQUAL "auto"
+    AND NOT DECOMP_ZYDIS_SOURCE STREQUAL "vendor"
+    AND NOT DECOMP_ZYDIS_SOURCE STREQUAL "fetch")
+    message(FATAL_ERROR "DECOMP_ZYDIS_SOURCE must be one of: auto, vendor, fetch")
+endif()
+
+set(ZYDIS_BUILD_SHARED_LIB OFF CACHE BOOL "Build Zydis as a shared library" FORCE)
+set(ZYDIS_BUILD_EXAMPLES OFF CACHE BOOL "Build Zydis examples" FORCE)
+set(ZYDIS_BUILD_TOOLS OFF CACHE BOOL "Build Zydis tools" FORCE)
+set(ZYDIS_BUILD_TESTS OFF CACHE BOOL "Build Zydis tests" FORCE)
+set(ZYAN_SYSTEM_ZYCORE OFF CACHE BOOL "Use a system Zycore dependency" FORCE)
+
+set(_decomp_zydis_use_vendor OFF)
+
+if (DECOMP_ZYDIS_SOURCE STREQUAL "vendor")
+    set(_decomp_zydis_use_vendor ON)
+elseif (DECOMP_ZYDIS_SOURCE STREQUAL "auto")
+    if (EXISTS "${DECOMP_VENDORED_ZYDIS_DIR}/CMakeLists.txt")
+        set(_decomp_zydis_use_vendor ON)
+    endif()
+endif()
+
+if (_decomp_zydis_use_vendor)
+    if (NOT EXISTS "${DECOMP_VENDORED_ZYDIS_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR "Vendored Zydis was requested but no CMakeLists.txt was found under ${DECOMP_VENDORED_ZYDIS_DIR}")
+    endif()
+
+    set(ZYAN_ZYCORE_PATH "${DECOMP_VENDORED_ZYDIS_DIR}/dependencies/zycore" CACHE PATH "The path to look for Zycore" FORCE)
+    add_subdirectory("${DECOMP_VENDORED_ZYDIS_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/third_party/zydis" EXCLUDE_FROM_ALL)
+    set(DECOMP_ZYDIS_SOURCE_RESOLVED "vendor")
+else()
+    include(FetchContent)
+    FetchContent_Declare(
+        zydis
+        GIT_REPOSITORY https://github.com/zyantific/zydis.git
+        GIT_TAG v4.1.1
+    )
+    FetchContent_MakeAvailable(zydis)
+    set(DECOMP_ZYDIS_SOURCE_RESOLVED "fetch")
+endif()
+
 set(DECOMP_VERSION_FILE "${CMAKE_CURRENT_SOURCE_DIR}/version.txt")
 if (NOT EXISTS "${DECOMP_VERSION_FILE}")
     message(FATAL_ERROR "Missing version file: ${DECOMP_VERSION_FILE}")
@@ -143,6 +190,7 @@ message(STATUS "Using dbgeng library: ${_resolved_dbgeng_library}")
 if (DEFINED DEBUGGERS_ROOT_RESOLVED)
     message(STATUS "Resolved dbgeng root: ${DEBUGGERS_ROOT_RESOLVED}")
 endif()
+message(STATUS "DECOMP_ZYDIS_SOURCE=${DECOMP_ZYDIS_SOURCE_RESOLVED}")
 message(STATUS "DECOMP_USE_SYMBOL_ENTRY_APIS=${DECOMP_USE_SYMBOL_ENTRY_APIS}")
 
 add_library(
@@ -185,6 +233,7 @@ target_link_libraries(
     decomp_shared
     ${_resolved_dbgeng_library}
     winhttp
+    Zydis
 )
 
 if (DECOMP_USE_SYMBOL_ENTRY_APIS)

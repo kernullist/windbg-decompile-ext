@@ -4,6 +4,9 @@ param(
     [string]$Configuration = 'Release',
     [string]$SourceDir = (Split-Path -Parent $PSScriptRoot),
     [string]$BuildDir = (Join-Path (Split-Path -Parent $PSScriptRoot) 'build-legacy'),
+    [ValidateSet('Auto', 'Vendor', 'Fetch')]
+    [string]$ZydisSource = 'Auto',
+    [string]$ZydisVendorDir,
     [string]$DebuggersRoot = $env:DEBUGGERS_ROOT,
     [string]$DbgengIncludeDir,
     [string]$DbgengLibrary,
@@ -21,6 +24,8 @@ $scriptPath = Join-Path $PSScriptRoot 'Build.ps1'
     -Configuration $Configuration `
     -SourceDir $SourceDir `
     -BuildDir $BuildDir `
+    -ZydisSource $ZydisSource `
+    -ZydisVendorDir $ZydisVendorDir `
     -DebuggersRoot $DebuggersRoot `
     -DbgengIncludeDir $DbgengIncludeDir `
     -DbgengLibrary $DbgengLibrary `

@@ -944,6 +944,18 @@ constexpr size_t kPromptUncertaintyLimit = 12;
 constexpr size_t kPromptSwitchLimit = 10;
 constexpr size_t kPromptMemoryAccessLimit = 32;
 constexpr size_t kPromptInstructionWindowLimit = 20;
+constexpr size_t kPromptRecoveredArgumentLimit = 8;
+constexpr size_t kPromptRecoveredLocalLimit = 24;
+constexpr size_t kPromptValueMergeLimit = 16;
+constexpr size_t kPromptDataReferenceLimit = 24;
+constexpr size_t kPromptCallTargetLimit = 24;
+constexpr size_t kPromptNormalizedConditionLimit = 24;
+constexpr size_t kPromptPdbParamLimit = 12;
+constexpr size_t kPromptPdbLocalLimit = 24;
+constexpr size_t kPromptPdbFieldHintLimit = 24;
+constexpr size_t kPromptPdbEnumHintLimit = 16;
+constexpr size_t kPromptPdbSourceLocationLimit = 16;
+constexpr size_t kPromptPdbConflictLimit = 12;
 
 std::string BuildInstructionSummary(const DisassembledInstruction& instruction)
 {
@@ -1512,6 +1524,294 @@ JsonValue BuildMemoryAccessesJson(const AnalyzeRequest& request, bool* truncated
     return array;
 }
 
+JsonValue BuildRecoveredArgumentsJson(const AnalyzeRequest& request, bool* truncated)
+{
+    JsonValue array = JsonValue::MakeArray();
+    const std::vector<size_t> indices = SelectSpreadIndices(request.Facts.RecoveredArguments.size(), kPromptRecoveredArgumentLimit);
+
+    if (truncated != nullptr)
+    {
+        *truncated = request.Facts.RecoveredArguments.size() > indices.size();
+    }
+
+    for (size_t index : indices)
+    {
+        const RecoveredArgument& argument = request.Facts.RecoveredArguments[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("name", JsonValue::MakeString(argument.Name));
+        item.Set("register", JsonValue::MakeString(argument.Register));
+        item.Set("type_hint", JsonValue::MakeString(argument.TypeHint));
+        item.Set("role_hint", JsonValue::MakeString(argument.RoleHint));
+        item.Set("first_use_site", JsonValue::MakeString(HexU64(argument.FirstUseSite)));
+        item.Set("use_count", JsonValue::MakeNumber(static_cast<double>(argument.UseCount)));
+        item.Set("confidence", JsonValue::MakeNumber(argument.Confidence));
+        array.PushBack(item);
+    }
+
+    return array;
+}
+
+JsonValue BuildRecoveredLocalsJson(const AnalyzeRequest& request, bool* truncated)
+{
+    JsonValue array = JsonValue::MakeArray();
+    const std::vector<size_t> indices = SelectSpreadIndices(request.Facts.RecoveredLocals.size(), kPromptRecoveredLocalLimit);
+
+    if (truncated != nullptr)
+    {
+        *truncated = request.Facts.RecoveredLocals.size() > indices.size();
+    }
+
+    for (size_t index : indices)
+    {
+        const RecoveredLocal& local = request.Facts.RecoveredLocals[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("name", JsonValue::MakeString(local.Name));
+        item.Set("base_register", JsonValue::MakeString(local.BaseRegister));
+        item.Set("offset", JsonValue::MakeString(HexS64(local.Offset)));
+        item.Set("storage", JsonValue::MakeString(local.Storage));
+        item.Set("type_hint", JsonValue::MakeString(local.TypeHint));
+        item.Set("role_hint", JsonValue::MakeString(local.RoleHint));
+        item.Set("first_site", JsonValue::MakeString(HexU64(local.FirstSite)));
+        item.Set("last_site", JsonValue::MakeString(HexU64(local.LastSite)));
+        item.Set("read_count", JsonValue::MakeNumber(static_cast<double>(local.ReadCount)));
+        item.Set("write_count", JsonValue::MakeNumber(static_cast<double>(local.WriteCount)));
+        item.Set("confidence", JsonValue::MakeNumber(local.Confidence));
+        array.PushBack(item);
+    }
+
+    return array;
+}
+
+JsonValue BuildValueMergesJson(const AnalyzeRequest& request, bool* truncated)
+{
+    JsonValue array = JsonValue::MakeArray();
+    const std::vector<size_t> indices = SelectSpreadIndices(request.Facts.ValueMerges.size(), kPromptValueMergeLimit);
+
+    if (truncated != nullptr)
+    {
+        *truncated = request.Facts.ValueMerges.size() > indices.size();
+    }
+
+    for (size_t index : indices)
+    {
+        const ValueMerge& merge = request.Facts.ValueMerges[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("block_id", JsonValue::MakeString(merge.BlockId));
+        item.Set("variable", JsonValue::MakeString(merge.Variable));
+        item.Set("predecessors", BuildStringArray(merge.Predecessors, 8, nullptr));
+        item.Set("incoming_values", BuildStringArray(merge.IncomingValues, 8, nullptr));
+        item.Set("confidence", JsonValue::MakeNumber(merge.Confidence));
+        array.PushBack(item);
+    }
+
+    return array;
+}
+
+JsonValue BuildDataReferencesJson(const AnalyzeRequest& request, bool* truncated)
+{
+    JsonValue array = JsonValue::MakeArray();
+    const std::vector<size_t> indices = SelectSpreadIndices(request.Facts.DataReferences.size(), kPromptDataReferenceLimit);
+
+    if (truncated != nullptr)
+    {
+        *truncated = request.Facts.DataReferences.size() > indices.size();
+    }
+
+    for (size_t index : indices)
+    {
+        const DataReference& reference = request.Facts.DataReferences[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("site", JsonValue::MakeString(HexU64(reference.Site)));
+        item.Set("target_address", JsonValue::MakeString(HexU64(reference.TargetAddress)));
+        item.Set("kind", JsonValue::MakeString(reference.Kind));
+        item.Set("symbol", JsonValue::MakeString(reference.Symbol));
+        item.Set("module_name", JsonValue::MakeString(reference.ModuleName));
+        item.Set("display", JsonValue::MakeString(reference.Display));
+        item.Set("preview", JsonValue::MakeString(reference.Preview));
+        item.Set("rip_relative", JsonValue::MakeBoolean(reference.RipRelative));
+        item.Set("dereferenced", JsonValue::MakeBoolean(reference.Dereferenced));
+        array.PushBack(item);
+    }
+
+    return array;
+}
+
+JsonValue BuildCallTargetsJson(const AnalyzeRequest& request, bool* truncated)
+{
+    JsonValue array = JsonValue::MakeArray();
+    const std::vector<size_t> indices = SelectSpreadIndices(request.Facts.CallTargets.size(), kPromptCallTargetLimit);
+
+    if (truncated != nullptr)
+    {
+        *truncated = request.Facts.CallTargets.size() > indices.size();
+    }
+
+    for (size_t index : indices)
+    {
+        const CallTargetInfo& call = request.Facts.CallTargets[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("site", JsonValue::MakeString(HexU64(call.Site)));
+        item.Set("target_address", JsonValue::MakeString(HexU64(call.TargetAddress)));
+        item.Set("display_name", JsonValue::MakeString(call.DisplayName));
+        item.Set("target_kind", JsonValue::MakeString(call.TargetKind));
+        item.Set("module_name", JsonValue::MakeString(call.ModuleName));
+        item.Set("prototype", JsonValue::MakeString(call.Prototype));
+        item.Set("return_type", JsonValue::MakeString(call.ReturnType));
+        item.Set("side_effects", JsonValue::MakeString(call.SideEffects));
+        item.Set("indirect", JsonValue::MakeBoolean(call.Indirect));
+        item.Set("confidence", JsonValue::MakeNumber(call.Confidence));
+        array.PushBack(item);
+    }
+
+    return array;
+}
+
+JsonValue BuildNormalizedConditionsJson(const AnalyzeRequest& request, bool* truncated)
+{
+    JsonValue array = JsonValue::MakeArray();
+    const std::vector<size_t> indices = SelectSpreadIndices(request.Facts.NormalizedConditions.size(), kPromptNormalizedConditionLimit);
+
+    if (truncated != nullptr)
+    {
+        *truncated = request.Facts.NormalizedConditions.size() > indices.size();
+    }
+
+    for (size_t index : indices)
+    {
+        const NormalizedCondition& condition = request.Facts.NormalizedConditions[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("site", JsonValue::MakeString(HexU64(condition.Site)));
+        item.Set("block_id", JsonValue::MakeString(condition.BlockId));
+        item.Set("branch_mnemonic", JsonValue::MakeString(condition.BranchMnemonic));
+        item.Set("expression", JsonValue::MakeString(condition.Expression));
+        item.Set("true_target_block", JsonValue::MakeString(condition.TrueTargetBlock));
+        item.Set("false_target_block", JsonValue::MakeString(condition.FalseTargetBlock));
+        item.Set("confidence", JsonValue::MakeNumber(condition.Confidence));
+        array.PushBack(item);
+    }
+
+    return array;
+}
+
+JsonValue BuildPdbFactsJson(const AnalyzeRequest& request, bool* truncated)
+{
+    JsonValue object = JsonValue::MakeObject();
+    JsonValue params = JsonValue::MakeArray();
+    JsonValue locals = JsonValue::MakeArray();
+    JsonValue fieldHints = JsonValue::MakeArray();
+    JsonValue enumHints = JsonValue::MakeArray();
+    JsonValue sourceLocations = JsonValue::MakeArray();
+    JsonValue conflicts = JsonValue::MakeArray();
+    bool anyTruncated = false;
+
+    const std::vector<size_t> paramIndices = SelectSpreadIndices(request.Facts.Pdb.Params.size(), kPromptPdbParamLimit);
+    const std::vector<size_t> localIndices = SelectSpreadIndices(request.Facts.Pdb.Locals.size(), kPromptPdbLocalLimit);
+    const std::vector<size_t> fieldIndices = SelectSpreadIndices(request.Facts.Pdb.FieldHints.size(), kPromptPdbFieldHintLimit);
+    const std::vector<size_t> enumIndices = SelectSpreadIndices(request.Facts.Pdb.EnumHints.size(), kPromptPdbEnumHintLimit);
+    const std::vector<size_t> sourceIndices = SelectSpreadIndices(request.Facts.Pdb.SourceLocations.size(), kPromptPdbSourceLocationLimit);
+    const std::vector<size_t> conflictIndices = SelectSpreadIndices(request.Facts.Pdb.Conflicts.size(), kPromptPdbConflictLimit);
+
+    anyTruncated = anyTruncated
+        || request.Facts.Pdb.Params.size() > paramIndices.size()
+        || request.Facts.Pdb.Locals.size() > localIndices.size()
+        || request.Facts.Pdb.FieldHints.size() > fieldIndices.size()
+        || request.Facts.Pdb.EnumHints.size() > enumIndices.size()
+        || request.Facts.Pdb.SourceLocations.size() > sourceIndices.size()
+        || request.Facts.Pdb.Conflicts.size() > conflictIndices.size();
+
+    for (size_t index : paramIndices)
+    {
+        const PdbScopedSymbol& symbol = request.Facts.Pdb.Params[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("name", JsonValue::MakeString(symbol.Name));
+        item.Set("type", JsonValue::MakeString(symbol.Type));
+        item.Set("storage", JsonValue::MakeString(symbol.Storage));
+        item.Set("location", JsonValue::MakeString(symbol.Location));
+        item.Set("site", JsonValue::MakeString(HexU64(symbol.Site)));
+        item.Set("confidence", JsonValue::MakeNumber(symbol.Confidence));
+        params.PushBack(item);
+    }
+
+    for (size_t index : localIndices)
+    {
+        const PdbScopedSymbol& symbol = request.Facts.Pdb.Locals[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("name", JsonValue::MakeString(symbol.Name));
+        item.Set("type", JsonValue::MakeString(symbol.Type));
+        item.Set("storage", JsonValue::MakeString(symbol.Storage));
+        item.Set("location", JsonValue::MakeString(symbol.Location));
+        item.Set("site", JsonValue::MakeString(HexU64(symbol.Site)));
+        item.Set("confidence", JsonValue::MakeNumber(symbol.Confidence));
+        locals.PushBack(item);
+    }
+
+    for (size_t index : fieldIndices)
+    {
+        const PdbFieldHint& hint = request.Facts.Pdb.FieldHints[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("base_name", JsonValue::MakeString(hint.BaseName));
+        item.Set("base_type", JsonValue::MakeString(hint.BaseType));
+        item.Set("field_name", JsonValue::MakeString(hint.FieldName));
+        item.Set("field_type", JsonValue::MakeString(hint.FieldType));
+        item.Set("base_register", JsonValue::MakeString(hint.BaseRegister));
+        item.Set("offset", JsonValue::MakeString(HexS64(hint.Offset)));
+        item.Set("site", JsonValue::MakeString(HexU64(hint.Site)));
+        item.Set("confidence", JsonValue::MakeNumber(hint.Confidence));
+        fieldHints.PushBack(item);
+    }
+
+    for (size_t index : enumIndices)
+    {
+        const PdbEnumHint& hint = request.Facts.Pdb.EnumHints[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("type_name", JsonValue::MakeString(hint.TypeName));
+        item.Set("constant_name", JsonValue::MakeString(hint.ConstantName));
+        item.Set("expression", JsonValue::MakeString(hint.Expression));
+        item.Set("value", JsonValue::MakeString(HexU64(hint.Value)));
+        item.Set("site", JsonValue::MakeString(HexU64(hint.Site)));
+        item.Set("confidence", JsonValue::MakeNumber(hint.Confidence));
+        enumHints.PushBack(item);
+    }
+
+    for (size_t index : sourceIndices)
+    {
+        const PdbSourceLocation& source = request.Facts.Pdb.SourceLocations[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("site", JsonValue::MakeString(HexU64(source.Site)));
+        item.Set("file", JsonValue::MakeString(source.File));
+        item.Set("line", JsonValue::MakeNumber(static_cast<double>(source.Line)));
+        item.Set("displacement", JsonValue::MakeString(HexU64(source.Displacement)));
+        item.Set("confidence", JsonValue::MakeNumber(source.Confidence));
+        sourceLocations.PushBack(item);
+    }
+
+    for (size_t index : conflictIndices)
+    {
+        conflicts.PushBack(JsonValue::MakeString(request.Facts.Pdb.Conflicts[index]));
+    }
+
+    object.Set("availability", JsonValue::MakeString(request.Facts.Pdb.Availability));
+    object.Set("scope_kind", JsonValue::MakeString(request.Facts.Pdb.ScopeKind));
+    object.Set("symbol_file", JsonValue::MakeString(request.Facts.Pdb.SymbolFile));
+    object.Set("function_name", JsonValue::MakeString(request.Facts.Pdb.FunctionName));
+    object.Set("prototype", JsonValue::MakeString(request.Facts.Pdb.Prototype));
+    object.Set("return_type", JsonValue::MakeString(request.Facts.Pdb.ReturnType));
+    object.Set("params", params);
+    object.Set("locals", locals);
+    object.Set("field_hints", fieldHints);
+    object.Set("enum_hints", enumHints);
+    object.Set("source_locations", sourceLocations);
+    object.Set("conflicts", conflicts);
+    object.Set("confidence", JsonValue::MakeNumber(request.Facts.Pdb.Confidence));
+
+    if (truncated != nullptr)
+    {
+        *truncated = anyTruncated;
+    }
+
+    return object;
+}
+
 JsonValue BuildCountsJson(const AnalyzeRequest& request)
 {
     JsonValue counts = JsonValue::MakeObject();
@@ -1521,6 +1821,17 @@ JsonValue BuildCountsJson(const AnalyzeRequest& request)
     counts.Set("indirect_calls_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.IndirectCalls.size())));
     counts.Set("switches_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.Switches.size())));
     counts.Set("memory_accesses_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.MemoryAccesses.size())));
+    counts.Set("recovered_arguments_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.RecoveredArguments.size())));
+    counts.Set("recovered_locals_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.RecoveredLocals.size())));
+    counts.Set("value_merges_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.ValueMerges.size())));
+    counts.Set("data_references_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.DataReferences.size())));
+    counts.Set("call_targets_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.CallTargets.size())));
+    counts.Set("normalized_conditions_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.NormalizedConditions.size())));
+    counts.Set("pdb_params_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.Pdb.Params.size())));
+    counts.Set("pdb_locals_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.Pdb.Locals.size())));
+    counts.Set("pdb_field_hints_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.Pdb.FieldHints.size())));
+    counts.Set("pdb_enum_hints_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.Pdb.EnumHints.size())));
+    counts.Set("pdb_source_locations_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.Pdb.SourceLocations.size())));
     counts.Set("facts_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.Facts.size())));
     counts.Set("uncertainties_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.UncertainPoints.size())));
     return counts;
@@ -1540,6 +1851,13 @@ JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
     bool indirectCallsTruncated = false;
     bool switchesTruncated = false;
     bool memoryAccessesTruncated = false;
+    bool recoveredArgumentsTruncated = false;
+    bool recoveredLocalsTruncated = false;
+    bool valueMergesTruncated = false;
+    bool dataReferencesTruncated = false;
+    bool callTargetsTruncated = false;
+    bool normalizedConditionsTruncated = false;
+    bool pdbTruncated = false;
     bool factsTruncated = false;
     bool uncertaintiesTruncated = false;
 
@@ -1583,6 +1901,13 @@ JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
     root.Set("indirect_calls", BuildCallsJson(request.Facts.IndirectCalls, kPromptIndirectCallLimit, &indirectCallsTruncated));
     root.Set("switches", BuildSwitchesJson(request, &switchesTruncated));
     root.Set("memory_accesses", BuildMemoryAccessesJson(request, &memoryAccessesTruncated));
+    root.Set("recovered_arguments", BuildRecoveredArgumentsJson(request, &recoveredArgumentsTruncated));
+    root.Set("recovered_locals", BuildRecoveredLocalsJson(request, &recoveredLocalsTruncated));
+    root.Set("value_merges", BuildValueMergesJson(request, &valueMergesTruncated));
+    root.Set("data_references", BuildDataReferencesJson(request, &dataReferencesTruncated));
+    root.Set("call_targets", BuildCallTargetsJson(request, &callTargetsTruncated));
+    root.Set("normalized_conditions", BuildNormalizedConditionsJson(request, &normalizedConditionsTruncated));
+    root.Set("pdb", BuildPdbFactsJson(request, &pdbTruncated));
     root.Set("facts", BuildStringArray(request.Facts.Facts, kPromptFactLimit, &factsTruncated));
     root.Set("uncertainties", BuildStringArray(request.Facts.UncertainPoints, kPromptUncertaintyLimit, &uncertaintiesTruncated));
     root.Set("pre_llm_confidence", JsonValue::MakeNumber(request.Facts.PreLlmConfidence));
@@ -1594,6 +1919,13 @@ JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
     truncation.Set("indirect_calls", JsonValue::MakeBoolean(indirectCallsTruncated));
     truncation.Set("switches", JsonValue::MakeBoolean(switchesTruncated));
     truncation.Set("memory_accesses", JsonValue::MakeBoolean(memoryAccessesTruncated));
+    truncation.Set("recovered_arguments", JsonValue::MakeBoolean(recoveredArgumentsTruncated));
+    truncation.Set("recovered_locals", JsonValue::MakeBoolean(recoveredLocalsTruncated));
+    truncation.Set("value_merges", JsonValue::MakeBoolean(valueMergesTruncated));
+    truncation.Set("data_references", JsonValue::MakeBoolean(dataReferencesTruncated));
+    truncation.Set("call_targets", JsonValue::MakeBoolean(callTargetsTruncated));
+    truncation.Set("normalized_conditions", JsonValue::MakeBoolean(normalizedConditionsTruncated));
+    truncation.Set("pdb", JsonValue::MakeBoolean(pdbTruncated));
     truncation.Set("facts", JsonValue::MakeBoolean(factsTruncated));
     truncation.Set("uncertainties", JsonValue::MakeBoolean(uncertaintiesTruncated));
     root.Set("truncation", truncation);
@@ -2105,6 +2437,169 @@ JsonValue BuildMemoryAccessesJsonForAddresses(
     return array;
 }
 
+JsonValue BuildDataReferencesJsonForAddresses(
+    const AnalyzeRequest& request,
+    const std::set<uint64_t>& instructionAddresses,
+    bool* truncated)
+{
+    std::vector<size_t> filteredIndices;
+
+    for (size_t index = 0; index < request.Facts.DataReferences.size(); ++index)
+    {
+        if (instructionAddresses.find(request.Facts.DataReferences[index].Site) != instructionAddresses.end())
+        {
+            filteredIndices.push_back(index);
+        }
+    }
+
+    if (truncated != nullptr)
+    {
+        *truncated = filteredIndices.size() > kPromptDataReferenceLimit;
+    }
+
+    JsonValue array = JsonValue::MakeArray();
+    const std::vector<size_t> sampled = SelectSpreadIndices(filteredIndices.size(), kPromptDataReferenceLimit);
+
+    for (size_t relativeIndex : sampled)
+    {
+        const DataReference& reference = request.Facts.DataReferences[filteredIndices[relativeIndex]];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("site", JsonValue::MakeString(HexU64(reference.Site)));
+        item.Set("target_address", JsonValue::MakeString(HexU64(reference.TargetAddress)));
+        item.Set("kind", JsonValue::MakeString(reference.Kind));
+        item.Set("symbol", JsonValue::MakeString(reference.Symbol));
+        item.Set("module_name", JsonValue::MakeString(reference.ModuleName));
+        item.Set("display", JsonValue::MakeString(reference.Display));
+        item.Set("preview", JsonValue::MakeString(reference.Preview));
+        item.Set("rip_relative", JsonValue::MakeBoolean(reference.RipRelative));
+        item.Set("dereferenced", JsonValue::MakeBoolean(reference.Dereferenced));
+        array.PushBack(item);
+    }
+
+    return array;
+}
+
+JsonValue BuildCallTargetsJsonForAddresses(
+    const AnalyzeRequest& request,
+    const std::set<uint64_t>& instructionAddresses,
+    bool* truncated)
+{
+    std::vector<size_t> filteredIndices;
+
+    for (size_t index = 0; index < request.Facts.CallTargets.size(); ++index)
+    {
+        if (instructionAddresses.find(request.Facts.CallTargets[index].Site) != instructionAddresses.end())
+        {
+            filteredIndices.push_back(index);
+        }
+    }
+
+    if (truncated != nullptr)
+    {
+        *truncated = filteredIndices.size() > kPromptCallTargetLimit;
+    }
+
+    JsonValue array = JsonValue::MakeArray();
+    const std::vector<size_t> sampled = SelectSpreadIndices(filteredIndices.size(), kPromptCallTargetLimit);
+
+    for (size_t relativeIndex : sampled)
+    {
+        const CallTargetInfo& call = request.Facts.CallTargets[filteredIndices[relativeIndex]];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("site", JsonValue::MakeString(HexU64(call.Site)));
+        item.Set("target_address", JsonValue::MakeString(HexU64(call.TargetAddress)));
+        item.Set("display_name", JsonValue::MakeString(call.DisplayName));
+        item.Set("target_kind", JsonValue::MakeString(call.TargetKind));
+        item.Set("module_name", JsonValue::MakeString(call.ModuleName));
+        item.Set("prototype", JsonValue::MakeString(call.Prototype));
+        item.Set("return_type", JsonValue::MakeString(call.ReturnType));
+        item.Set("side_effects", JsonValue::MakeString(call.SideEffects));
+        item.Set("indirect", JsonValue::MakeBoolean(call.Indirect));
+        item.Set("confidence", JsonValue::MakeNumber(call.Confidence));
+        array.PushBack(item);
+    }
+
+    return array;
+}
+
+JsonValue BuildNormalizedConditionsJsonForBlocks(
+    const AnalyzeRequest& request,
+    const std::set<std::string>& blockIds,
+    bool* truncated)
+{
+    std::vector<size_t> filteredIndices;
+
+    for (size_t index = 0; index < request.Facts.NormalizedConditions.size(); ++index)
+    {
+        if (blockIds.find(request.Facts.NormalizedConditions[index].BlockId) != blockIds.end())
+        {
+            filteredIndices.push_back(index);
+        }
+    }
+
+    if (truncated != nullptr)
+    {
+        *truncated = filteredIndices.size() > kPromptNormalizedConditionLimit;
+    }
+
+    JsonValue array = JsonValue::MakeArray();
+    const std::vector<size_t> sampled = SelectSpreadIndices(filteredIndices.size(), kPromptNormalizedConditionLimit);
+
+    for (size_t relativeIndex : sampled)
+    {
+        const NormalizedCondition& condition = request.Facts.NormalizedConditions[filteredIndices[relativeIndex]];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("site", JsonValue::MakeString(HexU64(condition.Site)));
+        item.Set("block_id", JsonValue::MakeString(condition.BlockId));
+        item.Set("branch_mnemonic", JsonValue::MakeString(condition.BranchMnemonic));
+        item.Set("expression", JsonValue::MakeString(condition.Expression));
+        item.Set("true_target_block", JsonValue::MakeString(condition.TrueTargetBlock));
+        item.Set("false_target_block", JsonValue::MakeString(condition.FalseTargetBlock));
+        item.Set("confidence", JsonValue::MakeNumber(condition.Confidence));
+        array.PushBack(item);
+    }
+
+    return array;
+}
+
+JsonValue BuildValueMergesJsonForBlocks(
+    const AnalyzeRequest& request,
+    const std::set<std::string>& blockIds,
+    bool* truncated)
+{
+    std::vector<size_t> filteredIndices;
+
+    for (size_t index = 0; index < request.Facts.ValueMerges.size(); ++index)
+    {
+        if (blockIds.find(request.Facts.ValueMerges[index].BlockId) != blockIds.end())
+        {
+            filteredIndices.push_back(index);
+        }
+    }
+
+    if (truncated != nullptr)
+    {
+        *truncated = filteredIndices.size() > kPromptValueMergeLimit;
+    }
+
+    JsonValue array = JsonValue::MakeArray();
+    const std::vector<size_t> sampled = SelectSpreadIndices(filteredIndices.size(), kPromptValueMergeLimit);
+
+    for (size_t relativeIndex : sampled)
+    {
+        const ValueMerge& merge = request.Facts.ValueMerges[filteredIndices[relativeIndex]];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("block_id", JsonValue::MakeString(merge.BlockId));
+        item.Set("variable", JsonValue::MakeString(merge.Variable));
+        item.Set("predecessors", BuildStringArray(merge.Predecessors, 8, nullptr));
+        item.Set("incoming_values", BuildStringArray(merge.IncomingValues, 8, nullptr));
+        item.Set("confidence", JsonValue::MakeNumber(merge.Confidence));
+        array.PushBack(item);
+    }
+
+    return array;
+}
+
 JsonValue BuildChunkFactsJson(
     const AnalyzeRequest& request,
     const ChunkPlan& plan)
@@ -2124,6 +2619,13 @@ JsonValue BuildChunkFactsJson(
     bool indirectCallsTruncated = false;
     bool switchesTruncated = false;
     bool memoryAccessesTruncated = false;
+    bool recoveredArgumentsTruncated = false;
+    bool recoveredLocalsTruncated = false;
+    bool valueMergesTruncated = false;
+    bool dataReferencesTruncated = false;
+    bool callTargetsTruncated = false;
+    bool normalizedConditionsTruncated = false;
+    bool pdbTruncated = false;
     bool factsTruncated = false;
     bool uncertaintiesTruncated = false;
 
@@ -2189,6 +2691,13 @@ JsonValue BuildChunkFactsJson(
     root.Set("indirect_calls", BuildCallsJsonForAddresses(request, request.Facts.IndirectCalls, instructionAddresses, 24, &indirectCallsTruncated));
     root.Set("switches", BuildSwitchesJsonForAddresses(request, instructionAddresses, &switchesTruncated));
     root.Set("memory_accesses", BuildMemoryAccessesJsonForAddresses(request, instructionAddresses, &memoryAccessesTruncated));
+    root.Set("recovered_arguments", BuildRecoveredArgumentsJson(request, &recoveredArgumentsTruncated));
+    root.Set("recovered_locals", BuildRecoveredLocalsJson(request, &recoveredLocalsTruncated));
+    root.Set("value_merges", BuildValueMergesJsonForBlocks(request, blockIds, &valueMergesTruncated));
+    root.Set("data_references", BuildDataReferencesJsonForAddresses(request, instructionAddresses, &dataReferencesTruncated));
+    root.Set("call_targets", BuildCallTargetsJsonForAddresses(request, instructionAddresses, &callTargetsTruncated));
+    root.Set("normalized_conditions", BuildNormalizedConditionsJsonForBlocks(request, blockIds, &normalizedConditionsTruncated));
+    root.Set("pdb", BuildPdbFactsJson(request, &pdbTruncated));
     root.Set("global_facts", BuildStringArray(request.Facts.Facts, kChunkPromptFactLimit, &factsTruncated));
     root.Set("global_uncertainties", BuildStringArray(request.Facts.UncertainPoints, kChunkPromptUncertaintyLimit, &uncertaintiesTruncated));
     root.Set("pre_llm_confidence", JsonValue::MakeNumber(request.Facts.PreLlmConfidence));
@@ -2197,6 +2706,13 @@ JsonValue BuildChunkFactsJson(
     truncation.Set("indirect_calls", JsonValue::MakeBoolean(indirectCallsTruncated));
     truncation.Set("switches", JsonValue::MakeBoolean(switchesTruncated));
     truncation.Set("memory_accesses", JsonValue::MakeBoolean(memoryAccessesTruncated));
+    truncation.Set("recovered_arguments", JsonValue::MakeBoolean(recoveredArgumentsTruncated));
+    truncation.Set("recovered_locals", JsonValue::MakeBoolean(recoveredLocalsTruncated));
+    truncation.Set("value_merges", JsonValue::MakeBoolean(valueMergesTruncated));
+    truncation.Set("data_references", JsonValue::MakeBoolean(dataReferencesTruncated));
+    truncation.Set("call_targets", JsonValue::MakeBoolean(callTargetsTruncated));
+    truncation.Set("normalized_conditions", JsonValue::MakeBoolean(normalizedConditionsTruncated));
+    truncation.Set("pdb", JsonValue::MakeBoolean(pdbTruncated));
     truncation.Set("facts", JsonValue::MakeBoolean(factsTruncated));
     truncation.Set("uncertainties", JsonValue::MakeBoolean(uncertaintiesTruncated));
     root.Set("truncation", truncation);
@@ -2543,6 +3059,13 @@ JsonValue BuildMergeFactsJson(
     JsonValue stackFrame = JsonValue::MakeObject();
     JsonValue chunking = JsonValue::MakeObject();
     bool regionsTruncated = false;
+    bool recoveredArgumentsTruncated = false;
+    bool recoveredLocalsTruncated = false;
+    bool valueMergesTruncated = false;
+    bool dataReferencesTruncated = false;
+    bool callTargetsTruncated = false;
+    bool normalizedConditionsTruncated = false;
+    bool pdbTruncated = false;
     bool factsTruncated = false;
     bool uncertaintiesTruncated = false;
     const std::optional<size_t> middleInstructionIndex = FindMiddleInterestingInstructionIndex(request);
@@ -2587,6 +3110,13 @@ JsonValue BuildMergeFactsJson(
     root.Set("instruction_window_head", BuildInstructionWindowJson(request, false));
     root.Set("instruction_window_middle", middleInstructionIndex.has_value() ? BuildInstructionWindowJson(request, middleInstructionIndex.value()) : JsonValue::MakeArray());
     root.Set("instruction_window_tail", BuildInstructionWindowJson(request, true));
+    root.Set("recovered_arguments", BuildRecoveredArgumentsJson(request, &recoveredArgumentsTruncated));
+    root.Set("recovered_locals", BuildRecoveredLocalsJson(request, &recoveredLocalsTruncated));
+    root.Set("value_merges", BuildValueMergesJson(request, &valueMergesTruncated));
+    root.Set("data_references", BuildDataReferencesJson(request, &dataReferencesTruncated));
+    root.Set("call_targets", BuildCallTargetsJson(request, &callTargetsTruncated));
+    root.Set("normalized_conditions", BuildNormalizedConditionsJson(request, &normalizedConditionsTruncated));
+    root.Set("pdb", BuildPdbFactsJson(request, &pdbTruncated));
     root.Set("global_facts", BuildStringArray(request.Facts.Facts, 24, &factsTruncated));
     root.Set("global_uncertainties", BuildStringArray(request.Facts.UncertainPoints, 12, &uncertaintiesTruncated));
     root.Set("pre_llm_confidence", JsonValue::MakeNumber(request.Facts.PreLlmConfidence));
@@ -2596,6 +3126,13 @@ JsonValue BuildMergeFactsJson(
 
     JsonValue truncation = JsonValue::MakeObject();
     truncation.Set("regions", JsonValue::MakeBoolean(regionsTruncated));
+    truncation.Set("recovered_arguments", JsonValue::MakeBoolean(recoveredArgumentsTruncated));
+    truncation.Set("recovered_locals", JsonValue::MakeBoolean(recoveredLocalsTruncated));
+    truncation.Set("value_merges", JsonValue::MakeBoolean(valueMergesTruncated));
+    truncation.Set("data_references", JsonValue::MakeBoolean(dataReferencesTruncated));
+    truncation.Set("call_targets", JsonValue::MakeBoolean(callTargetsTruncated));
+    truncation.Set("normalized_conditions", JsonValue::MakeBoolean(normalizedConditionsTruncated));
+    truncation.Set("pdb", JsonValue::MakeBoolean(pdbTruncated));
     truncation.Set("facts", JsonValue::MakeBoolean(factsTruncated));
     truncation.Set("uncertainties", JsonValue::MakeBoolean(uncertaintiesTruncated));
     root.Set("truncation", truncation);
@@ -2610,6 +3147,7 @@ std::string BuildChunkSystemPrompt(const AnalyzeRequest& request)
         "Write summary_localized and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_steps, state_updates, observed_calls, observed_memory, identifiers, and API names in English or C-style. "
         "Do not invent external call targets that are not present in the input. "
+        "Use recovered_arguments, recovered_locals, normalized_conditions, data_references, call_targets, and pdb facts as high-signal semantic hints when present. "
         "Prefer explicit memory reads, writes, compares, branches, and state transitions over vague summaries. "
         "When information is incomplete, preserve only the missing part as uncertain instead of collapsing the whole chunk into a short summary. "
         "The evidence field must be an array of objects shaped like {\"claim\": string, \"blocks\": [string, ...]}. Use evidence.blocks values that reference only valid basic block ids from the input chunk.";
@@ -2634,9 +3172,10 @@ std::string BuildChunkUserPrompt(
     prompt += ".\n";
     prompt += "3. Keep pseudo_steps and state_updates concrete and operation-focused.\n";
     prompt += "4. Preserve visible reads, writes, comparisons, and branches instead of replacing them with generic comments.\n";
-    prompt += "5. If the chunk is partial, say what is missing, but still describe the concrete work visible in this chunk.\n";
-    prompt += "6. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
-    prompt += "7. evidence.blocks must reference only block ids present in this chunk.\n";
+    prompt += "5. Use recovered_arguments, recovered_locals, normalized_conditions, data_references, call_targets, and pdb facts when they improve naming or type/side-effect hints.\n";
+    prompt += "6. If the chunk is partial, say what is missing, but still describe the concrete work visible in this chunk.\n";
+    prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
+    prompt += "8. evidence.blocks must reference only block ids present in this chunk.\n";
     return prompt;
 }
 
@@ -2648,6 +3187,7 @@ std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
         "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style. "
         "Use the chunk summaries to produce a fuller function-level pseudocode than a single-pass summary. "
+        "Use recovered_arguments, recovered_locals, normalized_conditions, data_references, call_targets, value_merges, and pdb facts to preserve semantic names and control-flow intent. "
         "Prefer reconstructing concrete reads, writes, branches, and helper interactions when the chunk evidence supports them. "
         "Do not invent calls or fields that are not grounded by the chunk summaries or global facts. "
         "Use UNKNOWN_TYPE for uncertain types and preserve only the truly unresolved parts in uncertainties. The evidence field must be an array of objects shaped like {\"claim\": string, \"blocks\": [string, ...]}.";
@@ -2671,9 +3211,10 @@ std::string BuildMergeUserPrompt(
     prompt += ".\n";
     prompt += "3. Build a richer pseudo_c than a short high-level summary; use the chunk evidence to cover the main body.\n";
     prompt += "4. Preserve unknowns with UNKNOWN_TYPE instead of omitting entire regions of logic.\n";
-    prompt += "5. If chunks disagree or coverage remains partial, explain that in uncertainties, but still keep the visible operations explicit.\n";
-    prompt += "6. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
-    prompt += "7. evidence.blocks must reference block ids that appear in the chunk summaries.\n";
+    prompt += "5. Use recovered_arguments, recovered_locals, normalized_conditions, data_references, call_targets, value_merges, and pdb facts when they help produce more concrete names or conditions.\n";
+    prompt += "6. If chunks disagree or coverage remains partial, explain that in uncertainties, but still keep the visible operations explicit.\n";
+    prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
+    prompt += "8. evidence.blocks must reference block ids that appear in the chunk summaries.\n";
     return prompt;
 }
 
@@ -2687,6 +3228,7 @@ std::string BuildSystemPrompt(const AnalyzeRequest& request)
         "Use UNKNOWN_TYPE for uncertain types. "
         "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style as appropriate. "
+        "Use recovered_arguments, recovered_locals, normalized_conditions, data_references, call_targets, value_merges, and pdb facts as high-confidence semantic hints when available. "
         "Use evidence.blocks values that reference only valid basic block ids from the input. "
         "Blocks are a representative selection, not necessarily the first contiguous blocks in the function. "
         "Use instruction_window_head, instruction_window_middle, and instruction_window_tail as additional context. "
@@ -2711,9 +3253,10 @@ std::string BuildUserPrompt(const AnalyzeRequest& request)
     prompt += "5. evidence.blocks must reference existing basic block ids.\n";
     prompt += "6. Treat blocks as representative high-signal samples, not as the only reachable blocks in order.\n";
     prompt += "7. Use instruction_window_head, instruction_window_middle, and instruction_window_tail to infer prologue, body, and late-path behavior.\n";
-    prompt += "8. Prefer concrete pseudocode statements over summary comments when a memory read, write, compare, or branch is explicitly visible in the facts.\n";
-    prompt += "9. If control flow is incomplete, keep visible operations explicit and mark only the missing pieces as uncertain.\n";
-    prompt += "10. If truncation flags are true, preserve that uncertainty instead of over-claiming.\n";
+    prompt += "8. Use recovered_arguments, recovered_locals, normalized_conditions, data_references, call_targets, value_merges, and pdb facts when they improve variable names, helper summaries, or branch expressions.\n";
+    prompt += "9. Prefer concrete pseudocode statements over summary comments when a memory read, write, compare, or branch is explicitly visible in the facts.\n";
+    prompt += "10. If control flow is incomplete, keep visible operations explicit and mark only the missing pieces as uncertain.\n";
+    prompt += "11. If truncation flags are true, preserve that uncertainty instead of over-claiming.\n";
     return prompt;
 }
 

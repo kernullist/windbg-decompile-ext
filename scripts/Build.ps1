@@ -4,6 +4,9 @@ param(
     [string]$Configuration = 'Release',
     [string]$SourceDir = (Split-Path -Parent $PSScriptRoot),
     [string]$BuildDir,
+    [ValidateSet('Auto', 'Vendor', 'Fetch')]
+    [string]$ZydisSource = 'Auto',
+    [string]$ZydisVendorDir,
     [string]$DebuggersRoot = $env:DEBUGGERS_ROOT,
     [string]$DbgengIncludeDir,
     [string]$DbgengLibrary,
@@ -39,7 +42,13 @@ Write-Host "Using cmake=$cmake"
 Write-Host "Using SourceDir=$SourceDir"
 Write-Host "Using BuildDir=$BuildDir"
 Write-Host "Using Configuration=$Configuration"
+Write-Host "Using DECOMP_ZYDIS_SOURCE=$($ZydisSource.ToLowerInvariant())"
 Write-Host "Using DECOMP_USE_SYMBOL_ENTRY_APIS=$symbolApis"
+
+if (-not [string]::IsNullOrWhiteSpace($ZydisVendorDir))
+{
+    Write-Host "Using DECOMP_VENDORED_ZYDIS_DIR=$ZydisVendorDir"
+}
 
 if ($null -ne $resolvedExplicitDbgeng)
 {
@@ -66,8 +75,14 @@ if ($needsConfigure)
         '-B', $BuildDir,
         '-G', $Generator,
         '-A', $Architecture,
+        "-DDECOMP_ZYDIS_SOURCE=$($ZydisSource.ToLowerInvariant())",
         "-DDECOMP_USE_SYMBOL_ENTRY_APIS=$symbolApis"
     )
+
+    if (-not [string]::IsNullOrWhiteSpace($ZydisVendorDir))
+    {
+        $configureArgs += "-DDECOMP_VENDORED_ZYDIS_DIR=$ZydisVendorDir"
+    }
 
     if ($null -ne $resolvedExplicitDbgeng)
     {

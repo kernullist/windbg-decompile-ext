@@ -109,6 +109,137 @@ struct MemoryAccess
     bool RipRelative = false;
 };
 
+struct RecoveredArgument
+{
+    std::string Name;
+    std::string Register;
+    std::string TypeHint;
+    std::string RoleHint;
+    uint64_t FirstUseSite = 0;
+    uint32_t UseCount = 0;
+    double Confidence = 0.0;
+};
+
+struct RecoveredLocal
+{
+    std::string Name;
+    std::string BaseRegister;
+    int64_t Offset = 0;
+    std::string Storage;
+    std::string TypeHint;
+    std::string RoleHint;
+    uint64_t FirstSite = 0;
+    uint64_t LastSite = 0;
+    uint32_t ReadCount = 0;
+    uint32_t WriteCount = 0;
+    double Confidence = 0.0;
+};
+
+struct ValueMerge
+{
+    std::string BlockId;
+    std::string Variable;
+    std::vector<std::string> Predecessors;
+    std::vector<std::string> IncomingValues;
+    double Confidence = 0.0;
+};
+
+struct DataReference
+{
+    uint64_t Site = 0;
+    uint64_t TargetAddress = 0;
+    std::string Kind;
+    std::string Symbol;
+    std::string ModuleName;
+    std::string Display;
+    std::string Preview;
+    bool RipRelative = false;
+    bool Dereferenced = false;
+};
+
+struct CallTargetInfo
+{
+    uint64_t Site = 0;
+    uint64_t TargetAddress = 0;
+    std::string DisplayName;
+    std::string TargetKind;
+    std::string ModuleName;
+    std::string Prototype;
+    std::string ReturnType;
+    std::string SideEffects;
+    bool Indirect = false;
+    double Confidence = 0.0;
+};
+
+struct NormalizedCondition
+{
+    uint64_t Site = 0;
+    std::string BlockId;
+    std::string BranchMnemonic;
+    std::string Expression;
+    std::string TrueTargetBlock;
+    std::string FalseTargetBlock;
+    double Confidence = 0.0;
+};
+
+struct PdbScopedSymbol
+{
+    std::string Name;
+    std::string Type;
+    std::string Storage;
+    std::string Location;
+    uint64_t Site = 0;
+    double Confidence = 0.0;
+};
+
+struct PdbFieldHint
+{
+    std::string BaseName;
+    std::string BaseType;
+    std::string FieldName;
+    std::string FieldType;
+    std::string BaseRegister;
+    int64_t Offset = 0;
+    uint64_t Site = 0;
+    double Confidence = 0.0;
+};
+
+struct PdbEnumHint
+{
+    std::string TypeName;
+    std::string ConstantName;
+    std::string Expression;
+    uint64_t Value = 0;
+    uint64_t Site = 0;
+    double Confidence = 0.0;
+};
+
+struct PdbSourceLocation
+{
+    uint64_t Site = 0;
+    std::string File;
+    uint32_t Line = 0;
+    uint64_t Displacement = 0;
+    double Confidence = 0.0;
+};
+
+struct PdbFacts
+{
+    std::string Availability = "none";
+    std::string ScopeKind = "none";
+    std::string SymbolFile;
+    std::string FunctionName;
+    std::string Prototype;
+    std::string ReturnType;
+    std::vector<PdbScopedSymbol> Params;
+    std::vector<PdbScopedSymbol> Locals;
+    std::vector<PdbFieldHint> FieldHints;
+    std::vector<PdbEnumHint> EnumHints;
+    std::vector<PdbSourceLocation> SourceLocations;
+    std::vector<std::string> Conflicts;
+    double Confidence = 0.0;
+};
+
 struct AnalysisFacts
 {
     std::string Arch = "x64";
@@ -130,6 +261,13 @@ struct AnalysisFacts
     std::vector<CallSite> IndirectCalls;
     std::vector<SwitchInfo> Switches;
     std::vector<MemoryAccess> MemoryAccesses;
+    std::vector<RecoveredArgument> RecoveredArguments;
+    std::vector<RecoveredLocal> RecoveredLocals;
+    std::vector<ValueMerge> ValueMerges;
+    std::vector<DataReference> DataReferences;
+    std::vector<CallTargetInfo> CallTargets;
+    std::vector<NormalizedCondition> NormalizedConditions;
+    PdbFacts Pdb;
     std::vector<std::string> Facts;
     std::vector<std::string> UncertainPoints;
     double PreLlmConfidence = 0.0;

@@ -10,12 +10,17 @@ This project is a Windows x64 WinDbg extension skeleton that resolves a function
 - `src/shared`: JSON, analyzer, protocol, and verifier code shared by the extension.
 - `scripts`: build and vendor-copy helpers.
 - `third_party/dbgeng`: optional vendored `dbgeng.h` and `dbgeng.lib` copy.
+- `third_party/zydis`: vendored stable Zydis source tree used by default when present.
 
 ## Current Scope
 
 - x64-only assumptions
 - live-memory analysis through DbgEng
+- Zydis-backed structured disassembly for stable mnemonic/operand recovery
 - symbol-region, unwind, and heuristic function-range recovery
+- SSA-lite style recovery for incoming register arguments, stack-slot locals, merge candidates, and normalized branch conditions
+- RIP-relative string/global/IAT classification and call-target signature hints for LLM prompting
+- loaded-PDB aware prototype, scoped parameter/local, field, enum, and source-line hints for LLM prompting
 - direct in-process LLM calls from the extension
 - OpenAI-compatible HTTP adapter or deterministic mock fallback
 - verifier pass over LLM output
@@ -50,6 +55,36 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Prepare-DbgengVendor.ps1 `
 
 Once `third_party\dbgeng` exists, `Build.ps1` will prefer it automatically and you usually do not need `DEBUGGERS_ROOT`.
 
+## Recommended Zydis Setup
+
+The repository can use either:
+
+- vendored `third_party\zydis` source
+- CMake `FetchContent`
+
+Default behavior is `auto`, which prefers `third_party\zydis` when present and falls back to fetching `Zydis` during CMake configure.
+
+Expected vendor layout:
+
+```text
+third_party\zydis\CMakeLists.txt
+third_party\zydis\include\Zydis\Zydis.h
+third_party\zydis\dependencies\zycore\CMakeLists.txt
+```
+
+Refresh or create the vendor copy:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Prepare-ZydisVendor.ps1
+```
+
+You can also vendor from an already-downloaded local source tree:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Prepare-ZydisVendor.ps1 `
+    -SourcePath 'C:\path\to\zydis'
+```
+
 ## Build
 
 Recommended path is a Visual Studio Developer PowerShell or Developer Command Prompt.
@@ -83,6 +118,8 @@ This script increments the last component in `version.txt` by `1`, forces a reco
 - `-Reconfigure`
 - `-ConfigureOnly`
 - `-Verbose`
+- `-ZydisSource Auto|Vendor|Fetch`
+- `-ZydisVendorDir 'C:\path\to\zydis'`
 - `-DebuggersRoot 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64'`
 - `-DbgengIncludeDir 'E:\works\windbg_llm_decomp_2\windbg_llm_decomp\third_party\dbgeng\inc'`
 - `-DbgengLibrary 'E:\works\windbg_llm_decomp_2\windbg_llm_decomp\third_party\dbgeng\lib\dbgeng.lib'`
@@ -92,6 +129,7 @@ This script increments the last component in `version.txt` by `1`, forces a reco
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\Build.ps1 `
     -Configuration Release `
+    -ZydisSource Vendor `
     -Reconfigure `
     -Verbose
 ```
@@ -111,6 +149,12 @@ The build script automatically tries to locate:
 - `cmake.exe` from PATH, standalone CMake, or Visual Studio bundled CMake
 - `third_party\dbgeng` under the project root
 - `DEBUGGERS_ROOT` from environment variables or common Windows Kits locations
+
+Zydis source selection works like this:
+
+- `Auto`: prefer `third_party\zydis`, otherwise fetch `Zydis` during configure
+- `Vendor`: require a usable `third_party\zydis` tree or the path passed by `-ZydisVendorDir`
+- `Fetch`: ignore the vendor tree and always let CMake download `Zydis`
 
 `DEBUGGERS_ROOT` may point to a debugger root that uses one of these layouts:
 
@@ -140,6 +184,33 @@ With `DECOMP_USE_SYMBOL_ENTRY_APIS=OFF`, the extension falls back to:
 
 - `GetFunctionEntryByOffset` for x64 unwind-based range recovery
 - `GetNameByOffset` plus heuristic disassembly if unwind metadata is missing
+
+## PDB Usage
+
+The extension automatically consumes symbols and type information that WinDbg has already loaded for the target modules.
+
+There are two practical levels of PDB enrichment:
+
+- module-level typed facts:
+  function name, prototype, return type, global symbol names, field offsets, enum constant names, and source-line hints
+- scope-level facts:
+  parameter and local names/types from the active debugger scope when the target function matches the current scope or when the extension can switch scope to the function entry
+
+How this affects pseudocode generation:
+
+- recovered register arguments can be renamed from heuristic names like `arg1` to PDB names such as `ctx`
+- stack locals can be upgraded from generic slot names to scoped local names and types when available
+- pointer-based memory accesses can gain field hints such as `ctx->State`
+- enum-like comparisons can gain symbolic names such as `state == StateRunning`
+- direct callee summaries can reuse PDB-derived prototypes and return types
+
+Important limitations:
+
+- public PDBs may provide function names and some type data but often do not include scoped locals
+- optimized builds can make scoped local values and locations incomplete or ambiguous
+- the extension treats PDB data as semantic hints, not as permission to override control flow that is contradicted by disassembly
+
+Current behavior is automatic. There is no separate config switch for PDB usage; the quality depends on what WinDbg has already loaded and whether the current scope can be matched to the target function.
 
 ## Configuration
 
@@ -391,6 +462,9 @@ Example `/json` response details:
 - The JSON response includes `pseudo_c` and `pseudo_c_tokens`.
 - `pseudo_c_tokens` is a deterministic token stream suitable for external syntax highlighting.
 - The serialized request includes `preferred_natural_language_tag` and `preferred_natural_language_name`, which reflect the resolved display language after applying `display_language.mode`.
+- The serialized request now also includes a `pdb` object when symbol/type data is available.
+- `pdb.availability` reports the enrichment level such as `none`, `symbols`, `typed`, or `scoped`.
+- `pdb.params`, `pdb.locals`, `pdb.field_hints`, `pdb.enum_hints`, and `pdb.source_locations` are intended as machine-readable semantic hints for external tooling or offline analysis.
 
 Optional environment overrides:
 
@@ -456,6 +530,8 @@ Expected checks:
 - `/no-llm` should still print analyzer confidence and pseudocode stub
 - LLM mode should fill `summary`, `pseudo_c`, `pseudo_c_tokens`, and `verified`
 - `/json` output should include `preferred_natural_language_tag` and `preferred_natural_language_name` in the serialized request
+- when private or rich PDBs are loaded, `/json` should also include `pdb.prototype`, `pdb.params`, and possibly `pdb.locals`
+- for typed structs and enums, `/json` may include `pdb.field_hints` and `pdb.enum_hints`
 
 ## Local LLM Endpoint Examples
 
