@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <iomanip>
+#include <iterator>
 #include <map>
 #include <set>
 #include <sstream>
@@ -420,11 +422,45 @@ bool IsNonvolatileRegisterPush(const std::string& operationText, std::string& re
 
 bool IsNoReturnTarget(const std::string& target)
 {
-    return ContainsInsensitive(target, "__fastfail")
+    if (ContainsInsensitive(target, "__fastfail")
         || ContainsInsensitive(target, "RtlFailFast")
         || ContainsInsensitive(target, "RaiseFailFastException")
         || ContainsInsensitive(target, "TerminateProcess")
-        || ContainsInsensitive(target, "ExitProcess");
+        || ContainsInsensitive(target, "ExitProcess"))
+    {
+        return true;
+    }
+
+    const char* overrides = std::getenv("DECOMP_NORETURN_OVERRIDES");
+
+    if (overrides == nullptr)
+    {
+        return false;
+    }
+
+    std::string current;
+    const std::string text = overrides;
+
+    for (char ch : text)
+    {
+        if (ch == ',' || ch == ';')
+        {
+            const std::string token = TrimCopy(current);
+
+            if (!token.empty() && ContainsInsensitive(target, token))
+            {
+                return true;
+            }
+
+            current.clear();
+            continue;
+        }
+
+        current.push_back(ch);
+    }
+
+    const std::string token = TrimCopy(current);
+    return !token.empty() && ContainsInsensitive(target, token);
 }
 
 bool IsNoReturnCall(const DisassembledInstruction& instruction)
@@ -2233,6 +2269,922 @@ std::vector<ValueMerge> CollectValueMerges(
     return merges;
 }
 
+std::unordered_map<uint64_t, std::string> BuildBlockIdByInstructionAddress(const std::vector<BasicBlock>& blocks)
+{
+    std::unordered_map<uint64_t, std::string> blockByAddress;
+
+    for (const BasicBlock& block : blocks)
+    {
+        for (uint64_t address : block.InstructionAddresses)
+        {
+            blockByAddress[address] = block.Id;
+        }
+    }
+
+    return blockByAddress;
+}
+
+bool IsConstantExpression(const std::string& expression)
+{
+    int64_t ignored = 0;
+    return TryParseSignedValue(expression, ignored);
+}
+
+std::string BuildIrTarget(
+    const DisassembledInstruction& instruction,
+    const std::vector<std::string>& operands,
+    const MemoryAccess* access,
+    const std::unordered_map<std::string, std::string>& argumentRegisterMap,
+    const std::unordered_map<std::string, std::string>& localKeyNameMap)
+{
+    if (instruction.IsCall)
+    {
+        return "rax";
+    }
+
+    if (operands.empty())
+    {
+        return std::string();
+    }
+
+    if (access != nullptr
+        && (access->Kind == "write" || access->Kind == "read_write")
+        && (access->BaseRegister == "rbp" || access->BaseRegister == "rsp"))
+    {
+        int64_t offset = 0;
+
+        if (TryParseSignedValue(access->Displacement, offset))
+        {
+            const auto localIt = localKeyNameMap.find(BuildStackSlotKey(access->BaseRegister, offset));
+
+            if (localIt != localKeyNameMap.end())
+            {
+                return localIt->second;
+            }
+        }
+    }
+
+    const std::vector<std::string> destinationRegisters = ExtractOperandRegisterTokens(operands[0]);
+
+    if (destinationRegisters.size() == 1 && operands[0].find('[') == std::string::npos)
+    {
+        return destinationRegisters.front();
+    }
+
+    const std::string rewritten = RewriteOperandWithRecoveredNames(operands[0], argumentRegisterMap, localKeyNameMap);
+
+    if (!rewritten.empty())
+    {
+        return rewritten;
+    }
+
+    return StripPointerDecorators(operands[0]);
+}
+
+std::vector<IrValue> CollectIrValues(
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::vector<BasicBlock>& blocks,
+    const std::vector<MemoryAccess>& memoryAccesses,
+    const std::vector<RecoveredArgument>& arguments,
+    const std::vector<RecoveredLocal>& locals)
+{
+    std::unordered_map<uint64_t, const MemoryAccess*> accessBySite;
+    std::unordered_map<uint64_t, std::string> blockByAddress = BuildBlockIdByInstructionAddress(blocks);
+    const std::unordered_map<std::string, std::string> argumentRegisterMap = BuildArgumentRegisterNameMap(arguments);
+    const std::unordered_map<std::string, std::string> localKeyNameMap = BuildLocalKeyNameMap(locals);
+    std::unordered_map<std::string, std::string> latestCanonicalByTarget;
+    std::unordered_map<std::string, std::string> latestIdByTarget;
+    std::unordered_map<std::string, size_t> latestIndexByTarget;
+    std::unordered_map<std::string, size_t> indexById;
+    std::vector<IrValue> values;
+
+    for (const MemoryAccess& access : memoryAccesses)
+    {
+        accessBySite[access.Site] = &access;
+    }
+
+    for (const DisassembledInstruction& instruction : instructions)
+    {
+        const std::vector<std::string> operands = SplitOperands(instruction.OperandText);
+        const auto accessIt = accessBySite.find(instruction.Address);
+        const MemoryAccess* access = accessIt == accessBySite.end() ? nullptr : accessIt->second;
+
+        if (!instruction.IsCall && !InstructionWritesDestinationOperand(instruction, operands))
+        {
+            continue;
+        }
+
+        IrValue value;
+        value.Id = "v" + std::to_string(values.size() + 1U);
+        value.DefSite = instruction.Address;
+        value.BlockId = blockByAddress[instruction.Address];
+        value.Target = BuildIrTarget(instruction, operands, access, argumentRegisterMap, localKeyNameMap);
+        value.Expression = DescribeAssignmentValue(instruction, operands, argumentRegisterMap, localKeyNameMap);
+
+        if (value.Target.empty())
+        {
+            continue;
+        }
+
+        const auto copyIt = latestCanonicalByTarget.find(value.Expression);
+        value.Canonical = copyIt != latestCanonicalByTarget.end() ? copyIt->second : value.Expression;
+        value.IsConstant = IsConstantExpression(value.Canonical);
+        value.IsCopy = copyIt != latestCanonicalByTarget.end() || value.Target == value.Expression;
+        value.Kind = instruction.IsCall ? "call_result"
+            : value.IsConstant ? "constant"
+            : value.IsCopy ? "copy"
+            : (access != nullptr && (access->Kind == "write" || access->Kind == "read_write")) ? "stack_store"
+            : "assignment";
+        value.Confidence = Clamp01(
+            0.58
+            + (value.IsConstant ? 0.12 : 0.0)
+            + (value.IsCopy ? 0.06 : 0.0)
+            + (!value.BlockId.empty() ? 0.06 : 0.0));
+
+        for (const std::string& reg : ExtractOperandRegisterTokens(instruction.OperandText))
+        {
+            const auto latest = latestIdByTarget.find(reg);
+
+            if (latest != latestIdByTarget.end()
+                && std::find(value.Uses.begin(), value.Uses.end(), latest->second) == value.Uses.end())
+            {
+                value.Uses.push_back(latest->second);
+
+                const auto usedIndex = indexById.find(latest->second);
+
+                if (usedIndex != indexById.end() && usedIndex->second < values.size())
+                {
+                    values[usedIndex->second].IsDead = false;
+                }
+            }
+        }
+
+        const auto previousIndex = latestIndexByTarget.find(value.Target);
+
+        if (previousIndex != latestIndexByTarget.end() && previousIndex->second < values.size())
+        {
+            values[previousIndex->second].IsDead = values[previousIndex->second].Uses.empty();
+        }
+
+        indexById[value.Id] = values.size();
+        latestCanonicalByTarget[value.Target] = value.Canonical.empty() ? value.Expression : value.Canonical;
+        latestIdByTarget[value.Target] = value.Id;
+        latestIndexByTarget[value.Target] = values.size();
+        values.push_back(std::move(value));
+    }
+
+    return values;
+}
+
+std::unordered_map<std::string, std::set<std::string>> BuildDominatorSets(const std::vector<BasicBlock>& blocks)
+{
+    std::unordered_map<std::string, std::set<std::string>> dominators;
+    std::set<std::string> allBlocks;
+    const std::unordered_map<std::string, std::vector<std::string>> predecessors = BuildBlockPredecessors(blocks);
+
+    for (const BasicBlock& block : blocks)
+    {
+        allBlocks.insert(block.Id);
+    }
+
+    for (const BasicBlock& block : blocks)
+    {
+        if (&block == &blocks.front())
+        {
+            dominators[block.Id] = { block.Id };
+        }
+        else
+        {
+            dominators[block.Id] = allBlocks;
+        }
+    }
+
+    bool changed = true;
+
+    while (changed)
+    {
+        changed = false;
+
+        for (size_t index = 1; index < blocks.size(); ++index)
+        {
+            const BasicBlock& block = blocks[index];
+            const auto predecessorIt = predecessors.find(block.Id);
+            std::set<std::string> next = allBlocks;
+
+            if (predecessorIt == predecessors.end() || predecessorIt->second.empty())
+            {
+                next.clear();
+            }
+            else
+            {
+                for (const std::string& predecessor : predecessorIt->second)
+                {
+                    std::set<std::string> intersection;
+                    const auto domIt = dominators.find(predecessor);
+
+                    if (domIt == dominators.end())
+                    {
+                        continue;
+                    }
+
+                    std::set_intersection(
+                        next.begin(), next.end(),
+                        domIt->second.begin(), domIt->second.end(),
+                        std::inserter(intersection, intersection.begin()));
+                    next = std::move(intersection);
+                }
+            }
+
+            next.insert(block.Id);
+
+            if (dominators[block.Id] != next)
+            {
+                dominators[block.Id] = std::move(next);
+                changed = true;
+            }
+        }
+    }
+
+    return dominators;
+}
+
+const NormalizedCondition* FindConditionForBlock(const std::vector<NormalizedCondition>& conditions, const std::string& blockId)
+{
+    for (const NormalizedCondition& condition : conditions)
+    {
+        if (condition.BlockId == blockId)
+        {
+            return &condition;
+        }
+    }
+
+    return nullptr;
+}
+
+std::vector<ControlFlowRegion> AnalyzeControlFlow(
+    const std::vector<BasicBlock>& blocks,
+    const std::vector<NormalizedCondition>& conditions,
+    const std::vector<SwitchInfo>& switches)
+{
+    std::vector<ControlFlowRegion> regions;
+
+    if (blocks.empty())
+    {
+        return regions;
+    }
+
+    const std::unordered_map<std::string, std::set<std::string>> dominators = BuildDominatorSets(blocks);
+
+    for (const BasicBlock& block : blocks)
+    {
+        for (const std::string& successor : block.Successors)
+        {
+            const auto domIt = dominators.find(block.Id);
+
+            if (domIt != dominators.end() && domIt->second.find(successor) != domIt->second.end())
+            {
+                ControlFlowRegion loop;
+                loop.Kind = "natural_loop";
+                loop.HeaderBlock = successor;
+                loop.LatchBlocks.push_back(block.Id);
+                loop.BodyBlocks.push_back(successor);
+                loop.BodyBlocks.push_back(block.Id);
+
+                const NormalizedCondition* condition = FindConditionForBlock(conditions, successor);
+                loop.Condition = condition != nullptr ? condition->Expression : std::string();
+                loop.Evidence = block.Id + " -> " + successor + " back-edge";
+                loop.Confidence = Clamp01(0.70 + (!loop.Condition.empty() ? 0.10 : 0.0));
+                regions.push_back(std::move(loop));
+            }
+        }
+    }
+
+    for (const BasicBlock& block : blocks)
+    {
+        if (block.Successors.size() < 2)
+        {
+            continue;
+        }
+
+        ControlFlowRegion branch;
+        branch.Kind = "if_else_candidate";
+        branch.HeaderBlock = block.Id;
+        branch.BodyBlocks = block.Successors;
+        branch.ExitBlocks = block.Successors;
+
+        const NormalizedCondition* condition = FindConditionForBlock(conditions, block.Id);
+        branch.Condition = condition != nullptr ? condition->Expression : std::string();
+        branch.Evidence = "conditional block with " + std::to_string(block.Successors.size()) + " successors";
+        branch.Confidence = Clamp01(0.60 + (!branch.Condition.empty() ? 0.12 : 0.0));
+        regions.push_back(std::move(branch));
+    }
+
+    for (const SwitchInfo& switchInfo : switches)
+    {
+        ControlFlowRegion region;
+        region.Kind = "switch_candidate";
+        region.Evidence = switchInfo.Detail;
+        region.Confidence = Clamp01(0.52 + (switchInfo.CaseCount != 0 ? 0.18 : 0.0));
+
+        for (const BasicBlock& block : blocks)
+        {
+            if (switchInfo.Site >= block.StartAddress && switchInfo.Site < block.EndAddress)
+            {
+                region.HeaderBlock = block.Id;
+                region.BodyBlocks = block.Successors;
+                break;
+            }
+        }
+
+        regions.push_back(std::move(region));
+    }
+
+    return regions;
+}
+
+bool IsTailJumpCandidate(const DisassembledInstruction& instruction, uint64_t entryAddress)
+{
+    return instruction.IsUnconditionalBranch
+        && instruction.HasBranchTarget
+        && (instruction.BranchTarget < entryAddress || instruction.BranchTarget > entryAddress + 0x100000ULL);
+}
+
+AbiFacts AnalyzeAbiFacts(
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::vector<MemoryAccess>& memoryAccesses,
+    const StackFrameFacts& stackFrame,
+    uint64_t entryAddress)
+{
+    AbiFacts abi;
+    abi.FramePointerEstablished = stackFrame.FramePointer;
+    abi.FrameBase = stackFrame.FramePointer ? "rbp" : "rsp";
+    abi.PrologRecognized = stackFrame.StackAlloc != 0 || stackFrame.FramePointer || !stackFrame.SavedNonvolatile.empty();
+    abi.Confidence = abi.PrologRecognized ? 0.68 : 0.45;
+
+    for (const MemoryAccess& access : memoryAccesses)
+    {
+        if (access.BaseRegister != "rsp" && access.BaseRegister != "rbp")
+        {
+            continue;
+        }
+
+        int64_t offset = 0;
+
+        if (!TryParseSignedValue(access.Displacement, offset))
+        {
+            continue;
+        }
+
+        if (offset >= 0 && offset < 0x40)
+        {
+            const std::string slot = access.BaseRegister + HexS64(offset) + " at " + HexU64(access.Site);
+
+            if (std::find(abi.HomeSlots.begin(), abi.HomeSlots.end(), slot) == abi.HomeSlots.end())
+            {
+                abi.HomeSlots.push_back(slot);
+            }
+        }
+    }
+
+    for (const DisassembledInstruction& instruction : instructions)
+    {
+        if (IsNoReturnCall(instruction))
+        {
+            abi.NoReturnCalls.push_back(HexU64(instruction.Address) + " -> " + instruction.OperandText);
+        }
+
+        if (IsTailJumpCandidate(instruction, entryAddress))
+        {
+            abi.TailCalls.push_back(HexU64(instruction.Address) + " -> " + HexU64(instruction.BranchTarget));
+        }
+
+        if (instruction.IsReturn)
+        {
+            abi.EpilogRecognized = true;
+        }
+    }
+
+    if (instructions.size() <= 3 && !instructions.empty())
+    {
+        const DisassembledInstruction& last = instructions.back();
+
+        if ((last.IsUnconditionalBranch && !last.IsIndirect) || (last.IsCall && !last.IsIndirect))
+        {
+            abi.Thunks.push_back(HexU64(instructions.front().Address) + " small wrapper ending at " + HexU64(last.Address));
+        }
+    }
+
+    if (instructions.size() <= 6 && abi.TailCalls.size() == 1)
+    {
+        abi.ImportWrappers.push_back("single tail-call wrapper candidate");
+    }
+
+    if (!abi.HomeSlots.empty())
+    {
+        abi.Notes.push_back("shadow/home slot references detected in first 64 bytes above frame base");
+        abi.Confidence = Clamp01(abi.Confidence + 0.08);
+    }
+
+    if (!abi.NoReturnCalls.empty())
+    {
+        abi.Notes.push_back("known no-return call terminates successor flow");
+        abi.Confidence = Clamp01(abi.Confidence + 0.06);
+    }
+
+    if (!abi.TailCalls.empty())
+    {
+        abi.Notes.push_back("tail-call jump candidate detected");
+        abi.Confidence = Clamp01(abi.Confidence + 0.05);
+    }
+
+    return abi;
+}
+
+std::string BuildMemoryExpression(const MemoryAccess& access)
+{
+    std::string expression = access.BaseRegister.empty() ? "mem" : access.BaseRegister;
+
+    if (!access.Displacement.empty() && access.Displacement != "0")
+    {
+        expression += access.Displacement.front() == '-' ? access.Displacement : ("+" + access.Displacement);
+    }
+
+    if (!access.IndexRegister.empty())
+    {
+        expression += "+" + access.IndexRegister;
+
+        if (access.Scale > 1)
+        {
+            expression += "*" + std::to_string(access.Scale);
+        }
+    }
+
+    return "[" + expression + "]";
+}
+
+bool IsLikelyPointerRegister(const std::vector<RecoveredArgument>& arguments, const std::string& reg)
+{
+    for (const RecoveredArgument& argument : arguments)
+    {
+        if (argument.Register == reg && (argument.RoleHint == "pointer_like" || argument.TypeHint.find('*') != std::string::npos))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool IsPowerOfTwo(uint64_t value)
+{
+    return value != 0 && (value & (value - 1ULL)) == 0;
+}
+
+std::vector<TypeRecoveryHint> CollectTypeRecoveryHints(
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::vector<MemoryAccess>& memoryAccesses,
+    const std::vector<RecoveredArgument>& arguments,
+    const std::vector<RecoveredLocal>& locals)
+{
+    std::vector<TypeRecoveryHint> hints;
+
+    auto addHint = [&hints](TypeRecoveryHint hint)
+    {
+        const auto duplicate = std::find_if(
+            hints.begin(),
+            hints.end(),
+            [&hint](const TypeRecoveryHint& existing)
+            {
+                return existing.Site == hint.Site
+                    && existing.Expression == hint.Expression
+                    && existing.Kind == hint.Kind
+                    && existing.Type == hint.Type;
+            });
+
+        if (duplicate == hints.end())
+        {
+            hints.push_back(std::move(hint));
+        }
+    };
+
+    for (const RecoveredArgument& argument : arguments)
+    {
+        TypeRecoveryHint hint;
+        hint.Site = argument.FirstUseSite;
+        hint.Expression = argument.Name;
+        hint.Type = argument.TypeHint;
+        hint.Source = "argument_usage";
+        hint.Kind = argument.RoleHint;
+        hint.Evidence = argument.Register + " first used " + std::to_string(argument.UseCount) + " times before definition";
+        hint.PointerLike = argument.TypeHint.find('*') != std::string::npos || argument.RoleHint == "pointer_like";
+        hint.Confidence = argument.Confidence;
+        addHint(std::move(hint));
+    }
+
+    for (const RecoveredLocal& local : locals)
+    {
+        TypeRecoveryHint hint;
+        hint.Site = local.FirstSite;
+        hint.Expression = local.Name;
+        hint.Type = local.TypeHint;
+        hint.Source = "stack_usage";
+        hint.Kind = local.RoleHint;
+        hint.Evidence = local.Storage + " " + local.BaseRegister + HexS64(local.Offset);
+        hint.PointerLike = local.TypeHint.find('*') != std::string::npos;
+        hint.Confidence = local.Confidence;
+        addHint(std::move(hint));
+    }
+
+    for (const MemoryAccess& access : memoryAccesses)
+    {
+        int64_t displacement = 0;
+        const bool hasDisplacement = TryParseSignedValue(access.Displacement, displacement);
+
+        if (!access.BaseRegister.empty() && access.BaseRegister != "rsp" && access.BaseRegister != "rbp" && IsLikelyPointerRegister(arguments, access.BaseRegister))
+        {
+            TypeRecoveryHint hint;
+            hint.Site = access.Site;
+            hint.Expression = BuildMemoryExpression(access);
+            hint.Type = InferTypeHintFromWidth(access.WidthBits, false);
+            hint.Source = "pointer_field_offset";
+            hint.Kind = "field_offset";
+            hint.Evidence = access.BaseRegister + (hasDisplacement ? HexS64(displacement) : std::string()) + " width=" + std::to_string(access.WidthBits);
+            hint.PointerLike = false;
+            hint.ArrayLike = !access.IndexRegister.empty();
+            hint.Confidence = Clamp01(0.54 + (hasDisplacement ? 0.08 : 0.0) + (hint.ArrayLike ? 0.08 : 0.0));
+            addHint(std::move(hint));
+        }
+
+        if (!access.IndexRegister.empty() && access.Scale > 1)
+        {
+            TypeRecoveryHint hint;
+            hint.Site = access.Site;
+            hint.Expression = BuildMemoryExpression(access);
+            hint.Type = InferTypeHintFromWidth(access.WidthBits, false) + "[]";
+            hint.Source = "scaled_index_memory";
+            hint.Kind = "array_like";
+            hint.Evidence = access.IndexRegister + "*" + std::to_string(access.Scale);
+            hint.ArrayLike = true;
+            hint.Confidence = 0.70;
+            addHint(std::move(hint));
+        }
+
+        if (access.WidthBits == 64 && hasDisplacement && displacement == 0 && access.Kind == "read")
+        {
+            TypeRecoveryHint hint;
+            hint.Site = access.Site;
+            hint.Expression = BuildMemoryExpression(access);
+            hint.Type = "vtable_or_function_table*";
+            hint.Source = "qword_zero_offset_read";
+            hint.Kind = "vtable_candidate";
+            hint.Evidence = "qword read from object base";
+            hint.PointerLike = true;
+            hint.Confidence = 0.48;
+            addHint(std::move(hint));
+        }
+    }
+
+    for (const DisassembledInstruction& instruction : instructions)
+    {
+        const std::vector<std::string> operands = SplitOperands(instruction.OperandText);
+
+        if (operands.size() != 2)
+        {
+            continue;
+        }
+
+        if (instruction.Mnemonic == "cmp")
+        {
+            uint64_t value = 0;
+            std::string expression;
+
+            if (TryParseUnsigned(StripPointerDecorators(operands[0]), value))
+            {
+                expression = StripPointerDecorators(operands[1]);
+            }
+            else if (TryParseUnsigned(StripPointerDecorators(operands[1]), value))
+            {
+                expression = StripPointerDecorators(operands[0]);
+            }
+            else
+            {
+                continue;
+            }
+
+            TypeRecoveryHint hint;
+            hint.Site = instruction.Address;
+            hint.Expression = expression;
+            hint.Type = "enum_like_uint";
+            hint.Source = "compare_immediate";
+            hint.Kind = "enum_like";
+            hint.Evidence = instruction.OperationText;
+            hint.EnumLike = true;
+            hint.Confidence = 0.58;
+            addHint(std::move(hint));
+        }
+        else if (instruction.Mnemonic == "test" || instruction.Mnemonic == "and")
+        {
+            uint64_t value = 0;
+            std::string expression;
+
+            if (TryParseUnsigned(StripPointerDecorators(operands[0]), value))
+            {
+                expression = StripPointerDecorators(operands[1]);
+            }
+            else if (TryParseUnsigned(StripPointerDecorators(operands[1]), value))
+            {
+                expression = StripPointerDecorators(operands[0]);
+            }
+            else
+            {
+                continue;
+            }
+
+            TypeRecoveryHint hint;
+            hint.Site = instruction.Address;
+            hint.Expression = expression;
+            hint.Type = IsPowerOfTwo(value) ? "single_bit_flag" : "bitmask_flags";
+            hint.Source = "bit_test_immediate";
+            hint.Kind = "bitflag_like";
+            hint.Evidence = instruction.OperationText;
+            hint.BitflagLike = true;
+            hint.Confidence = IsPowerOfTwo(value) ? 0.68 : 0.60;
+            addHint(std::move(hint));
+        }
+    }
+
+    return hints;
+}
+
+std::string ClassifyCallIdiomName(const std::string& target)
+{
+    if (ContainsInsensitive(target, "memcpy") || ContainsInsensitive(target, "memmove"))
+    {
+        return "memory_copy";
+    }
+
+    if (ContainsInsensitive(target, "memset") || ContainsInsensitive(target, "RtlFillMemory") || ContainsInsensitive(target, "RtlZeroMemory"))
+    {
+        return "memory_fill";
+    }
+
+    if (ContainsInsensitive(target, "strcpy") || ContainsInsensitive(target, "wcscpy") || ContainsInsensitive(target, "strncpy") || ContainsInsensitive(target, "wcsncpy"))
+    {
+        return "string_copy";
+    }
+
+    if (ContainsInsensitive(target, "__security_check_cookie") || ContainsInsensitive(target, "__security_cookie"))
+    {
+        return "security_cookie";
+    }
+
+    if (ContainsInsensitive(target, "__chkstk") || ContainsInsensitive(target, "_alloca_probe"))
+    {
+        return "stack_probe";
+    }
+
+    if (ContainsInsensitive(target, "operator new") || ContainsInsensitive(target, "malloc") || ContainsInsensitive(target, "HeapAlloc"))
+    {
+        return "allocator";
+    }
+
+    if (ContainsInsensitive(target, "operator delete") || ContainsInsensitive(target, "free") || ContainsInsensitive(target, "HeapFree"))
+    {
+        return "deallocator";
+    }
+
+    return std::string();
+}
+
+std::vector<IdiomPattern> CollectIdiomPatterns(
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::vector<CallSite>& calls,
+    const std::vector<MemoryAccess>& memoryAccesses,
+    const AbiFacts& abi)
+{
+    std::vector<IdiomPattern> idioms;
+
+    auto addIdiom = [&idioms](IdiomPattern idiom)
+    {
+        const auto duplicate = std::find_if(
+            idioms.begin(),
+            idioms.end(),
+            [&idiom](const IdiomPattern& existing)
+            {
+                return existing.Site == idiom.Site && existing.Kind == idiom.Kind && existing.Name == idiom.Name;
+            });
+
+        if (duplicate == idioms.end())
+        {
+            idioms.push_back(std::move(idiom));
+        }
+    };
+
+    for (const CallSite& call : calls)
+    {
+        const std::string idiomName = ClassifyCallIdiomName(call.Target);
+
+        if (idiomName.empty())
+        {
+            continue;
+        }
+
+        IdiomPattern idiom;
+        idiom.Site = call.Site;
+        idiom.Kind = "library_call";
+        idiom.Name = idiomName;
+        idiom.Evidence = call.Target;
+        idiom.Confidence = 0.78;
+
+        if (idiomName == "memory_copy")
+        {
+            idiom.Summary = "standard memory copy helper";
+            idiom.Replacement = "copy_bytes(dst, src, size)";
+        }
+        else if (idiomName == "memory_fill")
+        {
+            idiom.Summary = "standard memory fill/zero helper";
+            idiom.Replacement = "fill_bytes(dst, value, size)";
+        }
+        else if (idiomName == "string_copy")
+        {
+            idiom.Summary = "standard string copy helper";
+            idiom.Replacement = "copy_string(dst, src)";
+        }
+        else if (idiomName == "security_cookie")
+        {
+            idiom.Summary = "compiler security cookie check";
+            idiom.Replacement = "verify_stack_cookie()";
+        }
+        else if (idiomName == "stack_probe")
+        {
+            idiom.Summary = "compiler stack probing helper";
+            idiom.Replacement = "probe_stack_allocation(size)";
+        }
+        else if (idiomName == "allocator")
+        {
+            idiom.Summary = "heap allocation helper";
+            idiom.Replacement = "allocate_memory(size)";
+        }
+        else if (idiomName == "deallocator")
+        {
+            idiom.Summary = "heap release helper";
+            idiom.Replacement = "free_memory(ptr)";
+        }
+
+        addIdiom(std::move(idiom));
+    }
+
+    if (abi.PrologRecognized && abi.EpilogRecognized && !abi.NoReturnCalls.empty())
+    {
+        IdiomPattern idiom;
+        idiom.Site = instructions.empty() ? 0 : instructions.front().Address;
+        idiom.Kind = "compiler_pattern";
+        idiom.Name = "fail_fast_guard";
+        idiom.Summary = "guarded path terminates through a known no-return helper";
+        idiom.Replacement = "if (guard_failed) fail_fast();";
+        idiom.Evidence = JoinStrings(abi.NoReturnCalls, "; ");
+        idiom.Confidence = 0.68;
+        addIdiom(std::move(idiom));
+    }
+
+    for (size_t index = 0; index < instructions.size(); ++index)
+    {
+        const DisassembledInstruction& instruction = instructions[index];
+
+        if (instruction.Mnemonic == "lea" && ContainsInsensitive(instruction.OperandText, "str"))
+        {
+            IdiomPattern idiom;
+            idiom.Site = instruction.Address;
+            idiom.Kind = "initializer";
+            idiom.Name = "string_reference";
+            idiom.Summary = "address of a string-like object is materialized";
+            idiom.Replacement = "string_literal_or_global";
+            idiom.Evidence = instruction.OperationText;
+            idiom.Confidence = 0.48;
+            addIdiom(std::move(idiom));
+        }
+
+        if (index + 2 < instructions.size())
+        {
+            size_t immediateStores = 0;
+
+            for (size_t cursor = index; cursor < instructions.size() && cursor < index + 6; ++cursor)
+            {
+                const DisassembledInstruction& candidate = instructions[cursor];
+                const std::vector<std::string> operands = SplitOperands(candidate.OperandText);
+
+                if (candidate.Mnemonic == "mov"
+                    && operands.size() == 2
+                    && operands[0].find('[') != std::string::npos
+                    && IsConstantExpression(StripPointerDecorators(operands[1])))
+                {
+                    ++immediateStores;
+                }
+            }
+
+            if (immediateStores >= 3)
+            {
+                IdiomPattern idiom;
+                idiom.Site = instruction.Address;
+                idiom.Kind = "initializer";
+                idiom.Name = "array_or_struct_initializer";
+                idiom.Summary = "cluster of immediate stores initializes stack or aggregate storage";
+                idiom.Replacement = "initialize_aggregate(...)";
+                idiom.Evidence = std::to_string(immediateStores) + " immediate stores in a short window";
+                idiom.Confidence = 0.62;
+                addIdiom(std::move(idiom));
+            }
+        }
+    }
+
+    for (const MemoryAccess& access : memoryAccesses)
+    {
+        if (access.RipRelative && access.Kind == "read" && access.WidthBits == 64)
+        {
+            IdiomPattern idiom;
+            idiom.Site = access.Site;
+            idiom.Kind = "import_or_global";
+            idiom.Name = "rip_relative_qword_load";
+            idiom.Summary = "RIP-relative qword load likely references IAT or global state";
+            idiom.Replacement = "global_or_import_reference";
+            idiom.Evidence = access.Access;
+            idiom.Confidence = 0.50;
+            addIdiom(std::move(idiom));
+        }
+    }
+
+    return idioms;
+}
+
+std::string InferOwnershipFromCalleeName(const std::string& name)
+{
+    if (ContainsInsensitive(name, "malloc")
+        || ContainsInsensitive(name, "alloc")
+        || ContainsInsensitive(name, "operator new")
+        || ContainsInsensitive(name, "Create"))
+    {
+        return "may_return_owned_resource";
+    }
+
+    if (ContainsInsensitive(name, "free")
+        || ContainsInsensitive(name, "delete")
+        || ContainsInsensitive(name, "Close")
+        || ContainsInsensitive(name, "Release"))
+    {
+        return "may_release_resource";
+    }
+
+    return "unknown";
+}
+
+std::string InferMemoryEffectsFromCalleeName(const std::string& name, const std::string& sideEffects)
+{
+    if (ContainsInsensitive(name, "memcpy") || ContainsInsensitive(name, "memmove") || ContainsInsensitive(name, "strcpy"))
+    {
+        return "writes destination buffer and reads source buffer";
+    }
+
+    if (ContainsInsensitive(name, "memset") || ContainsInsensitive(name, "ZeroMemory") || ContainsInsensitive(name, "FillMemory"))
+    {
+        return "writes destination buffer";
+    }
+
+    if (ContainsInsensitive(sideEffects, "terminates"))
+    {
+        return "does not return on success path";
+    }
+
+    if (ContainsInsensitive(sideEffects, "writes") || ContainsInsensitive(sideEffects, "mutates"))
+    {
+        return "may write through pointer arguments or global state";
+    }
+
+    return "unknown";
+}
+
+std::vector<CalleeSummary> CollectCalleeSummaries(const std::vector<CallSite>& calls)
+{
+    std::vector<CalleeSummary> summaries;
+
+    for (const CallSite& call : calls)
+    {
+        CalleeSummary summary;
+        summary.Site = call.Site;
+        summary.Callee = call.Target;
+        summary.ReturnType = call.Returns ? "UNKNOWN_TYPE" : "void/no-return";
+        summary.ParameterModel = "ms_x64 register arguments plus stack arguments";
+        summary.SideEffects = call.Returns ? "unknown" : "terminates control flow";
+        summary.MemoryEffects = InferMemoryEffectsFromCalleeName(call.Target, summary.SideEffects);
+        summary.Ownership = InferOwnershipFromCalleeName(call.Target);
+        summary.Source = "call_site";
+        summary.Confidence = call.Returns ? 0.42 : 0.66;
+        summaries.push_back(std::move(summary));
+    }
+
+    return summaries;
+}
+
 std::string NormalizeBooleanDestinationKey(const std::string& operand)
 {
     return StripPointerDecorators(operand);
@@ -2604,7 +3556,13 @@ AnalysisFacts BuildAnalysisFacts(
     facts.RecoveredArguments = RecoverArguments(instructions);
     facts.RecoveredLocals = RecoverLocals(facts.MemoryAccesses, facts.StackFrame);
     facts.ValueMerges = CollectValueMerges(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
+    facts.IrValues = CollectIrValues(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
     facts.NormalizedConditions = CollectNormalizedConditions(instructions, facts.Blocks, facts.RecoveredArguments, facts.RecoveredLocals);
+    facts.ControlFlow = AnalyzeControlFlow(facts.Blocks, facts.NormalizedConditions, facts.Switches);
+    facts.Abi = AnalyzeAbiFacts(instructions, facts.MemoryAccesses, facts.StackFrame, entryAddress);
+    facts.TypeHints = CollectTypeRecoveryHints(instructions, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
+    facts.Idioms = CollectIdiomPatterns(instructions, facts.Calls, facts.MemoryAccesses, facts.Abi);
+    facts.CalleeSummaries = CollectCalleeSummaries(facts.Calls);
     facts.BytesSha256 = ComputeSha256Hex(bytes);
 
     if (regions.empty())
@@ -2725,9 +3683,120 @@ AnalysisFacts BuildAnalysisFacts(
         facts.Facts.push_back("value merges detected: " + std::to_string(facts.ValueMerges.size()));
     }
 
+    if (!facts.IrValues.empty())
+    {
+        size_t constants = 0;
+        size_t copies = 0;
+        size_t dead = 0;
+
+        for (const auto& value : facts.IrValues)
+        {
+            constants += value.IsConstant ? 1U : 0U;
+            copies += value.IsCopy ? 1U : 0U;
+            dead += value.IsDead ? 1U : 0U;
+        }
+
+        facts.Facts.push_back(
+            "ir values: "
+            + std::to_string(facts.IrValues.size())
+            + " (constants="
+            + std::to_string(constants)
+            + ", copies="
+            + std::to_string(copies)
+            + ", dead_defs="
+            + std::to_string(dead)
+            + ")");
+    }
+
     if (!facts.NormalizedConditions.empty())
     {
         facts.Facts.push_back("normalized branch conditions: " + std::to_string(facts.NormalizedConditions.size()));
+    }
+
+    if (!facts.TypeHints.empty())
+    {
+        size_t enumHints = 0;
+        size_t bitflagHints = 0;
+        size_t arrayHints = 0;
+
+        for (const auto& hint : facts.TypeHints)
+        {
+            enumHints += hint.EnumLike ? 1U : 0U;
+            bitflagHints += hint.BitflagLike ? 1U : 0U;
+            arrayHints += hint.ArrayLike ? 1U : 0U;
+        }
+
+        facts.Facts.push_back(
+            "type recovery hints: "
+            + std::to_string(facts.TypeHints.size())
+            + " (enum_like="
+            + std::to_string(enumHints)
+            + ", bitflag_like="
+            + std::to_string(bitflagHints)
+            + ", array_like="
+            + std::to_string(arrayHints)
+            + ")");
+    }
+
+    if (!facts.Idioms.empty())
+    {
+        facts.Facts.push_back("idiom/library patterns: " + std::to_string(facts.Idioms.size()));
+    }
+
+    if (!facts.CalleeSummaries.empty())
+    {
+        facts.Facts.push_back("callee semantic summaries: " + std::to_string(facts.CalleeSummaries.size()));
+    }
+
+    if (!facts.ControlFlow.empty())
+    {
+        size_t loops = 0;
+        size_t branches = 0;
+        size_t switchCandidates = 0;
+
+        for (const auto& region : facts.ControlFlow)
+        {
+            loops += region.Kind == "natural_loop" ? 1U : 0U;
+            branches += region.Kind == "if_else_candidate" ? 1U : 0U;
+            switchCandidates += region.Kind == "switch_candidate" ? 1U : 0U;
+        }
+
+        facts.Facts.push_back(
+            "control-flow regions: "
+            + std::to_string(facts.ControlFlow.size())
+            + " (loops="
+            + std::to_string(loops)
+            + ", branches="
+            + std::to_string(branches)
+            + ", switches="
+            + std::to_string(switchCandidates)
+            + ")");
+    }
+
+    if (facts.Abi.PrologRecognized)
+    {
+        facts.Facts.push_back("x64 ABI frame recognized: frame_base=" + facts.Abi.FrameBase);
+    }
+
+    if (!facts.Abi.NoReturnCalls.empty())
+    {
+        facts.Facts.push_back("no-return calls: " + std::to_string(facts.Abi.NoReturnCalls.size()));
+    }
+
+    if (!facts.Abi.TailCalls.empty() || !facts.Abi.Thunks.empty() || !facts.Abi.ImportWrappers.empty())
+    {
+        facts.Facts.push_back(
+            "tail/thunk/import-wrapper candidates: tail="
+            + std::to_string(facts.Abi.TailCalls.size())
+            + ", thunk="
+            + std::to_string(facts.Abi.Thunks.size())
+            + ", import_wrapper="
+            + std::to_string(facts.Abi.ImportWrappers.size()));
+    }
+
+    if (facts.ControlFlow.empty() && facts.Blocks.size() > 1)
+    {
+        facts.UncertainPoints.push_back("control-flow structuring produced no high-confidence regions");
     }
 
     facts.PreLlmConfidence = ScoreConfidence(

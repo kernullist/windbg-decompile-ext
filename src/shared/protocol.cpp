@@ -1,4 +1,4 @@
-﻿#include "decomp/protocol.h"
+#include "decomp/protocol.h"
 
 #include <cmath>
 
@@ -179,6 +179,164 @@ JsonValue ToJson(const ValueMerge& merge)
     return object;
 }
 
+JsonValue ToJson(const IrValue& value)
+{
+    JsonValue object = JsonValue::MakeObject();
+    JsonValue uses = JsonValue::MakeArray();
+
+    for (const auto& use : value.Uses)
+    {
+        uses.PushBack(JsonValue::MakeString(use));
+    }
+
+    object.Set("id", JsonValue::MakeString(value.Id));
+    object.Set("block_id", JsonValue::MakeString(value.BlockId));
+    object.Set("def_site", JsonValue::MakeString(HexU64(value.DefSite)));
+    object.Set("target", JsonValue::MakeString(value.Target));
+    object.Set("expression", JsonValue::MakeString(value.Expression));
+    object.Set("canonical", JsonValue::MakeString(value.Canonical));
+    object.Set("kind", JsonValue::MakeString(value.Kind));
+    object.Set("uses", uses);
+    object.Set("is_constant", JsonValue::MakeBoolean(value.IsConstant));
+    object.Set("is_copy", JsonValue::MakeBoolean(value.IsCopy));
+    object.Set("is_dead", JsonValue::MakeBoolean(value.IsDead));
+    object.Set("confidence", JsonValue::MakeNumber(value.Confidence));
+    return object;
+}
+
+JsonValue ToJson(const ControlFlowRegion& region)
+{
+    JsonValue object = JsonValue::MakeObject();
+    JsonValue body = JsonValue::MakeArray();
+    JsonValue latches = JsonValue::MakeArray();
+    JsonValue exits = JsonValue::MakeArray();
+
+    for (const auto& block : region.BodyBlocks)
+    {
+        body.PushBack(JsonValue::MakeString(block));
+    }
+
+    for (const auto& block : region.LatchBlocks)
+    {
+        latches.PushBack(JsonValue::MakeString(block));
+    }
+
+    for (const auto& block : region.ExitBlocks)
+    {
+        exits.PushBack(JsonValue::MakeString(block));
+    }
+
+    object.Set("kind", JsonValue::MakeString(region.Kind));
+    object.Set("header_block", JsonValue::MakeString(region.HeaderBlock));
+    object.Set("body_blocks", body);
+    object.Set("latch_blocks", latches);
+    object.Set("exit_blocks", exits);
+    object.Set("condition", JsonValue::MakeString(region.Condition));
+    object.Set("evidence", JsonValue::MakeString(region.Evidence));
+    object.Set("confidence", JsonValue::MakeNumber(region.Confidence));
+    return object;
+}
+
+JsonValue ToJson(const AbiFacts& abi)
+{
+    JsonValue object = JsonValue::MakeObject();
+    JsonValue homeSlots = JsonValue::MakeArray();
+    JsonValue noReturnCalls = JsonValue::MakeArray();
+    JsonValue tailCalls = JsonValue::MakeArray();
+    JsonValue thunks = JsonValue::MakeArray();
+    JsonValue importWrappers = JsonValue::MakeArray();
+    JsonValue notes = JsonValue::MakeArray();
+
+    for (const auto& value : abi.HomeSlots)
+    {
+        homeSlots.PushBack(JsonValue::MakeString(value));
+    }
+
+    for (const auto& value : abi.NoReturnCalls)
+    {
+        noReturnCalls.PushBack(JsonValue::MakeString(value));
+    }
+
+    for (const auto& value : abi.TailCalls)
+    {
+        tailCalls.PushBack(JsonValue::MakeString(value));
+    }
+
+    for (const auto& value : abi.Thunks)
+    {
+        thunks.PushBack(JsonValue::MakeString(value));
+    }
+
+    for (const auto& value : abi.ImportWrappers)
+    {
+        importWrappers.PushBack(JsonValue::MakeString(value));
+    }
+
+    for (const auto& value : abi.Notes)
+    {
+        notes.PushBack(JsonValue::MakeString(value));
+    }
+
+    object.Set("shadow_space_bytes", JsonValue::MakeNumber(static_cast<double>(abi.ShadowSpaceBytes)));
+    object.Set("prolog_recognized", JsonValue::MakeBoolean(abi.PrologRecognized));
+    object.Set("epilog_recognized", JsonValue::MakeBoolean(abi.EpilogRecognized));
+    object.Set("frame_pointer_established", JsonValue::MakeBoolean(abi.FramePointerEstablished));
+    object.Set("frame_base", JsonValue::MakeString(abi.FrameBase));
+    object.Set("home_slots", homeSlots);
+    object.Set("no_return_calls", noReturnCalls);
+    object.Set("tail_calls", tailCalls);
+    object.Set("thunks", thunks);
+    object.Set("import_wrappers", importWrappers);
+    object.Set("notes", notes);
+    object.Set("confidence", JsonValue::MakeNumber(abi.Confidence));
+    return object;
+}
+
+JsonValue ToJson(const TypeRecoveryHint& hint)
+{
+    JsonValue object = JsonValue::MakeObject();
+    object.Set("site", JsonValue::MakeString(HexU64(hint.Site)));
+    object.Set("expression", JsonValue::MakeString(hint.Expression));
+    object.Set("type", JsonValue::MakeString(hint.Type));
+    object.Set("source", JsonValue::MakeString(hint.Source));
+    object.Set("kind", JsonValue::MakeString(hint.Kind));
+    object.Set("evidence", JsonValue::MakeString(hint.Evidence));
+    object.Set("pointer_like", JsonValue::MakeBoolean(hint.PointerLike));
+    object.Set("array_like", JsonValue::MakeBoolean(hint.ArrayLike));
+    object.Set("enum_like", JsonValue::MakeBoolean(hint.EnumLike));
+    object.Set("bitflag_like", JsonValue::MakeBoolean(hint.BitflagLike));
+    object.Set("confidence", JsonValue::MakeNumber(hint.Confidence));
+    return object;
+}
+
+JsonValue ToJson(const IdiomPattern& idiom)
+{
+    JsonValue object = JsonValue::MakeObject();
+    object.Set("site", JsonValue::MakeString(HexU64(idiom.Site)));
+    object.Set("kind", JsonValue::MakeString(idiom.Kind));
+    object.Set("name", JsonValue::MakeString(idiom.Name));
+    object.Set("summary", JsonValue::MakeString(idiom.Summary));
+    object.Set("replacement", JsonValue::MakeString(idiom.Replacement));
+    object.Set("evidence", JsonValue::MakeString(idiom.Evidence));
+    object.Set("confidence", JsonValue::MakeNumber(idiom.Confidence));
+    return object;
+}
+
+JsonValue ToJson(const CalleeSummary& summary)
+{
+    JsonValue object = JsonValue::MakeObject();
+    object.Set("site", JsonValue::MakeString(HexU64(summary.Site)));
+    object.Set("callee", JsonValue::MakeString(summary.Callee));
+    object.Set("return_type", JsonValue::MakeString(summary.ReturnType));
+    object.Set("parameter_model", JsonValue::MakeString(summary.ParameterModel));
+    object.Set("side_effects", JsonValue::MakeString(summary.SideEffects));
+    object.Set("memory_effects", JsonValue::MakeString(summary.MemoryEffects));
+    object.Set("ownership", JsonValue::MakeString(summary.Ownership));
+    object.Set("source", JsonValue::MakeString(summary.Source));
+    object.Set("confidence", JsonValue::MakeNumber(summary.Confidence));
+    return object;
+}
+
 JsonValue ToJson(const DataReference& reference)
 {
     JsonValue object = JsonValue::MakeObject();
@@ -328,6 +486,100 @@ JsonValue ToJson(const PdbFacts& pdb)
     return object;
 }
 
+JsonValue ToJson(const SessionPolicyFacts& policy)
+{
+    JsonValue object = JsonValue::MakeObject();
+    JsonValue notes = JsonValue::MakeArray();
+
+    for (const auto& note : policy.Notes)
+    {
+        notes.PushBack(JsonValue::MakeString(note));
+    }
+
+    object.Set("debug_class", JsonValue::MakeString(policy.DebugClass));
+    object.Set("qualifier", JsonValue::MakeString(policy.Qualifier));
+    object.Set("execution_kind", JsonValue::MakeString(policy.ExecutionKind));
+    object.Set("analysis_strategy", JsonValue::MakeString(policy.AnalysisStrategy));
+    object.Set("is_live", JsonValue::MakeBoolean(policy.IsLive));
+    object.Set("is_dump", JsonValue::MakeBoolean(policy.IsDump));
+    object.Set("is_kernel", JsonValue::MakeBoolean(policy.IsKernel));
+    object.Set("is_trace_like", JsonValue::MakeBoolean(policy.IsTraceLike));
+    object.Set("ttd_available", JsonValue::MakeBoolean(policy.TtdAvailable));
+    object.Set("notes", notes);
+    return object;
+}
+
+JsonValue ToJson(const ObservedArgumentValue& argument)
+{
+    JsonValue object = JsonValue::MakeObject();
+    object.Set("name", JsonValue::MakeString(argument.Name));
+    object.Set("register", JsonValue::MakeString(argument.Register));
+    object.Set("value", JsonValue::MakeString(HexU64(argument.Value)));
+    object.Set("symbol", JsonValue::MakeString(argument.Symbol));
+    object.Set("source", JsonValue::MakeString(argument.Source));
+    object.Set("confidence", JsonValue::MakeNumber(argument.Confidence));
+    return object;
+}
+
+JsonValue ToJson(const ObservedMemoryHotspot& hotspot)
+{
+    JsonValue object = JsonValue::MakeObject();
+    JsonValue sites = JsonValue::MakeArray();
+
+    for (const auto site : hotspot.Sites)
+    {
+        sites.PushBack(JsonValue::MakeString(HexU64(site)));
+    }
+
+    object.Set("expression", JsonValue::MakeString(hotspot.Expression));
+    object.Set("kind", JsonValue::MakeString(hotspot.Kind));
+    object.Set("read_count", JsonValue::MakeNumber(static_cast<double>(hotspot.ReadCount)));
+    object.Set("write_count", JsonValue::MakeNumber(static_cast<double>(hotspot.WriteCount)));
+    object.Set("sites", sites);
+    object.Set("confidence", JsonValue::MakeNumber(hotspot.Confidence));
+    return object;
+}
+
+JsonValue ToJson(const ObservedBehaviorFacts& observed)
+{
+    JsonValue object = JsonValue::MakeObject();
+    JsonValue arguments = JsonValue::MakeArray();
+    JsonValue hotspots = JsonValue::MakeArray();
+    JsonValue ttdQueries = JsonValue::MakeArray();
+    JsonValue notes = JsonValue::MakeArray();
+
+    for (const auto& argument : observed.ArgumentSamples)
+    {
+        arguments.PushBack(ToJson(argument));
+    }
+
+    for (const auto& hotspot : observed.MemoryHotspots)
+    {
+        hotspots.PushBack(ToJson(hotspot));
+    }
+
+    for (const auto& query : observed.TtdQueries)
+    {
+        ttdQueries.PushBack(JsonValue::MakeString(query));
+    }
+
+    for (const auto& note : observed.Notes)
+    {
+        notes.PushBack(JsonValue::MakeString(note));
+    }
+
+    object.Set("current_instruction_in_function", JsonValue::MakeBoolean(observed.CurrentInstructionInFunction));
+    object.Set("instruction_pointer", JsonValue::MakeString(HexU64(observed.InstructionPointer)));
+    object.Set("stack_pointer", JsonValue::MakeString(HexU64(observed.StackPointer)));
+    object.Set("return_address", JsonValue::MakeString(HexU64(observed.ReturnAddress)));
+    object.Set("argument_samples", arguments);
+    object.Set("memory_hotspots", hotspots);
+    object.Set("ttd_queries", ttdQueries);
+    object.Set("notes", notes);
+    object.Set("confidence", JsonValue::MakeNumber(observed.Confidence));
+    return object;
+}
+
 JsonValue ToJson(const TypedNameConfidence& value)
 {
     JsonValue object = JsonValue::MakeObject();
@@ -364,10 +616,21 @@ JsonValue ToJson(const VerifyReport& report)
 {
     JsonValue object = JsonValue::MakeObject();
     JsonValue warnings = JsonValue::MakeArray();
+    JsonValue issues = JsonValue::MakeArray();
 
     for (const auto& warning : report.Warnings)
     {
         warnings.PushBack(JsonValue::MakeString(warning));
+    }
+
+    for (const auto& issue : report.Issues)
+    {
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("code", JsonValue::MakeString(issue.Code));
+        item.Set("severity", JsonValue::MakeString(issue.Severity));
+        item.Set("message", JsonValue::MakeString(issue.Message));
+        item.Set("evidence", JsonValue::MakeString(issue.Evidence));
+        issues.PushBack(item);
     }
 
     object.Set("schema_ok", JsonValue::MakeBoolean(report.SchemaOk));
@@ -375,6 +638,7 @@ JsonValue ToJson(const VerifyReport& report)
     object.Set("missing_evidence", JsonValue::MakeNumber(static_cast<double>(report.MissingEvidence)));
     object.Set("adjusted_confidence", JsonValue::MakeNumber(report.AdjustedConfidence));
     object.Set("warnings", warnings);
+    object.Set("issues", issues);
     return object;
 }
 
@@ -637,6 +901,113 @@ bool ParseValueMerge(const JsonValue& object, ValueMerge& merge)
     return true;
 }
 
+void ParseStringArrayMember(const JsonValue& object, const std::string& key, std::vector<std::string>& values)
+{
+    const JsonValue* array = object.Find(key);
+
+    if (array == nullptr || !array->IsArray())
+    {
+        return;
+    }
+
+    for (const auto& item : array->GetArray())
+    {
+        if (item.IsString())
+        {
+            values.push_back(item.GetString());
+        }
+    }
+}
+
+bool ParseIrValue(const JsonValue& object, IrValue& value)
+{
+    TryGetString(object, "id", value.Id);
+    TryGetString(object, "block_id", value.BlockId);
+    TryGetU64(object, "def_site", value.DefSite);
+    TryGetString(object, "target", value.Target);
+    TryGetString(object, "expression", value.Expression);
+    TryGetString(object, "canonical", value.Canonical);
+    TryGetString(object, "kind", value.Kind);
+    TryGetBool(object, "is_constant", value.IsConstant);
+    TryGetBool(object, "is_copy", value.IsCopy);
+    TryGetBool(object, "is_dead", value.IsDead);
+    TryGetDouble(object, "confidence", value.Confidence);
+    ParseStringArrayMember(object, "uses", value.Uses);
+    return true;
+}
+
+bool ParseControlFlowRegion(const JsonValue& object, ControlFlowRegion& region)
+{
+    TryGetString(object, "kind", region.Kind);
+    TryGetString(object, "header_block", region.HeaderBlock);
+    TryGetString(object, "condition", region.Condition);
+    TryGetString(object, "evidence", region.Evidence);
+    TryGetDouble(object, "confidence", region.Confidence);
+    ParseStringArrayMember(object, "body_blocks", region.BodyBlocks);
+    ParseStringArrayMember(object, "latch_blocks", region.LatchBlocks);
+    ParseStringArrayMember(object, "exit_blocks", region.ExitBlocks);
+    return true;
+}
+
+bool ParseAbiFacts(const JsonValue& object, AbiFacts& abi)
+{
+    TryGetU32(object, "shadow_space_bytes", abi.ShadowSpaceBytes);
+    TryGetBool(object, "prolog_recognized", abi.PrologRecognized);
+    TryGetBool(object, "epilog_recognized", abi.EpilogRecognized);
+    TryGetBool(object, "frame_pointer_established", abi.FramePointerEstablished);
+    TryGetString(object, "frame_base", abi.FrameBase);
+    TryGetDouble(object, "confidence", abi.Confidence);
+    ParseStringArrayMember(object, "home_slots", abi.HomeSlots);
+    ParseStringArrayMember(object, "no_return_calls", abi.NoReturnCalls);
+    ParseStringArrayMember(object, "tail_calls", abi.TailCalls);
+    ParseStringArrayMember(object, "thunks", abi.Thunks);
+    ParseStringArrayMember(object, "import_wrappers", abi.ImportWrappers);
+    ParseStringArrayMember(object, "notes", abi.Notes);
+    return true;
+}
+
+bool ParseTypeRecoveryHint(const JsonValue& object, TypeRecoveryHint& hint)
+{
+    TryGetU64(object, "site", hint.Site);
+    TryGetString(object, "expression", hint.Expression);
+    TryGetString(object, "type", hint.Type);
+    TryGetString(object, "source", hint.Source);
+    TryGetString(object, "kind", hint.Kind);
+    TryGetString(object, "evidence", hint.Evidence);
+    TryGetBool(object, "pointer_like", hint.PointerLike);
+    TryGetBool(object, "array_like", hint.ArrayLike);
+    TryGetBool(object, "enum_like", hint.EnumLike);
+    TryGetBool(object, "bitflag_like", hint.BitflagLike);
+    TryGetDouble(object, "confidence", hint.Confidence);
+    return true;
+}
+
+bool ParseIdiomPattern(const JsonValue& object, IdiomPattern& idiom)
+{
+    TryGetU64(object, "site", idiom.Site);
+    TryGetString(object, "kind", idiom.Kind);
+    TryGetString(object, "name", idiom.Name);
+    TryGetString(object, "summary", idiom.Summary);
+    TryGetString(object, "replacement", idiom.Replacement);
+    TryGetString(object, "evidence", idiom.Evidence);
+    TryGetDouble(object, "confidence", idiom.Confidence);
+    return true;
+}
+
+bool ParseCalleeSummary(const JsonValue& object, CalleeSummary& summary)
+{
+    TryGetU64(object, "site", summary.Site);
+    TryGetString(object, "callee", summary.Callee);
+    TryGetString(object, "return_type", summary.ReturnType);
+    TryGetString(object, "parameter_model", summary.ParameterModel);
+    TryGetString(object, "side_effects", summary.SideEffects);
+    TryGetString(object, "memory_effects", summary.MemoryEffects);
+    TryGetString(object, "ownership", summary.Ownership);
+    TryGetString(object, "source", summary.Source);
+    TryGetDouble(object, "confidence", summary.Confidence);
+    return true;
+}
+
 bool ParseDataReference(const JsonValue& object, DataReference& reference)
 {
     TryGetU64(object, "site", reference.Site);
@@ -880,6 +1251,30 @@ bool ParseVerifyReport(const JsonValue& object, VerifyReport& report)
         }
     }
 
+    const JsonValue* issues = object.Find("issues");
+
+    if (issues != nullptr && issues->IsArray())
+    {
+        for (const auto& item : issues->GetArray())
+        {
+            if (!item.IsObject())
+            {
+                continue;
+            }
+
+            VerificationIssue issue;
+            TryGetString(item, "code", issue.Code);
+            TryGetString(item, "severity", issue.Severity);
+            TryGetString(item, "message", issue.Message);
+            TryGetString(item, "evidence", issue.Evidence);
+
+            if (!issue.Message.empty())
+            {
+                report.Issues.push_back(std::move(issue));
+            }
+        }
+    }
+
     return true;
 }
 }
@@ -897,6 +1292,11 @@ JsonValue ToJson(const AnalyzeRequest& request)
     JsonValue recoveredArguments = JsonValue::MakeArray();
     JsonValue recoveredLocals = JsonValue::MakeArray();
     JsonValue valueMerges = JsonValue::MakeArray();
+    JsonValue irValues = JsonValue::MakeArray();
+    JsonValue controlFlow = JsonValue::MakeArray();
+    JsonValue typeHints = JsonValue::MakeArray();
+    JsonValue idioms = JsonValue::MakeArray();
+    JsonValue calleeSummaries = JsonValue::MakeArray();
     JsonValue dataReferences = JsonValue::MakeArray();
     JsonValue callTargets = JsonValue::MakeArray();
     JsonValue normalizedConditions = JsonValue::MakeArray();
@@ -953,6 +1353,31 @@ JsonValue ToJson(const AnalyzeRequest& request)
         valueMerges.PushBack(ToJson(merge));
     }
 
+    for (const auto& value : request.Facts.IrValues)
+    {
+        irValues.PushBack(ToJson(value));
+    }
+
+    for (const auto& region : request.Facts.ControlFlow)
+    {
+        controlFlow.PushBack(ToJson(region));
+    }
+
+    for (const auto& hint : request.Facts.TypeHints)
+    {
+        typeHints.PushBack(ToJson(hint));
+    }
+
+    for (const auto& idiom : request.Facts.Idioms)
+    {
+        idioms.PushBack(ToJson(idiom));
+    }
+
+    for (const auto& summary : request.Facts.CalleeSummaries)
+    {
+        calleeSummaries.PushBack(ToJson(summary));
+    }
+
     for (const auto& reference : request.Facts.DataReferences)
     {
         dataReferences.PushBack(ToJson(reference));
@@ -1003,10 +1428,18 @@ JsonValue ToJson(const AnalyzeRequest& request)
     object.Set("recovered_arguments", recoveredArguments);
     object.Set("recovered_locals", recoveredLocals);
     object.Set("value_merges", valueMerges);
+    object.Set("ir_values", irValues);
+    object.Set("control_flow", controlFlow);
+    object.Set("abi", ToJson(request.Facts.Abi));
+    object.Set("type_hints", typeHints);
+    object.Set("idioms", idioms);
+    object.Set("callee_summaries", calleeSummaries);
     object.Set("data_references", dataReferences);
     object.Set("call_targets", callTargets);
     object.Set("normalized_conditions", normalizedConditions);
     object.Set("pdb", ToJson(request.Facts.Pdb));
+    object.Set("session_policy", ToJson(request.Facts.SessionPolicy));
+    object.Set("observed_behavior", ToJson(request.Facts.ObservedBehavior));
     object.Set("facts", facts);
     object.Set("uncertain_points", uncertainPoints);
     object.Set("pre_llm_confidence", JsonValue::MakeNumber(request.Facts.PreLlmConfidence));
@@ -1074,6 +1507,9 @@ std::string SerializeAnalyzeResponse(const AnalyzeResponse& response, bool prett
 {
     return SerializeJson(ToJson(response), pretty);
 }
+
+bool ParseSessionPolicyFacts(const JsonValue& object, SessionPolicyFacts& policy);
+bool ParseObservedBehaviorFacts(const JsonValue& object, ObservedBehaviorFacts& observed);
 
 bool ParseAnalyzeRequest(const std::string& text, AnalyzeRequest& request, std::string& error)
 {
@@ -1375,6 +1811,98 @@ bool ParseAnalyzeRequest(const std::string& text, AnalyzeRequest& request, std::
         }
     }
 
+    const JsonValue* irValues = object.Find("ir_values");
+
+    if (irValues != nullptr && irValues->IsArray())
+    {
+        for (const auto& item : irValues->GetArray())
+        {
+            if (!item.IsObject())
+            {
+                continue;
+            }
+
+            IrValue value;
+            ParseIrValue(item, value);
+            request.Facts.IrValues.push_back(value);
+        }
+    }
+
+    const JsonValue* controlFlow = object.Find("control_flow");
+
+    if (controlFlow != nullptr && controlFlow->IsArray())
+    {
+        for (const auto& item : controlFlow->GetArray())
+        {
+            if (!item.IsObject())
+            {
+                continue;
+            }
+
+            ControlFlowRegion region;
+            ParseControlFlowRegion(item, region);
+            request.Facts.ControlFlow.push_back(region);
+        }
+    }
+
+    const JsonValue* abi = object.Find("abi");
+
+    if (abi != nullptr && abi->IsObject())
+    {
+        ParseAbiFacts(*abi, request.Facts.Abi);
+    }
+
+    const JsonValue* typeHints = object.Find("type_hints");
+
+    if (typeHints != nullptr && typeHints->IsArray())
+    {
+        for (const auto& item : typeHints->GetArray())
+        {
+            if (!item.IsObject())
+            {
+                continue;
+            }
+
+            TypeRecoveryHint hint;
+            ParseTypeRecoveryHint(item, hint);
+            request.Facts.TypeHints.push_back(hint);
+        }
+    }
+
+    const JsonValue* idioms = object.Find("idioms");
+
+    if (idioms != nullptr && idioms->IsArray())
+    {
+        for (const auto& item : idioms->GetArray())
+        {
+            if (!item.IsObject())
+            {
+                continue;
+            }
+
+            IdiomPattern idiom;
+            ParseIdiomPattern(item, idiom);
+            request.Facts.Idioms.push_back(idiom);
+        }
+    }
+
+    const JsonValue* calleeSummaries = object.Find("callee_summaries");
+
+    if (calleeSummaries != nullptr && calleeSummaries->IsArray())
+    {
+        for (const auto& item : calleeSummaries->GetArray())
+        {
+            if (!item.IsObject())
+            {
+                continue;
+            }
+
+            CalleeSummary summary;
+            ParseCalleeSummary(item, summary);
+            request.Facts.CalleeSummaries.push_back(summary);
+        }
+    }
+
     const JsonValue* dataReferences = object.Find("data_references");
 
     if (dataReferences != nullptr && dataReferences->IsArray())
@@ -1433,6 +1961,20 @@ bool ParseAnalyzeRequest(const std::string& text, AnalyzeRequest& request, std::
         ParsePdbFacts(*pdb, request.Facts.Pdb);
     }
 
+    const JsonValue* sessionPolicy = object.Find("session_policy");
+
+    if (sessionPolicy != nullptr && sessionPolicy->IsObject())
+    {
+        ParseSessionPolicyFacts(*sessionPolicy, request.Facts.SessionPolicy);
+    }
+
+    const JsonValue* observedBehavior = object.Find("observed_behavior");
+
+    if (observedBehavior != nullptr && observedBehavior->IsObject())
+    {
+        ParseObservedBehaviorFacts(*observedBehavior, request.Facts.ObservedBehavior);
+    }
+
     const JsonValue* facts = object.Find("facts");
 
     if (facts != nullptr && facts->IsArray())
@@ -1456,6 +1998,105 @@ bool ParseAnalyzeRequest(const std::string& text, AnalyzeRequest& request, std::
             {
                 request.Facts.UncertainPoints.push_back(item.GetString());
             }
+        }
+    }
+
+    return true;
+}
+
+bool ParseSessionPolicyFacts(const JsonValue& object, SessionPolicyFacts& policy)
+{
+    TryGetString(object, "debug_class", policy.DebugClass);
+    TryGetString(object, "qualifier", policy.Qualifier);
+    TryGetString(object, "execution_kind", policy.ExecutionKind);
+    TryGetString(object, "analysis_strategy", policy.AnalysisStrategy);
+    TryGetBool(object, "is_live", policy.IsLive);
+    TryGetBool(object, "is_dump", policy.IsDump);
+    TryGetBool(object, "is_kernel", policy.IsKernel);
+    TryGetBool(object, "is_trace_like", policy.IsTraceLike);
+    TryGetBool(object, "ttd_available", policy.TtdAvailable);
+    ParseStringArrayMember(object, "notes", policy.Notes);
+    return true;
+}
+
+bool ParseObservedArgumentValue(const JsonValue& object, ObservedArgumentValue& argument)
+{
+    TryGetString(object, "name", argument.Name);
+    TryGetString(object, "register", argument.Register);
+    TryGetU64(object, "value", argument.Value);
+    TryGetString(object, "symbol", argument.Symbol);
+    TryGetString(object, "source", argument.Source);
+    TryGetDouble(object, "confidence", argument.Confidence);
+    return true;
+}
+
+bool ParseObservedMemoryHotspot(const JsonValue& object, ObservedMemoryHotspot& hotspot)
+{
+    TryGetString(object, "expression", hotspot.Expression);
+    TryGetString(object, "kind", hotspot.Kind);
+    TryGetU32(object, "read_count", hotspot.ReadCount);
+    TryGetU32(object, "write_count", hotspot.WriteCount);
+    TryGetDouble(object, "confidence", hotspot.Confidence);
+
+    const JsonValue* sites = object.Find("sites");
+
+    if (sites != nullptr && sites->IsArray())
+    {
+        for (const auto& item : sites->GetArray())
+        {
+            uint64_t site = 0;
+
+            if (item.IsString() && TryParseUnsigned(item.GetString(), site))
+            {
+                hotspot.Sites.push_back(site);
+            }
+        }
+    }
+
+    return true;
+}
+
+bool ParseObservedBehaviorFacts(const JsonValue& object, ObservedBehaviorFacts& observed)
+{
+    TryGetBool(object, "current_instruction_in_function", observed.CurrentInstructionInFunction);
+    TryGetU64(object, "instruction_pointer", observed.InstructionPointer);
+    TryGetU64(object, "stack_pointer", observed.StackPointer);
+    TryGetU64(object, "return_address", observed.ReturnAddress);
+    TryGetDouble(object, "confidence", observed.Confidence);
+    ParseStringArrayMember(object, "ttd_queries", observed.TtdQueries);
+    ParseStringArrayMember(object, "notes", observed.Notes);
+
+    const JsonValue* arguments = object.Find("argument_samples");
+
+    if (arguments != nullptr && arguments->IsArray())
+    {
+        for (const auto& item : arguments->GetArray())
+        {
+            if (!item.IsObject())
+            {
+                continue;
+            }
+
+            ObservedArgumentValue argument;
+            ParseObservedArgumentValue(item, argument);
+            observed.ArgumentSamples.push_back(argument);
+        }
+    }
+
+    const JsonValue* hotspots = object.Find("memory_hotspots");
+
+    if (hotspots != nullptr && hotspots->IsArray())
+    {
+        for (const auto& item : hotspots->GetArray())
+        {
+            if (!item.IsObject())
+            {
+                continue;
+            }
+
+            ObservedMemoryHotspot hotspot;
+            ParseObservedMemoryHotspot(item, hotspot);
+            observed.MemoryHotspots.push_back(hotspot);
         }
     }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 
 #include "decomp/types.h"
@@ -43,6 +44,9 @@ struct LlmClientConfig
     uint32_t ChunkCountLimit = 20;
     uint32_t ChunkCompletionTokens = 3500;
     uint32_t MergeCompletionTokens = 9000;
+    std::function<void(const std::string&)> ProgressLog;
+    std::function<void(const std::string&)> VerboseLog;
+    std::function<bool()> ShouldCancel;
     DisplayLanguageConfig DisplayLanguage;
     PseudoCodeHighlightConfig Highlight;
 };
@@ -57,5 +61,7 @@ bool AnalyzeWithLlm(
     const LlmClientConfig& config,
     AnalyzeResponse& response,
     std::string& error);
+
+std::string BuildDebugPromptDump(const AnalyzeRequest& request);
 }
 

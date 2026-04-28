@@ -12,17 +12,26 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
+#include <cctype>
 #include <cstdarg>
+#include <cstdlib>
 #include <cstdio>
+#include <deque>
+#include <exception>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "decomp/analyzer.h"
+#include "decomp/json.h"
 #include "decomp/llm_client.h"
 #include "decomp/pseudo_tokens.h"
 #include "decomp/protocol.h"
@@ -42,6 +51,7 @@ struct DebugApi
     ComPtr<IDebugSymbols3> Symbols;
     ComPtr<IDebugSymbols5> Symbols5;
     ComPtr<IDebugDataSpaces4> DataSpaces;
+    ComPtr<IDebugRegisters2> Registers;
 };
 
 struct DecodedInstructionContext
@@ -328,6 +338,202 @@ void OutputLine(IDebugControl* control, IDebugControl4* control4, const char* fo
     }
 }
 
+void OutputVerbose(IDebugControl* control, IDebugControl4* control4, const decomp::DecompOptions& options, const char* format, ...)
+{
+    if (!options.VerboseOutput)
+    {
+        return;
+    }
+
+    std::array<char, 4096> buffer = {};
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(buffer.data(), buffer.size(), format, args);
+    va_end(args);
+
+    OutputLine(control, control4, "[decomp] %s\n", buffer.data());
+}
+
+bool ShouldShowProgress(const decomp::DecompOptions& options)
+{
+    return !options.VerboseOutput
+        && !options.JsonOutput
+        && !options.FactsOnlyOutput
+        && !options.DebugPromptOutput
+        && !options.DataModelOutput
+        && !options.LastExplainOutput
+        && !options.LastFactsOutput
+        && !options.LastJsonOutput
+        && !options.LastDataModelOutput
+        && !options.LastDebugPromptOutput;
+}
+
+void OutputProgress(IDebugControl* control, IDebugControl4* control4, const decomp::DecompOptions& options, const char* format, ...)
+{
+    if (!ShouldShowProgress(options))
+    {
+        return;
+    }
+
+    std::array<char, 4096> buffer = {};
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(buffer.data(), buffer.size(), format, args);
+    va_end(args);
+
+    OutputLine(control, control4, "[decomp] %s\n", buffer.data());
+}
+
+bool IsUserInterruptRequested(IDebugControl* control)
+{
+    return control != nullptr && control->GetInterrupt() == S_OK;
+}
+
+bool AbortIfUserInterrupted(IDebugControl* control, IDebugControl4* control4, const decomp::DecompOptions& options, const char* stage)
+{
+    if (!IsUserInterruptRequested(control))
+    {
+        return false;
+    }
+
+    OutputVerbose(control, control4, options, "cancel requested during %s", stage);
+    OutputLine(control, control4, "decomp cancelled by user\n");
+    return true;
+}
+
+struct AsyncLlmRunState
+{
+    std::mutex Mutex;
+    std::deque<std::string> VerboseMessages;
+    std::atomic<bool> CancelRequested{ false };
+    std::atomic<bool> Done{ false };
+    bool Success = false;
+    decomp::AnalyzeResponse Response;
+    std::string Error;
+};
+
+void DrainAsyncVerboseMessages(
+    const std::shared_ptr<AsyncLlmRunState>& state,
+    IDebugControl* control,
+    IDebugControl4* control4)
+{
+    std::deque<std::string> messages;
+
+    {
+        std::lock_guard<std::mutex> lock(state->Mutex);
+        messages.swap(state->VerboseMessages);
+    }
+
+    for (const auto& message : messages)
+    {
+        OutputLine(control, control4, "[decomp] %s\n", message.c_str());
+    }
+}
+
+bool AnalyzeWithLlmInterruptible(
+    const decomp::AnalyzeRequest& request,
+    decomp::LlmClientConfig config,
+    IDebugControl* control,
+    IDebugControl4* control4,
+    const decomp::DecompOptions& options,
+    decomp::AnalyzeResponse& response,
+    std::string& error,
+    bool& cancelled)
+{
+    cancelled = false;
+    const auto state = std::make_shared<AsyncLlmRunState>();
+
+    config.ShouldCancel = [state]()
+    {
+        return state->CancelRequested.load();
+    };
+
+    if (options.VerboseOutput)
+    {
+        config.VerboseLog = [state](const std::string& message)
+        {
+            std::lock_guard<std::mutex> lock(state->Mutex);
+            state->VerboseMessages.push_back(message);
+        };
+    }
+    else if (ShouldShowProgress(options))
+    {
+        config.ProgressLog = [state](const std::string& message)
+        {
+            std::lock_guard<std::mutex> lock(state->Mutex);
+            state->VerboseMessages.push_back(message);
+        };
+    }
+
+    std::thread worker([state, request, config]() mutable
+    {
+        try
+        {
+            state->Success = decomp::AnalyzeWithLlm(request, config, state->Response, state->Error);
+        }
+        catch (const std::exception& ex)
+        {
+            state->Success = false;
+            state->Error = ex.what();
+        }
+        catch (...)
+        {
+            state->Success = false;
+            state->Error = "unknown LLM worker failure";
+        }
+
+        state->Done.store(true);
+    });
+
+    while (!state->Done.load())
+    {
+        DrainAsyncVerboseMessages(state, control, control4);
+
+        if (IsUserInterruptRequested(control))
+        {
+            cancelled = true;
+            state->CancelRequested.store(true);
+            OutputLine(control, control4, "decomp cancellation requested; stopping LLM wait\n");
+            CancelSynchronousIo(worker.native_handle());
+
+            for (uint32_t waitAttempt = 0; waitAttempt < 50 && !state->Done.load(); ++waitAttempt)
+            {
+                DrainAsyncVerboseMessages(state, control, control4);
+                Sleep(100);
+            }
+
+            break;
+        }
+
+        Sleep(100);
+    }
+
+    if (worker.joinable())
+    {
+        if (cancelled && !state->Done.load())
+        {
+            OutputLine(control, control4, "decomp cancellation returned before the LLM worker fully stopped\n");
+            worker.detach();
+        }
+        else
+        {
+            worker.join();
+        }
+    }
+
+    DrainAsyncVerboseMessages(state, control, control4);
+
+    if (cancelled)
+    {
+        error = state->Error.empty() ? "operation cancelled by user" : state->Error;
+        return false;
+    }
+
+    response = std::move(state->Response);
+    error = std::move(state->Error);
+    return state->Success;
+}
+
 void OutputTextRaw(IDebugControl* control, IDebugControl4* control4, const std::string& text)
 {
     if (text.empty())
@@ -410,6 +616,145 @@ std::string EscapeDmlText(const std::string& text)
     }
 
     return escaped;
+}
+
+std::string BuildDmlLink(const std::string& text, const std::string& command)
+{
+    return "<link cmd=\"" + EscapeDmlText(command) + "\">" + EscapeDmlText(text) + "</link>";
+}
+
+std::string QuoteCommandArgument(const std::string& value)
+{
+    if (value.find_first_of(" \t\r\n\"") == std::string::npos)
+    {
+        return value;
+    }
+
+    std::string quoted = "\"";
+
+    for (const char ch : value)
+    {
+        if (ch == '"')
+        {
+            continue;
+        }
+
+        quoted.push_back(ch);
+    }
+
+    quoted.push_back('"');
+    return quoted;
+}
+
+void OutputDmlLine(
+    IDebugControl* control,
+    IDebugControl4* control4,
+    IDebugAdvanced2* advanced2,
+    const std::string& text,
+    const std::string& command)
+{
+    if (AreOutputCallbacksDmlAware(advanced2))
+    {
+        OutputDmlRaw(control, control4, BuildDmlLink(text, command) + "\n");
+        return;
+    }
+
+    OutputLine(control, control4, "%s\n", text.c_str());
+}
+
+const decomp::BasicBlock* FindBlockById(const decomp::AnalysisFacts& facts, const std::string& id)
+{
+    for (const auto& block : facts.Blocks)
+    {
+        if (block.Id == id)
+        {
+            return &block;
+        }
+    }
+
+    return nullptr;
+}
+
+std::string BuildDisassembleCommand(uint64_t start, uint64_t end)
+{
+    if (end > start)
+    {
+        return "u " + decomp::HexU64(start) + " " + decomp::HexU64(end);
+    }
+
+    return "u " + decomp::HexU64(start);
+}
+
+std::string BuildDisassembleAddressCommand(uint64_t address)
+{
+    return BuildDisassembleCommand(address, address + 0x30);
+}
+
+void AppendUniqueString(std::vector<std::string>& values, const std::string& value)
+{
+    const std::string trimmed = decomp::TrimCopy(value);
+
+    if (trimmed.empty())
+    {
+        return;
+    }
+
+    const auto duplicate = std::find_if(
+        values.begin(),
+        values.end(),
+        [&trimmed](const std::string& existing)
+        {
+            return decomp::ToLowerAscii(decomp::TrimCopy(existing)) == decomp::ToLowerAscii(trimmed);
+        });
+
+    if (duplicate == values.end())
+    {
+        values.push_back(trimmed);
+    }
+}
+
+std::vector<std::string> SplitCorrectionPair(const std::string& text, char separator)
+{
+    const size_t index = text.find(separator);
+
+    if (index == std::string::npos)
+    {
+        return {};
+    }
+
+    return { decomp::TrimCopy(text.substr(0, index)), decomp::TrimCopy(text.substr(index + 1)) };
+}
+
+bool IsIdentifierBoundary(char ch)
+{
+    return std::isalnum(static_cast<unsigned char>(ch)) == 0 && ch != '_';
+}
+
+void ReplaceIdentifier(std::string& text, const std::string& from, const std::string& to)
+{
+    if (from.empty() || to.empty() || from == to)
+    {
+        return;
+    }
+
+    size_t index = 0;
+
+    while ((index = text.find(from, index)) != std::string::npos)
+    {
+        const bool leftOk = index == 0 || IsIdentifierBoundary(text[index - 1]);
+        const size_t rightIndex = index + from.size();
+        const bool rightOk = rightIndex >= text.size() || IsIdentifierBoundary(text[rightIndex]);
+
+        if (leftOk && rightOk)
+        {
+            text.replace(index, from.size(), to);
+            index += to.size();
+        }
+        else
+        {
+            index += from.size();
+        }
+    }
 }
 
 struct PseudoCodeTokenStyle
@@ -597,6 +942,8 @@ bool AcquireDebugApi(PDEBUG_CLIENT client, DebugApi& api)
             break;
         }
 
+        client->QueryInterface(__uuidof(IDebugRegisters2), reinterpret_cast<void**>(api.Registers.GetAddressOf()));
+
         success = true;
     }
     while (false);
@@ -615,6 +962,172 @@ bool ParseU32Value(const std::string& text, uint32_t& value)
 
     value = static_cast<uint32_t>(parsed);
     return true;
+}
+
+bool ApplyViewOption(const std::string& rawValue, decomp::DecompOptions& options, std::string& error)
+{
+    const std::string value = decomp::ToLowerAscii(decomp::TrimCopy(rawValue));
+
+    if (value == "default" || value == "normal" || value == "full")
+    {
+        return true;
+    }
+
+    if (value == "brief")
+    {
+        options.BriefOutput = true;
+        return true;
+    }
+
+    if (value == "explain")
+    {
+        options.ExplainOutput = true;
+        return true;
+    }
+
+    if (value == "json")
+    {
+        options.JsonOutput = true;
+        return true;
+    }
+
+    if (value == "facts" || value == "facts-only")
+    {
+        options.FactsOnlyOutput = true;
+        options.DisableLlm = true;
+        return true;
+    }
+
+    if (value == "prompt" || value == "debug-prompt")
+    {
+        options.DebugPromptOutput = true;
+        options.DisableLlm = true;
+        return true;
+    }
+
+    if (value == "data" || value == "data-model" || value == "datamodel" || value == "dx")
+    {
+        options.DataModelOutput = true;
+        return true;
+    }
+
+    if (value == "analyzer" || value == "no-llm")
+    {
+        options.DisableLlm = true;
+        return true;
+    }
+
+    error = "unknown view: " + rawValue;
+    return false;
+}
+
+bool ApplyLastOption(const std::string& rawValue, decomp::DecompOptions& options, std::string& error)
+{
+    const std::string value = decomp::ToLowerAscii(decomp::TrimCopy(rawValue));
+
+    if (value == "explain")
+    {
+        options.LastExplainOutput = true;
+        return true;
+    }
+
+    if (value == "facts" || value == "facts-only")
+    {
+        options.LastFactsOutput = true;
+        return true;
+    }
+
+    if (value == "json")
+    {
+        options.LastJsonOutput = true;
+        return true;
+    }
+
+    if (value == "data" || value == "data-model" || value == "datamodel" || value == "dx")
+    {
+        options.LastDataModelOutput = true;
+        return true;
+    }
+
+    if (value == "prompt" || value == "debug-prompt")
+    {
+        options.LastDebugPromptOutput = true;
+        return true;
+    }
+
+    error = "unknown cached artifact: " + rawValue;
+    return false;
+}
+
+bool ApplyLimitOption(const std::string& rawValue, decomp::DecompOptions& options, std::string& error)
+{
+    const std::string value = decomp::ToLowerAscii(decomp::TrimCopy(rawValue));
+
+    if (value == "deep")
+    {
+        options.MaxInstructions = 8192;
+        return true;
+    }
+
+    if (value == "huge")
+    {
+        options.MaxInstructions = 16384;
+        return true;
+    }
+
+    if (ParseU32Value(rawValue, options.MaxInstructions))
+    {
+        return true;
+    }
+
+    error = "invalid limit value";
+    return false;
+}
+
+bool ApplyFixOption(const std::string& rawValue, decomp::DecompOptions& options, std::string& error)
+{
+    const size_t separator = rawValue.find(':');
+    const std::string kind = decomp::ToLowerAscii(decomp::TrimCopy(separator == std::string::npos ? rawValue : rawValue.substr(0, separator)));
+    const std::string value = separator == std::string::npos ? std::string() : rawValue.substr(separator + 1);
+
+    if (kind == "clear" || kind == "reset")
+    {
+        options.ClearUserOverrides = true;
+        return true;
+    }
+
+    if (value.empty())
+    {
+        error = "missing fix value";
+        return false;
+    }
+
+    if (kind == "noreturn" || kind == "no-return")
+    {
+        options.NoReturnOverrides.push_back(value);
+        return true;
+    }
+
+    if (kind == "type")
+    {
+        options.TypeOverrides.push_back(value);
+        return true;
+    }
+
+    if (kind == "field")
+    {
+        options.FieldOverrides.push_back(value);
+        return true;
+    }
+
+    if (kind == "rename")
+    {
+        options.RenameOverrides.push_back(value);
+        return true;
+    }
+
+    error = "unknown fix kind: " + kind;
+    return false;
 }
 
 std::string ExtractOperationText(const std::string& line)
@@ -716,11 +1229,39 @@ bool IsTrapMnemonic(const std::string& mnemonic)
 
 bool IsNoReturnTarget(const std::string& target)
 {
-    return decomp::ContainsInsensitive(target, "__fastfail")
+    if (decomp::ContainsInsensitive(target, "__fastfail")
         || decomp::ContainsInsensitive(target, "RtlFailFast")
         || decomp::ContainsInsensitive(target, "RaiseFailFastException")
         || decomp::ContainsInsensitive(target, "TerminateProcess")
-        || decomp::ContainsInsensitive(target, "ExitProcess");
+        || decomp::ContainsInsensitive(target, "ExitProcess"))
+    {
+        return true;
+    }
+
+    const char* overrideValue = std::getenv("DECOMP_NORETURN_OVERRIDES");
+    const std::string overrides = overrideValue == nullptr ? std::string() : overrideValue;
+    std::string current;
+
+    for (char ch : overrides)
+    {
+        if (ch == ',' || ch == ';')
+        {
+            const std::string token = decomp::TrimCopy(current);
+
+            if (!token.empty() && decomp::ContainsInsensitive(target, token))
+            {
+                return true;
+            }
+
+            current.clear();
+            continue;
+        }
+
+        current.push_back(ch);
+    }
+
+    const std::string token = decomp::TrimCopy(current);
+    return !token.empty() && decomp::ContainsInsensitive(target, token);
 }
 
 bool ShouldStopFallbackDisassembly(const std::string& line)
@@ -762,7 +1303,8 @@ bool ParseCommandLine(const char* args, decomp::DecompOptions& options, std::str
                 continue;
             }
 
-            const std::string option = decomp::ToLowerAscii(token.substr(1));
+            const std::string rawOption = token.substr(1);
+            const std::string option = decomp::ToLowerAscii(rawOption);
 
             if (option == "live")
             {
@@ -776,6 +1318,52 @@ bool ParseCommandLine(const char* args, decomp::DecompOptions& options, std::str
             {
                 options.JsonOutput = true;
             }
+            else if (option == "explain")
+            {
+                options.ExplainOutput = true;
+            }
+            else if (option == "facts-only")
+            {
+                options.FactsOnlyOutput = true;
+                options.DisableLlm = true;
+            }
+            else if (option == "debug-prompt")
+            {
+                options.DebugPromptOutput = true;
+                options.DisableLlm = true;
+            }
+            else if (option == "data-model" || option == "datamodel" || option == "dx")
+            {
+                options.DataModelOutput = true;
+            }
+            else if (option == "last-json")
+            {
+                options.LastJsonOutput = true;
+            }
+            else if (option == "last-explain")
+            {
+                options.LastExplainOutput = true;
+            }
+            else if (option == "last-facts" || option == "last-facts-only")
+            {
+                options.LastFactsOutput = true;
+            }
+            else if (option == "last-data-model" || option == "last-dx")
+            {
+                options.LastDataModelOutput = true;
+            }
+            else if (option == "last-prompt")
+            {
+                options.LastDebugPromptOutput = true;
+            }
+            else if (option == "clear-overrides")
+            {
+                options.ClearUserOverrides = true;
+            }
+            else if (option == "verbose")
+            {
+                options.VerboseOutput = true;
+            }
             else if (option == "no-llm")
             {
                 options.DisableLlm = true;
@@ -788,9 +1376,39 @@ bool ParseCommandLine(const char* args, decomp::DecompOptions& options, std::str
             {
                 options.MaxInstructions = 16384;
             }
+            else if (decomp::StartsWithInsensitive(option, "view:") || decomp::StartsWithInsensitive(option, "mode:"))
+            {
+                const size_t separator = rawOption.find(':');
+
+                if (separator == std::string::npos || !ApplyViewOption(rawOption.substr(separator + 1), options, error))
+                {
+                    break;
+                }
+            }
+            else if (decomp::StartsWithInsensitive(option, "last:"))
+            {
+                if (!ApplyLastOption(rawOption.substr(5), options, error))
+                {
+                    break;
+                }
+            }
+            else if (decomp::StartsWithInsensitive(option, "limit:"))
+            {
+                if (!ApplyLimitOption(rawOption.substr(6), options, error))
+                {
+                    break;
+                }
+            }
+            else if (decomp::StartsWithInsensitive(option, "fix:"))
+            {
+                if (!ApplyFixOption(rawOption.substr(4), options, error))
+                {
+                    break;
+                }
+            }
             else if (decomp::StartsWithInsensitive(option, "timeout:"))
             {
-                if (!ParseU32Value(option.substr(8), options.TimeoutMs))
+                if (!ParseU32Value(rawOption.substr(8), options.TimeoutMs))
                 {
                     error = "invalid timeout value";
                     break;
@@ -798,11 +1416,27 @@ bool ParseCommandLine(const char* args, decomp::DecompOptions& options, std::str
             }
             else if (decomp::StartsWithInsensitive(option, "maxinsn:"))
             {
-                if (!ParseU32Value(option.substr(8), options.MaxInstructions))
+                if (!ParseU32Value(rawOption.substr(8), options.MaxInstructions))
                 {
                     error = "invalid maxinsn value";
                     break;
                 }
+            }
+            else if (decomp::StartsWithInsensitive(option, "noreturn:"))
+            {
+                options.NoReturnOverrides.push_back(rawOption.substr(9));
+            }
+            else if (decomp::StartsWithInsensitive(option, "type:"))
+            {
+                options.TypeOverrides.push_back(rawOption.substr(5));
+            }
+            else if (decomp::StartsWithInsensitive(option, "field:"))
+            {
+                options.FieldOverrides.push_back(rawOption.substr(6));
+            }
+            else if (decomp::StartsWithInsensitive(option, "rename:"))
+            {
+                options.RenameOverrides.push_back(rawOption.substr(7));
             }
             else
             {
@@ -810,18 +1444,22 @@ bool ParseCommandLine(const char* args, decomp::DecompOptions& options, std::str
                 break;
             }
         }
-
         if (!error.empty())
         {
             break;
         }
 
-        if (target.empty())
+        if (target.empty()
+            && !options.LastExplainOutput
+            && !options.LastFactsOutput
+            && !options.LastJsonOutput
+            && !options.LastDataModelOutput
+            && !options.LastDebugPromptOutput
+            && !options.ClearUserOverrides)
         {
             error = "missing target";
             break;
         }
-
         success = true;
     }
     while (false);
@@ -848,6 +1486,136 @@ decomp::DebugSessionKind GetSessionKind(IDebugControl* control)
     }
 
     return decomp::DebugSessionKind::Unknown;
+}
+
+std::string DebugClassToString(ULONG debugClass)
+{
+    switch (debugClass)
+    {
+    case DEBUG_CLASS_KERNEL:
+        return "kernel";
+    case DEBUG_CLASS_USER_WINDOWS:
+        return "user_windows";
+    default:
+        return "unknown(" + std::to_string(debugClass) + ")";
+    }
+}
+
+std::string DebugQualifierToString(ULONG debugClass, ULONG qualifier)
+{
+    if (debugClass == DEBUG_CLASS_USER_WINDOWS)
+    {
+        switch (qualifier)
+        {
+        case DEBUG_USER_WINDOWS_PROCESS:
+            return "user_process";
+        case DEBUG_USER_WINDOWS_PROCESS_SERVER:
+            return "user_process_server";
+        case DEBUG_USER_WINDOWS_IDNA:
+            return "user_idna";
+        case DEBUG_USER_WINDOWS_SMALL_DUMP:
+            return "user_small_dump";
+        case DEBUG_USER_WINDOWS_DUMP:
+            return "user_dump";
+        default:
+            return "user_unknown(" + std::to_string(qualifier) + ")";
+        }
+    }
+
+    if (debugClass == DEBUG_CLASS_KERNEL)
+    {
+        switch (qualifier)
+        {
+        case DEBUG_KERNEL_CONNECTION:
+            return "kernel_connection";
+        case DEBUG_KERNEL_LOCAL:
+            return "kernel_local";
+        case DEBUG_KERNEL_EXDI_DRIVER:
+            return "kernel_exdi_driver";
+        case DEBUG_KERNEL_IDNA:
+            return "kernel_idna";
+        case DEBUG_KERNEL_SMALL_DUMP:
+            return "kernel_small_dump";
+        case DEBUG_KERNEL_DUMP:
+            return "kernel_dump";
+        case DEBUG_KERNEL_FULL_DUMP:
+            return "kernel_full_dump";
+        default:
+            return "kernel_unknown(" + std::to_string(qualifier) + ")";
+        }
+    }
+
+    return "unknown(" + std::to_string(qualifier) + ")";
+}
+
+bool IsDumpQualifier(ULONG qualifier)
+{
+    return qualifier == DEBUG_USER_WINDOWS_SMALL_DUMP
+        || qualifier == DEBUG_USER_WINDOWS_DUMP
+        || qualifier == DEBUG_KERNEL_SMALL_DUMP
+        || qualifier == DEBUG_KERNEL_DUMP
+        || qualifier == DEBUG_KERNEL_FULL_DUMP;
+}
+
+decomp::SessionPolicyFacts BuildSessionPolicyFacts(IDebugControl* control)
+{
+    decomp::SessionPolicyFacts policy;
+    ULONG debugClass = 0;
+    ULONG qualifier = 0;
+
+    if (control != nullptr && SUCCEEDED(control->GetDebuggeeType(&debugClass, &qualifier)))
+    {
+        policy.DebugClass = DebugClassToString(debugClass);
+        policy.Qualifier = DebugQualifierToString(debugClass, qualifier);
+        policy.IsKernel = debugClass == DEBUG_CLASS_KERNEL;
+        policy.IsDump = IsDumpQualifier(qualifier);
+        policy.IsLive = !policy.IsDump
+            && (qualifier == DEBUG_USER_WINDOWS_PROCESS
+                || qualifier == DEBUG_USER_WINDOWS_PROCESS_SERVER
+                || qualifier == DEBUG_KERNEL_CONNECTION
+                || qualifier == DEBUG_KERNEL_LOCAL
+                || qualifier == DEBUG_KERNEL_EXDI_DRIVER);
+    }
+    else
+    {
+        policy.DebugClass = "unknown";
+        policy.Qualifier = "unknown";
+        policy.Notes.push_back("DbgEng did not report debuggee type");
+    }
+
+    policy.TtdAvailable = GetModuleHandleA("ttdext.dll") != nullptr || GetModuleHandleA("TTDReplay.dll") != nullptr;
+    policy.IsTraceLike = policy.TtdAvailable;
+
+    if (policy.TtdAvailable)
+    {
+        policy.ExecutionKind = "ttd_trace";
+        policy.AnalysisStrategy = "merge static facts with optional TTD observation queries";
+        policy.Notes.push_back("TTD extension/runtime appears loaded; observed_behavior.ttd_queries are safe query suggestions");
+    }
+    else if (policy.IsDump)
+    {
+        policy.ExecutionKind = policy.IsKernel ? "kernel_dump" : "user_dump";
+        policy.AnalysisStrategy = "prefer static facts and current-frame register samples; avoid assuming live execution";
+        policy.Notes.push_back("dump session; dynamic call history is unavailable unless TTD data is loaded");
+    }
+    else if (policy.IsLive)
+    {
+        policy.ExecutionKind = policy.IsKernel ? "kernel_live" : "user_live";
+        policy.AnalysisStrategy = "prefer fast static analysis plus current-frame observations";
+    }
+    else
+    {
+        policy.ExecutionKind = policy.IsKernel ? "kernel_unknown" : "unknown";
+        policy.AnalysisStrategy = "use conservative static analysis";
+        policy.Notes.push_back("session qualifier is not recognized by the extension");
+    }
+
+    if (policy.IsKernel)
+    {
+        policy.Notes.push_back("kernel session; user-mode pointer interpretation may be unsafe");
+    }
+
+    return policy;
 }
 
 bool ResolveTargetAddress(IDebugSymbols3* symbols, const std::string& target, uint64_t& address)
@@ -1609,6 +2377,267 @@ std::string SimplifySymbolDisplay(std::string name)
     return prefix + symbol;
 }
 
+bool IsAddressInRegions(uint64_t address, const std::vector<decomp::FunctionRegion>& regions)
+{
+    for (const auto& region : regions)
+    {
+        if (address >= region.Start && address < region.End)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool TryReadRegisterU64(IDebugRegisters2* registers, const char* name, uint64_t& value)
+{
+    if (registers == nullptr || name == nullptr)
+    {
+        return false;
+    }
+
+    ULONG index = 0;
+
+    if (FAILED(registers->GetIndexByName(name, &index)))
+    {
+        return false;
+    }
+
+    DEBUG_VALUE debugValue = {};
+
+    if (FAILED(registers->GetValue(index, &debugValue)))
+    {
+        return false;
+    }
+
+    switch (debugValue.Type)
+    {
+    case DEBUG_VALUE_INT8:
+        value = debugValue.I8;
+        return true;
+    case DEBUG_VALUE_INT16:
+        value = debugValue.I16;
+        return true;
+    case DEBUG_VALUE_INT32:
+        value = debugValue.I32;
+        return true;
+    case DEBUG_VALUE_INT64:
+        value = debugValue.I64;
+        return true;
+    default:
+        return false;
+    }
+}
+
+std::string FormatSymbolWithDisplacement(const SymbolLookupResult& symbol)
+{
+    if (symbol.Name.empty())
+    {
+        return std::string();
+    }
+
+    std::string text = SimplifySymbolDisplay(symbol.Name);
+
+    if (symbol.Displacement != 0)
+    {
+        text += "+";
+        text += decomp::HexU64(symbol.Displacement);
+    }
+
+    return text;
+}
+
+void AddObservedMemoryHotspots(const decomp::AnalysisFacts& facts, decomp::ObservedBehaviorFacts& observed)
+{
+    struct HotspotAccumulator
+    {
+        uint32_t Reads = 0;
+        uint32_t Writes = 0;
+        std::vector<uint64_t> Sites;
+    };
+
+    std::unordered_map<std::string, HotspotAccumulator> byExpression;
+
+    for (const auto& access : facts.MemoryAccesses)
+    {
+        if (access.Access.empty())
+        {
+            continue;
+        }
+
+        HotspotAccumulator& accumulator = byExpression[access.Access];
+
+        if (access.Kind == "write")
+        {
+            ++accumulator.Writes;
+        }
+        else
+        {
+            ++accumulator.Reads;
+        }
+
+        if (accumulator.Sites.size() < 8)
+        {
+            accumulator.Sites.push_back(access.Site);
+        }
+    }
+
+    for (const auto& item : byExpression)
+    {
+        if (item.second.Reads + item.second.Writes < 2)
+        {
+            continue;
+        }
+
+        decomp::ObservedMemoryHotspot hotspot;
+        hotspot.Expression = item.first;
+        hotspot.Kind =
+            item.second.Reads != 0 && item.second.Writes != 0 ? "read_write"
+            : item.second.Writes != 0 ? "write"
+            : "read";
+        hotspot.ReadCount = item.second.Reads;
+        hotspot.WriteCount = item.second.Writes;
+        hotspot.Sites = item.second.Sites;
+        hotspot.Confidence = 0.58;
+        observed.MemoryHotspots.push_back(std::move(hotspot));
+    }
+}
+
+void AddTtdQuerySuggestions(const std::string& target, uint64_t entryAddress, decomp::ObservedBehaviorFacts& observed)
+{
+    auto escapeDebuggerString = [](const std::string& value)
+    {
+        std::string escaped;
+        escaped.reserve(value.size() + 8);
+
+        for (const char ch : value)
+        {
+            if (ch == '\\' || ch == '"')
+            {
+                escaped.push_back('\\');
+            }
+
+            escaped.push_back(ch);
+        }
+
+        return escaped;
+    };
+
+    const std::string escapedTarget = escapeDebuggerString(target.empty() ? decomp::HexU64(entryAddress) : target);
+    observed.TtdQueries.push_back("dx @$cursession.TTD.Calls(\"" + escapedTarget + "\")");
+    observed.TtdQueries.push_back("dx @$cursession.TTD.Calls(\"" + escapedTarget + "\").Take(20)");
+    observed.TtdQueries.push_back("dx @$cursession.TTD.Calls(\"" + escapedTarget + "\").Select(c => new { c.TimeStart, c.TimeEnd, c.ReturnValue })");
+
+    if (entryAddress != 0)
+    {
+        observed.TtdQueries.push_back("bp " + decomp::HexU64(entryAddress));
+    }
+}
+
+void CollectObservedBehaviorFacts(
+    IDebugRegisters2* registers,
+    IDebugDataSpaces4* dataSpaces,
+    IDebugSymbols3* symbols,
+    const std::vector<decomp::FunctionRegion>& regions,
+    decomp::AnalysisFacts& facts)
+{
+    decomp::ObservedBehaviorFacts observed;
+    uint64_t rip = 0;
+    uint64_t rsp = 0;
+
+    if (TryReadRegisterU64(registers, "rip", rip))
+    {
+        observed.InstructionPointer = rip;
+        observed.CurrentInstructionInFunction = IsAddressInRegions(rip, regions);
+    }
+    else
+    {
+        observed.Notes.push_back("current instruction pointer is unavailable");
+    }
+
+    if (TryReadRegisterU64(registers, "rsp", rsp))
+    {
+        observed.StackPointer = rsp;
+
+        uint64_t returnAddress = 0;
+
+        if (TryReadPointerValue(dataSpaces, rsp, returnAddress))
+        {
+            observed.ReturnAddress = returnAddress;
+        }
+    }
+
+    const std::array<const char*, 4> argumentRegisters = { "rcx", "rdx", "r8", "r9" };
+
+    for (size_t index = 0; index < argumentRegisters.size(); ++index)
+    {
+        uint64_t value = 0;
+
+        if (!TryReadRegisterU64(registers, argumentRegisters[index], value))
+        {
+            continue;
+        }
+
+        decomp::ObservedArgumentValue argument;
+        argument.Name = index < facts.RecoveredArguments.size() ? facts.RecoveredArguments[index].Name : ("arg" + std::to_string(index + 1));
+        argument.Register = argumentRegisters[index];
+        argument.Value = value;
+        argument.Source = observed.CurrentInstructionInFunction ? "current_frame" : "current_context";
+        argument.Confidence = observed.CurrentInstructionInFunction ? 0.74 : 0.48;
+
+        SymbolLookupResult symbol;
+
+        if (value != 0 && TryLookupSymbolByOffset(symbols, value, symbol) && symbol.Displacement <= 0x1000)
+        {
+            argument.Symbol = FormatSymbolWithDisplacement(symbol);
+            argument.Confidence = std::min(0.92, argument.Confidence + 0.10);
+        }
+
+        observed.ArgumentSamples.push_back(std::move(argument));
+    }
+
+    AddObservedMemoryHotspots(facts, observed);
+
+    if (facts.SessionPolicy.TtdAvailable)
+    {
+        AddTtdQuerySuggestions(facts.QueryText, facts.EntryAddress, observed);
+    }
+
+    if (observed.CurrentInstructionInFunction)
+    {
+        observed.Notes.push_back("current frame instruction pointer is inside the analyzed function");
+    }
+    else if (observed.InstructionPointer != 0)
+    {
+        observed.Notes.push_back("current frame is outside the analyzed function; argument samples are contextual hints only");
+    }
+
+    observed.Confidence =
+        (observed.CurrentInstructionInFunction ? 0.35 : 0.15)
+        + (!observed.ArgumentSamples.empty() ? 0.25 : 0.0)
+        + (!observed.MemoryHotspots.empty() ? 0.15 : 0.0)
+        + (facts.SessionPolicy.TtdAvailable ? 0.10 : 0.0);
+    observed.Confidence = decomp::Clamp01(observed.Confidence);
+
+    facts.ObservedBehavior = std::move(observed);
+
+    if (!facts.ObservedBehavior.ArgumentSamples.empty())
+    {
+        facts.Facts.push_back("observed argument samples: " + std::to_string(facts.ObservedBehavior.ArgumentSamples.size()));
+    }
+
+    if (!facts.ObservedBehavior.MemoryHotspots.empty())
+    {
+        facts.Facts.push_back("observed/static memory hotspots: " + std::to_string(facts.ObservedBehavior.MemoryHotspots.size()));
+    }
+
+    if (facts.SessionPolicy.TtdAvailable)
+    {
+        facts.Facts.push_back("TTD query suggestions available: " + std::to_string(facts.ObservedBehavior.TtdQueries.size()));
+    }
+}
+
 std::string ExtractReturnTypeFromPrototype(const std::string& prototype, const std::string& displayName)
 {
     const std::string trimmed = decomp::TrimCopy(prototype);
@@ -1710,6 +2739,42 @@ std::string InferSideEffectsFromName(const std::string& displayName)
     }
 
     return "unknown side effects";
+}
+
+std::string InferMemoryEffectsFromName(const std::string& displayName)
+{
+    const std::string lowerName = decomp::ToLowerAscii(displayName);
+
+    if (lowerName.find("memcpy") != std::string::npos
+        || lowerName.find("memmove") != std::string::npos
+        || lowerName.find("strcpy") != std::string::npos
+        || lowerName.find("copy") != std::string::npos)
+    {
+        return "writes destination buffer and reads source buffer";
+    }
+
+    if (lowerName.find("memset") != std::string::npos
+        || lowerName.find("zeromemory") != std::string::npos
+        || lowerName.find("fillmemory") != std::string::npos)
+    {
+        return "writes destination buffer";
+    }
+
+    if (lowerName.find("read") != std::string::npos
+        || lowerName.find("query") != std::string::npos
+        || lowerName.find("get") != std::string::npos)
+    {
+        return "may read memory or external state";
+    }
+
+    if (lowerName.find("write") != std::string::npos
+        || lowerName.find("set") != std::string::npos
+        || lowerName.find("update") != std::string::npos)
+    {
+        return "may write memory or external state";
+    }
+
+    return "unknown";
 }
 
 bool ContainsAddressInRegions(const std::vector<decomp::FunctionRegion>& regions, const uint64_t address)
@@ -2696,6 +3761,62 @@ void CollectPdbFacts(
     CollectPdbFieldHints(symbols, facts, typedBaseCandidates, fieldByRegisterAndOffset, facts.Pdb);
     CollectPdbEnumHints(symbols, facts, typedBaseCandidates, fieldByRegisterAndOffset, facts.Pdb);
 
+    for (const decomp::PdbScopedSymbol& param : facts.Pdb.Params)
+    {
+        decomp::TypeRecoveryHint hint;
+        hint.Site = param.Site;
+        hint.Expression = param.Name;
+        hint.Type = param.Type;
+        hint.Source = "pdb_param";
+        hint.Kind = "declared_parameter";
+        hint.Evidence = param.Location;
+        hint.PointerLike = param.Type.find('*') != std::string::npos;
+        hint.Confidence = param.Confidence;
+        facts.TypeHints.push_back(std::move(hint));
+    }
+
+    for (const decomp::PdbScopedSymbol& local : facts.Pdb.Locals)
+    {
+        decomp::TypeRecoveryHint hint;
+        hint.Site = local.Site;
+        hint.Expression = local.Name;
+        hint.Type = local.Type;
+        hint.Source = "pdb_local";
+        hint.Kind = "declared_local";
+        hint.Evidence = local.Location;
+        hint.PointerLike = local.Type.find('*') != std::string::npos;
+        hint.Confidence = local.Confidence;
+        facts.TypeHints.push_back(std::move(hint));
+    }
+
+    for (const decomp::PdbFieldHint& field : facts.Pdb.FieldHints)
+    {
+        decomp::TypeRecoveryHint hint;
+        hint.Site = field.Site;
+        hint.Expression = field.BaseName + "->" + field.FieldName;
+        hint.Type = field.FieldType;
+        hint.Source = "pdb_field";
+        hint.Kind = "field_offset";
+        hint.Evidence = field.BaseType + decomp::HexS64(field.Offset);
+        hint.PointerLike = field.FieldType.find('*') != std::string::npos;
+        hint.Confidence = field.Confidence;
+        facts.TypeHints.push_back(std::move(hint));
+    }
+
+    for (const decomp::PdbEnumHint& enumHint : facts.Pdb.EnumHints)
+    {
+        decomp::TypeRecoveryHint hint;
+        hint.Site = enumHint.Site;
+        hint.Expression = enumHint.Expression;
+        hint.Type = enumHint.TypeName;
+        hint.Source = "pdb_enum";
+        hint.Kind = "enum_constant";
+        hint.Evidence = enumHint.ConstantName + "=" + decomp::HexU64(enumHint.Value);
+        hint.EnumLike = true;
+        hint.Confidence = enumHint.Confidence;
+        facts.TypeHints.push_back(std::move(hint));
+    }
+
     if (!facts.Pdb.SymbolFile.empty() || !facts.Pdb.FunctionName.empty())
     {
         facts.Pdb.Availability = "symbols";
@@ -2737,6 +3858,11 @@ void CollectPdbFacts(
     if (!facts.Pdb.EnumHints.empty())
     {
         facts.Facts.push_back("pdb enum hints: " + std::to_string(facts.Pdb.EnumHints.size()));
+    }
+
+    if (!facts.TypeHints.empty())
+    {
+        facts.Facts.push_back("combined type hints: " + std::to_string(facts.TypeHints.size()));
     }
 }
 
@@ -2892,6 +4018,104 @@ void EnrichAnalysisFactsWithDebugMetadata(
     {
         facts.Facts.push_back("call target summaries: " + std::to_string(facts.CallTargets.size()));
     }
+
+    for (const decomp::CallTargetInfo& target : facts.CallTargets)
+    {
+        auto existing = std::find_if(
+            facts.CalleeSummaries.begin(),
+            facts.CalleeSummaries.end(),
+            [&target](const decomp::CalleeSummary& summary)
+            {
+                return summary.Site == target.Site;
+            });
+
+        decomp::CalleeSummary summary;
+        summary.Site = target.Site;
+        summary.Callee = target.DisplayName;
+        summary.ReturnType = !target.ReturnType.empty() ? target.ReturnType : "UNKNOWN_TYPE";
+        summary.ParameterModel = !target.Prototype.empty() ? target.Prototype : "UNKNOWN_TYPE " + target.DisplayName + "(...)";
+        summary.SideEffects = target.SideEffects.empty() ? "unknown" : target.SideEffects;
+        summary.MemoryEffects = InferMemoryEffectsFromName(target.DisplayName);
+        if (summary.MemoryEffects == "unknown")
+        {
+            summary.MemoryEffects = target.SideEffects;
+        }
+        summary.Ownership =
+            (decomp::ContainsInsensitive(target.DisplayName, "Alloc") || decomp::ContainsInsensitive(target.DisplayName, "malloc") || decomp::ContainsInsensitive(target.DisplayName, "operator new")) ? "may_return_owned_resource"
+            : (decomp::ContainsInsensitive(target.DisplayName, "Free") || decomp::ContainsInsensitive(target.DisplayName, "delete") || decomp::ContainsInsensitive(target.DisplayName, "Close")) ? "may_release_resource"
+            : "unknown";
+        summary.Source = target.Prototype.empty() ? "symbol" : "symbol_type";
+        summary.Confidence = decomp::Clamp01(target.Confidence + (!target.Prototype.empty() ? 0.08 : 0.0));
+
+        if (existing != facts.CalleeSummaries.end())
+        {
+            *existing = std::move(summary);
+        }
+        else
+        {
+            facts.CalleeSummaries.push_back(std::move(summary));
+        }
+    }
+
+    for (const decomp::CallTargetInfo& target : facts.CallTargets)
+    {
+        std::string name;
+        std::string summary;
+        std::string replacement;
+
+        if (decomp::ContainsInsensitive(target.DisplayName, "memcpy") || decomp::ContainsInsensitive(target.DisplayName, "memmove"))
+        {
+            name = "memory_copy";
+            summary = "symbol-resolved memory copy helper";
+            replacement = "copy_bytes(dst, src, size)";
+        }
+        else if (decomp::ContainsInsensitive(target.DisplayName, "memset") || decomp::ContainsInsensitive(target.DisplayName, "RtlZeroMemory"))
+        {
+            name = "memory_fill";
+            summary = "symbol-resolved memory fill helper";
+            replacement = "fill_bytes(dst, value, size)";
+        }
+        else if (decomp::ContainsInsensitive(target.DisplayName, "__security_check_cookie"))
+        {
+            name = "security_cookie";
+            summary = "symbol-resolved compiler security cookie check";
+            replacement = "verify_stack_cookie()";
+        }
+        else if (decomp::ContainsInsensitive(target.DisplayName, "__chkstk") || decomp::ContainsInsensitive(target.DisplayName, "_alloca_probe"))
+        {
+            name = "stack_probe";
+            summary = "symbol-resolved compiler stack probe";
+            replacement = "probe_stack_allocation(size)";
+        }
+
+        if (name.empty())
+        {
+            continue;
+        }
+
+        const auto duplicate = std::find_if(
+            facts.Idioms.begin(),
+            facts.Idioms.end(),
+            [&target, &name](const decomp::IdiomPattern& idiom)
+            {
+                return idiom.Site == target.Site && idiom.Name == name;
+            });
+
+        if (duplicate != facts.Idioms.end())
+        {
+            continue;
+        }
+
+        decomp::IdiomPattern idiom;
+        idiom.Site = target.Site;
+        idiom.Kind = "library_call";
+        idiom.Name = name;
+        idiom.Summary = summary;
+        idiom.Replacement = replacement;
+        idiom.Evidence = target.DisplayName;
+        idiom.Confidence = target.Confidence > 0.0 ? decomp::Clamp01(target.Confidence + 0.08) : 0.78;
+        facts.Idioms.push_back(std::move(idiom));
+    }
 }
 
 
@@ -3025,11 +4249,695 @@ std::string FormatSummaryForDisplay(const std::string& summary)
     return formatted;
 }
 
+std::vector<std::string> g_userNoReturnOverrides;
+std::vector<std::string> g_userTypeOverrides;
+std::vector<std::string> g_userFieldOverrides;
+std::vector<std::string> g_userRenameOverrides;
+bool g_baseNoReturnOverrideCaptured = false;
+std::string g_baseNoReturnOverrideEnvironment;
+std::string g_lastRequestJson;
+std::string g_lastResponseJson;
+std::string g_lastDataModelJson;
+std::string g_lastDebugPromptDump;
+
+void ApplyNoReturnOverrideEnvironment(const decomp::DecompOptions& options)
+{
+    if (!g_baseNoReturnOverrideCaptured)
+    {
+        const char* existingValue = std::getenv("DECOMP_NORETURN_OVERRIDES");
+        g_baseNoReturnOverrideEnvironment = existingValue == nullptr ? std::string() : std::string(existingValue);
+        g_baseNoReturnOverrideCaptured = true;
+    }
+
+    if (options.ClearUserOverrides)
+    {
+        g_userNoReturnOverrides.clear();
+        g_userTypeOverrides.clear();
+        g_userFieldOverrides.clear();
+        g_userRenameOverrides.clear();
+    }
+
+    for (const auto& overrideValue : options.NoReturnOverrides)
+    {
+        AppendUniqueString(g_userNoReturnOverrides, overrideValue);
+    }
+
+    std::vector<std::string> merged;
+
+    if (!g_baseNoReturnOverrideEnvironment.empty())
+    {
+        std::string current;
+
+        for (const char ch : g_baseNoReturnOverrideEnvironment)
+        {
+            if (ch == ',' || ch == ';')
+            {
+                AppendUniqueString(merged, current);
+                current.clear();
+                continue;
+            }
+
+            current.push_back(ch);
+        }
+
+        AppendUniqueString(merged, current);
+    }
+
+    for (const auto& overrideValue : g_userNoReturnOverrides)
+    {
+        AppendUniqueString(merged, overrideValue);
+    }
+
+    SetEnvironmentVariableA("DECOMP_NORETURN_OVERRIDES", decomp::JoinStrings(merged, ";").c_str());
+}
+
+void AddPersistentUserCorrections(const decomp::DecompOptions& options)
+{
+    for (const auto& value : options.TypeOverrides)
+    {
+        const std::vector<std::string> parts = SplitCorrectionPair(value, '=');
+
+        if (parts.size() == 2 && !parts[0].empty() && !parts[1].empty())
+        {
+            AppendUniqueString(g_userTypeOverrides, value);
+        }
+    }
+
+    for (const auto& value : options.FieldOverrides)
+    {
+        const std::vector<std::string> parts = SplitCorrectionPair(value, '=');
+
+        if (parts.size() == 2 && !parts[0].empty() && !parts[1].empty())
+        {
+            AppendUniqueString(g_userFieldOverrides, value);
+        }
+    }
+
+    for (const auto& value : options.RenameOverrides)
+    {
+        const std::vector<std::string> parts = SplitCorrectionPair(value, '=');
+
+        if (parts.size() == 2 && !parts[0].empty() && !parts[1].empty())
+        {
+            AppendUniqueString(g_userRenameOverrides, value);
+        }
+    }
+}
+
+void ReportMalformedUserCorrections(const decomp::DecompOptions& options, decomp::AnalysisFacts& facts)
+{
+    for (const auto& value : options.TypeOverrides)
+    {
+        const std::vector<std::string> parts = SplitCorrectionPair(value, '=');
+
+        if (parts.size() != 2 || parts[0].empty() || parts[1].empty())
+        {
+            facts.UncertainPoints.push_back("ignored malformed /type override: " + value);
+        }
+    }
+
+    for (const auto& value : options.FieldOverrides)
+    {
+        const std::vector<std::string> parts = SplitCorrectionPair(value, '=');
+
+        if (parts.size() != 2 || parts[0].empty() || parts[1].empty())
+        {
+            facts.UncertainPoints.push_back("ignored malformed /field override: " + value);
+        }
+    }
+
+    for (const auto& value : options.RenameOverrides)
+    {
+        const std::vector<std::string> parts = SplitCorrectionPair(value, '=');
+
+        if (parts.size() != 2 || parts[0].empty() || parts[1].empty())
+        {
+            facts.UncertainPoints.push_back("ignored malformed /rename override: " + value);
+        }
+    }
+}
+
+void ApplyUserCorrections(const decomp::DecompOptions& options, decomp::AnalysisFacts& facts)
+{
+    ReportMalformedUserCorrections(options, facts);
+    AddPersistentUserCorrections(options);
+
+    for (const auto& typeOverride : g_userTypeOverrides)
+    {
+        const std::vector<std::string> parts = SplitCorrectionPair(typeOverride, '=');
+
+        if (parts.size() != 2 || parts[0].empty() || parts[1].empty())
+        {
+            facts.UncertainPoints.push_back("ignored malformed /type override: " + typeOverride);
+            continue;
+        }
+
+        decomp::TypeRecoveryHint hint;
+        hint.Expression = parts[0];
+        hint.Type = parts[1];
+        hint.Source = "user_override";
+        hint.Kind = "type_override";
+        hint.Evidence = "/type:" + typeOverride;
+        hint.PointerLike = decomp::ContainsInsensitive(parts[1], "*");
+        hint.ArrayLike = decomp::ContainsInsensitive(parts[1], "[");
+        hint.Confidence = 0.95;
+        facts.TypeHints.push_back(std::move(hint));
+        facts.Facts.push_back("user type override: " + parts[0] + " => " + parts[1]);
+    }
+
+    for (const auto& fieldOverride : g_userFieldOverrides)
+    {
+        const std::vector<std::string> parts = SplitCorrectionPair(fieldOverride, '=');
+
+        if (parts.size() != 2 || parts[0].empty() || parts[1].empty())
+        {
+            facts.UncertainPoints.push_back("ignored malformed /field override: " + fieldOverride);
+            continue;
+        }
+
+        decomp::TypeRecoveryHint hint;
+        hint.Expression = parts[0];
+        hint.Type = parts[1];
+        hint.Source = "user_override";
+        hint.Kind = "field_override";
+        hint.Evidence = "/field:" + fieldOverride;
+        hint.PointerLike = decomp::ContainsInsensitive(parts[1], "*");
+        hint.Confidence = 0.95;
+        facts.TypeHints.push_back(std::move(hint));
+        facts.Facts.push_back("user field override: " + parts[0] + " => " + parts[1]);
+    }
+
+    for (const auto& renameOverride : g_userRenameOverrides)
+    {
+        const std::vector<std::string> parts = SplitCorrectionPair(renameOverride, '=');
+
+        if (parts.size() != 2 || parts[0].empty() || parts[1].empty())
+        {
+            facts.UncertainPoints.push_back("ignored malformed /rename override: " + renameOverride);
+            continue;
+        }
+
+        decomp::TypeRecoveryHint hint;
+        hint.Expression = parts[0];
+        hint.Type = parts[1];
+        hint.Source = "user_override";
+        hint.Kind = "rename_override";
+        hint.Evidence = "/rename:" + renameOverride;
+        hint.Confidence = 0.95;
+        facts.TypeHints.push_back(std::move(hint));
+        facts.Facts.push_back("user rename override: " + parts[0] + " => " + parts[1]);
+    }
+}
+
+void ApplyResponseRenames(const decomp::DecompOptions& options, decomp::AnalyzeResponse& response)
+{
+    AddPersistentUserCorrections(options);
+
+    for (const auto& renameOverride : g_userRenameOverrides)
+    {
+        const std::vector<std::string> parts = SplitCorrectionPair(renameOverride, '=');
+
+        if (parts.size() != 2 || parts[0].empty() || parts[1].empty())
+        {
+            continue;
+        }
+
+        ReplaceIdentifier(response.PseudoC, parts[0], parts[1]);
+
+        for (auto& param : response.Params)
+        {
+            if (param.Name == parts[0])
+            {
+                param.Name = parts[1];
+            }
+        }
+
+        for (auto& local : response.Locals)
+        {
+            if (local.Name == parts[0])
+            {
+                local.Name = parts[1];
+            }
+        }
+    }
+}
+
+std::string BuildDataModelSnapshotJson(
+    const decomp::AnalyzeRequest& request,
+    const decomp::AnalyzeResponse& response)
+{
+    std::string json;
+    json += "{\n";
+    json += "  \"schema\": \"windbg-decompile-ext.data_model.v1\",\n";
+    json += "  \"target\": \"" + decomp::EscapeJsonString(request.Facts.QueryText) + "\",\n";
+    json += "  \"entry\": \"" + decomp::HexU64(request.Facts.EntryAddress) + "\",\n";
+    json += "  \"module\": \"" + decomp::EscapeJsonString(request.Facts.Module.ModuleName) + "\",\n";
+    json += "  \"blocks\": " + std::to_string(request.Facts.Blocks.size()) + ",\n";
+    json += "  \"instructions\": " + std::to_string(request.Facts.Instructions.size()) + ",\n";
+    json += "  \"type_hints\": " + std::to_string(request.Facts.TypeHints.size()) + ",\n";
+    json += "  \"idioms\": " + std::to_string(request.Facts.Idioms.size()) + ",\n";
+    json += "  \"callee_summaries\": " + std::to_string(request.Facts.CalleeSummaries.size()) + ",\n";
+    json += "  \"observed_arguments\": " + std::to_string(request.Facts.ObservedBehavior.ArgumentSamples.size()) + ",\n";
+    json += "  \"memory_hotspots\": " + std::to_string(request.Facts.ObservedBehavior.MemoryHotspots.size()) + ",\n";
+    json += "  \"ttd_queries\": " + std::to_string(request.Facts.ObservedBehavior.TtdQueries.size()) + ",\n";
+    json += "  \"uncertainties\": " + std::to_string(response.Uncertainties.size()) + ",\n";
+    json += "  \"request_json\": ";
+    json += decomp::SerializeAnalyzeRequest(request, true);
+    json += ",\n  \"response_json\": ";
+    json += decomp::SerializeAnalyzeResponse(response, true);
+    json += "\n}\n";
+    return json;
+}
+
 void PrintUsage(IDebugControl* control, IDebugControl4* control4)
 {
-    OutputLine(control, control4, "usage: !decomp [/live] [/brief] [/json] [/no-llm] [/deep] [/huge] [/timeout:N] [/maxinsn:N] <addr|module!symbol>\n");
+    OutputLine(control, control4, "usage: !decomp [/verbose] [/view:brief|explain|json|facts|prompt|data|analyzer] [/last:explain|facts|json|data|prompt] [/limit:deep|huge|N] [/timeout:N] <addr|module!symbol>\n");
+    OutputLine(control, control4, "fix  : /fix:noreturn:name /fix:type:expr=TYPE /fix:field:expr=TYPE /fix:rename:old=new /fix:clear\n");
+    OutputLine(control, control4, "compat: legacy switches such as /brief, /json, /facts-only, /debug-prompt, /data-model, /last-json, /deep, and /noreturn: still work\n");
     OutputLine(control, control4, "cfg  : decomp.llm.json beside decomp.dll\n");
     OutputLine(control, control4, "env  : DECOMP_LLM_*, OPENAI_API_KEY may override config values\n");
+}
+
+void PrintFactsOnly(
+    const decomp::AnalyzeRequest& request,
+    IDebugControl* control,
+    IDebugControl4* control4,
+    IDebugAdvanced2* advanced2)
+{
+    OutputLine(control, control4, "%s\n", decomp::SerializeAnalyzeRequest(request, true).c_str());
+
+    if (!request.Facts.Blocks.empty())
+    {
+        OutputLine(control, control4, "\nlinks:\n");
+
+        for (const auto& block : request.Facts.Blocks)
+        {
+            OutputDmlLine(
+                control,
+                control4,
+                advanced2,
+                "- " + block.Id + " " + decomp::HexU64(block.StartAddress) + "-" + decomp::HexU64(block.EndAddress),
+                BuildDisassembleCommand(block.StartAddress, block.EndAddress));
+        }
+    }
+}
+
+void PrintDataModelOutput(
+    const decomp::AnalyzeRequest& request,
+    const decomp::AnalyzeResponse& response,
+    IDebugControl* control,
+    IDebugControl4* control4,
+    IDebugAdvanced2* advanced2)
+{
+    OutputLine(control, control4, "%s", BuildDataModelSnapshotJson(request, response).c_str());
+
+    if (request.Facts.EntryAddress != 0)
+    {
+        OutputLine(control, control4, "\nautomation links:\n");
+        OutputDmlLine(control, control4, advanced2, "- disassemble entry", BuildDisassembleCommand(request.Facts.EntryAddress, request.Facts.EntryAddress + 0x40));
+        OutputDmlLine(control, control4, advanced2, "- break on entry", "bp " + decomp::HexU64(request.Facts.EntryAddress));
+    }
+}
+
+std::string BuildBlockNavigationCommand(const decomp::AnalysisFacts& facts, const std::string& blockId)
+{
+    const decomp::BasicBlock* block = FindBlockById(facts, blockId);
+
+    if (block == nullptr)
+    {
+        return std::string();
+    }
+
+    return BuildDisassembleCommand(block->StartAddress, block->EndAddress);
+}
+
+void OutputBlockLinkList(
+    IDebugControl* control,
+    IDebugControl4* control4,
+    IDebugAdvanced2* advanced2,
+    const decomp::AnalysisFacts& facts,
+    const std::string& label,
+    const std::vector<std::string>& blockIds)
+{
+    if (blockIds.empty())
+    {
+        return;
+    }
+
+    OutputLine(control, control4, "  %s:\n", label.c_str());
+
+    for (const auto& blockId : blockIds)
+    {
+        const decomp::BasicBlock* block = FindBlockById(facts, blockId);
+
+        if (block == nullptr)
+        {
+            OutputLine(control, control4, "    - %s\n", blockId.c_str());
+            continue;
+        }
+
+        OutputDmlLine(
+            control,
+            control4,
+            advanced2,
+            "    - " + blockId + " " + decomp::HexU64(block->StartAddress) + "-" + decomp::HexU64(block->EndAddress),
+            BuildDisassembleCommand(block->StartAddress, block->EndAddress));
+    }
+}
+
+std::string BuildIssueNavigationCommand(const decomp::AnalyzeRequest& request, const std::string& issue)
+{
+    const decomp::AnalysisFacts& facts = request.Facts;
+    const std::string lower = decomp::ToLowerAscii(issue);
+
+    if (decomp::ContainsInsensitive(lower, "loop"))
+    {
+        for (const auto& region : facts.ControlFlow)
+        {
+            if (region.Kind == "natural_loop")
+            {
+                const std::string command = BuildBlockNavigationCommand(facts, region.HeaderBlock);
+
+                if (!command.empty())
+                {
+                    return command;
+                }
+            }
+        }
+    }
+
+    if (decomp::ContainsInsensitive(lower, "switch") && !facts.Switches.empty())
+    {
+        return BuildDisassembleAddressCommand(facts.Switches.front().Site);
+    }
+
+    if (decomp::ContainsInsensitive(lower, "branch") || decomp::ContainsInsensitive(lower, "control-flow"))
+    {
+        for (const auto& instruction : facts.Instructions)
+        {
+            if (instruction.IsConditionalBranch)
+            {
+                return BuildDisassembleAddressCommand(instruction.Address);
+            }
+        }
+
+        for (const auto& region : facts.ControlFlow)
+        {
+            const std::string command = BuildBlockNavigationCommand(facts, region.HeaderBlock);
+
+            if (!command.empty())
+            {
+                return command;
+            }
+        }
+    }
+
+    if (decomp::ContainsInsensitive(lower, "no-return") || decomp::ContainsInsensitive(lower, "non-returning"))
+    {
+        for (const auto& call : facts.Calls)
+        {
+            if (!call.Returns)
+            {
+                return BuildDisassembleAddressCommand(call.Site);
+            }
+        }
+
+        for (const auto& call : facts.CallTargets)
+        {
+            if (decomp::ContainsInsensitive(call.SideEffects, "no-return") || decomp::ContainsInsensitive(call.ReturnType, "noreturn"))
+            {
+                return BuildDisassembleAddressCommand(call.Site);
+            }
+        }
+    }
+
+    if (decomp::ContainsInsensitive(lower, "return"))
+    {
+        for (const auto& instruction : facts.Instructions)
+        {
+            if (instruction.IsReturn)
+            {
+                return BuildDisassembleAddressCommand(instruction.Address);
+            }
+        }
+    }
+
+    if (decomp::ContainsInsensitive(lower, "parameter") || decomp::ContainsInsensitive(lower, "identifier"))
+    {
+        return BuildDisassembleAddressCommand(facts.EntryAddress);
+    }
+
+    if (decomp::ContainsInsensitive(lower, "instruction") && !facts.Instructions.empty())
+    {
+        return BuildDisassembleAddressCommand(facts.Instructions.front().Address);
+    }
+
+    if (decomp::ContainsInsensitive(lower, "function range")
+        || decomp::ContainsInsensitive(lower, "evidence")
+        || decomp::ContainsInsensitive(lower, "schema")
+        || decomp::ContainsInsensitive(lower, "confidence"))
+    {
+        return BuildDisassembleAddressCommand(facts.EntryAddress);
+    }
+
+    return std::string();
+}
+
+void PrintLinkedIssueList(
+    const char* title,
+    const std::vector<std::string>& issues,
+    const decomp::AnalyzeRequest& request,
+    IDebugControl* control,
+    IDebugControl4* control4,
+    IDebugAdvanced2* advanced2)
+{
+    if (issues.empty())
+    {
+        return;
+    }
+
+    OutputLine(control, control4, "\n%s:\n", title);
+
+    for (const auto& issue : issues)
+    {
+        const std::string command = BuildIssueNavigationCommand(request, issue);
+
+        if (command.empty())
+        {
+            OutputLine(control, control4, "- %s\n", issue.c_str());
+            continue;
+        }
+
+        OutputDmlLine(control, control4, advanced2, "- " + issue, command);
+    }
+}
+
+void PrintLinkedIssueLine(
+    const std::string& label,
+    const std::string& issue,
+    const decomp::AnalyzeRequest& request,
+    IDebugControl* control,
+    IDebugControl4* control4,
+    IDebugAdvanced2* advanced2)
+{
+    const std::string text = label + issue;
+    const std::string command = BuildIssueNavigationCommand(request, issue);
+
+    if (command.empty())
+    {
+        OutputLine(control, control4, "%s\n", text.c_str());
+        return;
+    }
+
+    OutputDmlLine(control, control4, advanced2, text, command);
+}
+
+void PrintActionLinks(
+    const decomp::AnalyzeRequest& request,
+    IDebugControl* control,
+    IDebugControl4* control4,
+    IDebugAdvanced2* advanced2)
+{
+    if (!AreOutputCallbacksDmlAware(advanced2))
+    {
+        return;
+    }
+
+    OutputDmlRaw(control, control4, "actions     : "
+        + BuildDmlLink("explain", "!decomp /last:explain")
+        + " "
+        + BuildDmlLink("json", "!decomp /last:json")
+        + " "
+        + BuildDmlLink("facts", "!decomp /last:facts")
+        + " "
+        + BuildDmlLink("prompt", "!decomp /last:prompt")
+        + " "
+        + BuildDmlLink("data-model", "!decomp /last:data")
+        + "\n");
+
+    OutputDmlRaw(control, control4, "nav         : "
+        + BuildDmlLink("entry", BuildDisassembleAddressCommand(request.Facts.EntryAddress))
+        + " "
+        + BuildDmlLink("bp-entry", "bp " + decomp::HexU64(request.Facts.EntryAddress))
+        + " "
+        + BuildDmlLink("last-json", "!decomp /last:json")
+        + " "
+        + BuildDmlLink("last-dx", "!decomp /last:data")
+        + " "
+        + BuildDmlLink("last-prompt", "!decomp /last:prompt")
+        + "\n");
+}
+
+void PrintExplainOutput(
+    const decomp::AnalyzeRequest& request,
+    const decomp::AnalyzeResponse& response,
+    IDebugControl* control,
+    IDebugControl4* control4,
+    IDebugAdvanced2* advanced2)
+{
+    OutputLine(control, control4, "\nevidence:\n");
+
+    for (const auto& evidence : response.Evidence)
+    {
+        OutputLine(control, control4, "- %s\n", evidence.Claim.c_str());
+
+        for (const auto& blockId : evidence.Blocks)
+        {
+            const decomp::BasicBlock* block = FindBlockById(request.Facts, blockId);
+
+            if (block == nullptr)
+            {
+                OutputLine(control, control4, "  - %s\n", blockId.c_str());
+                continue;
+            }
+
+            OutputDmlLine(
+                control,
+                control4,
+                advanced2,
+                "  - " + blockId + " " + decomp::HexU64(block->StartAddress) + "-" + decomp::HexU64(block->EndAddress),
+                BuildDisassembleCommand(block->StartAddress, block->EndAddress));
+        }
+    }
+
+    if (!request.Facts.ControlFlow.empty())
+    {
+        OutputLine(control, control4, "\ncontrol_flow:\n");
+
+        for (const auto& region : request.Facts.ControlFlow)
+        {
+            const std::string headerCommand = BuildBlockNavigationCommand(request.Facts, region.HeaderBlock);
+            const std::string label = "- " + region.Kind
+                + " header=" + region.HeaderBlock
+                + " condition=" + region.Condition
+                + " confidence=" + std::to_string(region.Confidence);
+
+            if (headerCommand.empty())
+            {
+                OutputLine(control, control4, "%s\n", label.c_str());
+            }
+            else
+            {
+                OutputDmlLine(control, control4, advanced2, label, headerCommand);
+            }
+
+            if (!region.Evidence.empty())
+            {
+                OutputLine(control, control4, "  evidence: %s\n", region.Evidence.c_str());
+            }
+
+            OutputBlockLinkList(control, control4, advanced2, request.Facts, "body", region.BodyBlocks);
+            OutputBlockLinkList(control, control4, advanced2, request.Facts, "latch", region.LatchBlocks);
+            OutputBlockLinkList(control, control4, advanced2, request.Facts, "exit", region.ExitBlocks);
+        }
+    }
+
+    if (!request.Facts.TypeHints.empty())
+    {
+        OutputLine(control, control4, "\ntype_hints:\n");
+
+        for (const auto& hint : request.Facts.TypeHints)
+        {
+            const std::string label = "- " + hint.Expression + " => " + hint.Type
+                + " [" + hint.Source + " " + std::to_string(hint.Confidence) + "]";
+
+            if (hint.Site != 0)
+            {
+                OutputDmlLine(control, control4, advanced2, label, BuildDisassembleAddressCommand(hint.Site));
+            }
+            else
+            {
+                OutputLine(control, control4, "%s\n", label.c_str());
+            }
+        }
+    }
+
+    if (!request.Facts.CallTargets.empty())
+    {
+        OutputLine(control, control4, "\ncall_targets:\n");
+
+        for (const auto& call : request.Facts.CallTargets)
+        {
+            const std::string label = "- " + decomp::HexU64(call.Site) + " " + call.DisplayName + " " + call.TargetKind;
+            const std::string command = call.TargetAddress != 0 ? BuildDisassembleCommand(call.TargetAddress, call.TargetAddress + 0x30) : ("u " + decomp::HexU64(call.Site));
+            OutputDmlLine(control, control4, advanced2, label, command);
+        }
+    }
+
+    if (!request.Facts.ObservedBehavior.ArgumentSamples.empty()
+        || !request.Facts.ObservedBehavior.MemoryHotspots.empty()
+        || !request.Facts.ObservedBehavior.TtdQueries.empty())
+    {
+        OutputLine(control, control4, "\nobserved_behavior:\n");
+        OutputLine(
+            control,
+            control4,
+            "- ip=%s in_function=%s sp=%s confidence=%.2f\n",
+            decomp::HexU64(request.Facts.ObservedBehavior.InstructionPointer).c_str(),
+            request.Facts.ObservedBehavior.CurrentInstructionInFunction ? "true" : "false",
+            decomp::HexU64(request.Facts.ObservedBehavior.StackPointer).c_str(),
+            request.Facts.ObservedBehavior.Confidence);
+
+        for (const auto& argument : request.Facts.ObservedBehavior.ArgumentSamples)
+        {
+            OutputLine(
+                control,
+                control4,
+                "- %s/%s = %s %s [%.2f]\n",
+                argument.Name.c_str(),
+                argument.Register.c_str(),
+                decomp::HexU64(argument.Value).c_str(),
+                argument.Symbol.c_str(),
+                argument.Confidence);
+        }
+
+        for (const auto& hotspot : request.Facts.ObservedBehavior.MemoryHotspots)
+        {
+            OutputLine(
+                control,
+                control4,
+                "- hotspot %s read=%u write=%u [%.2f]\n",
+                hotspot.Expression.c_str(),
+                hotspot.ReadCount,
+                hotspot.WriteCount,
+                hotspot.Confidence);
+
+            for (const auto& site : hotspot.Sites)
+            {
+                OutputDmlLine(
+                    control,
+                    control4,
+                    advanced2,
+                    "  - site " + decomp::HexU64(site),
+                    BuildDisassembleAddressCommand(site));
+            }
+        }
+
+        for (const auto& query : request.Facts.ObservedBehavior.TtdQueries)
+        {
+            OutputDmlLine(control, control4, advanced2, "- " + query, query);
+        }
+    }
 }
 
 void PrintResponse(
@@ -3039,29 +4947,65 @@ void PrintResponse(
     IDebugControl* control,
     IDebugControl4* control4,
     IDebugAdvanced2* advanced2,
-    bool jsonOutput)
+    const decomp::DecompOptions& options)
 {
-    if (jsonOutput)
+    if (options.JsonOutput)
     {
         OutputLine(control, control4, "%s\n", decomp::SerializeAnalyzeRequest(request, true).c_str());
         OutputLine(control, control4, "%s\n", decomp::SerializeAnalyzeResponse(response, true).c_str());
         return;
     }
 
+    if (options.FactsOnlyOutput)
+    {
+        PrintFactsOnly(request, control, control4, advanced2);
+        return;
+    }
+
+    if (options.DataModelOutput)
+    {
+        PrintDataModelOutput(request, response, control, control4, advanced2);
+        return;
+    }
+
     OutputLine(control, control4, "target      : %s\n", request.Facts.QueryText.c_str());
-    OutputLine(control, control4, "entry       : %s\n", decomp::HexU64(request.Facts.EntryAddress).c_str());
+    if (AreOutputCallbacksDmlAware(advanced2))
+    {
+        OutputDmlRaw(control, control4, "entry       : " + BuildDmlLink(decomp::HexU64(request.Facts.EntryAddress), BuildDisassembleCommand(request.Facts.EntryAddress, request.Facts.EntryAddress + 0x40)) + "\n");
+    }
+    else
+    {
+        OutputLine(control, control4, "entry       : %s\n", decomp::HexU64(request.Facts.EntryAddress).c_str());
+    }
     OutputLine(control, control4, "query       : %s\n", decomp::HexU64(request.Facts.QueryAddress).c_str());
     OutputLine(control, control4, "module      : %s\n", request.Facts.Module.ModuleName.c_str());
     OutputLine(control, control4, "regions     : %llu\n", static_cast<unsigned long long>(request.Facts.Regions.size()));
+    OutputLine(control, control4, "session     : %s/%s\n", request.Facts.SessionPolicy.ExecutionKind.c_str(), request.Facts.SessionPolicy.AnalysisStrategy.c_str());
     OutputLine(control, control4, "analyzer    : %.2f\n", request.Facts.PreLlmConfidence);
     OutputLine(control, control4, "llm         : %.2f\n", response.Confidence);
     OutputLine(control, control4, "verified    : %.2f\n", response.Verifier.AdjustedConfidence);
     OutputLine(control, control4, "provider    : %s\n\n", response.Provider.c_str());
+    PrintActionLinks(request, control, control4, advanced2);
 
     if (!response.Summary.empty())
     {
         const std::string formattedSummary = FormatSummaryForDisplay(response.Summary);
         OutputLine(control, control4, "summary:\n%s\n\n", formattedSummary.c_str());
+    }
+
+    if (options.BriefOutput)
+    {
+        if (!response.Uncertainties.empty())
+        {
+            PrintLinkedIssueLine("top_uncertainty: ", response.Uncertainties.front(), request, control, control4, advanced2);
+        }
+
+        if (!response.Verifier.Warnings.empty())
+        {
+            PrintLinkedIssueLine("top_warning    : ", response.Verifier.Warnings.front(), request, control, control4, advanced2);
+        }
+
+        return;
     }
 
     if (!response.PseudoC.empty())
@@ -3070,26 +5014,94 @@ void PrintResponse(
         PrintPseudoCodeHighlighted(response, displayConfig, control, control4, advanced2);
         OutputLine(control, control4, "\n");
     }
-
     if (!response.Uncertainties.empty())
     {
-        OutputLine(control, control4, "\nuncertainties:\n");
-
-        for (const auto& uncertainty : response.Uncertainties)
-        {
-            OutputLine(control, control4, "- %s\n", uncertainty.c_str());
-        }
+        PrintLinkedIssueList("uncertainties", response.Uncertainties, request, control, control4, advanced2);
     }
 
     if (!response.Verifier.Warnings.empty())
     {
-        OutputLine(control, control4, "\nverifier warnings:\n");
-
-        for (const auto& warning : response.Verifier.Warnings)
+        if (!response.Verifier.Issues.empty())
         {
-            OutputLine(control, control4, "- %s\n", warning.c_str());
+            std::vector<std::string> issueLines;
+            issueLines.reserve(response.Verifier.Issues.size());
+
+            for (const auto& issue : response.Verifier.Issues)
+            {
+                std::string line = "[" + issue.Severity + "/" + issue.Code + "] " + issue.Message;
+
+                if (!issue.Evidence.empty())
+                {
+                    line += " (" + issue.Evidence + ")";
+                }
+
+                issueLines.push_back(std::move(line));
+            }
+
+            PrintLinkedIssueList("verifier issues", issueLines, request, control, control4, advanced2);
+        }
+        else
+        {
+            PrintLinkedIssueList("verifier warnings", response.Verifier.Warnings, request, control, control4, advanced2);
         }
     }
+
+    if (options.ExplainOutput)
+    {
+        PrintExplainOutput(request, response, control, control4, advanced2);
+    }
+}
+
+bool PrintCachedAnalyzeResult(
+    IDebugControl* control,
+    IDebugControl4* control4,
+    IDebugAdvanced2* advanced2,
+    decomp::DecompOptions options,
+    std::string& error)
+{
+    if (g_lastRequestJson.empty() || g_lastResponseJson.empty())
+    {
+        error = "no previous !decomp result is cached";
+        return false;
+    }
+
+    decomp::AnalyzeRequest cachedRequest;
+    decomp::AnalyzeResponse cachedResponse;
+
+    if (!decomp::ParseAnalyzeRequest(g_lastRequestJson, cachedRequest, error))
+    {
+        error = "failed to parse cached request: " + error;
+        return false;
+    }
+
+    if (!decomp::ParseAnalyzeResponse(g_lastResponseJson, cachedResponse, error))
+    {
+        error = "failed to parse cached response: " + error;
+        return false;
+    }
+
+    decomp::LlmClientConfig displayConfig;
+
+    if (!decomp::LoadLlmClientConfig(displayConfig, error, false))
+    {
+        error = "cached display config load failed: " + error;
+        return false;
+    }
+
+    if (options.LastExplainOutput)
+    {
+        options.ExplainOutput = true;
+    }
+    if (options.LastFactsOutput)
+    {
+        options.FactsOnlyOutput = true;
+    }
+
+    options.LastExplainOutput = false;
+    options.LastFactsOutput = false;
+
+    PrintResponse(cachedRequest, cachedResponse, displayConfig, control, control4, advanced2, options);
+    return true;
 }
 }
 
@@ -3148,10 +5160,92 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
             return E_INVALIDARG;
         }
 
+        if (options.ClearUserOverrides)
+        {
+            ApplyNoReturnOverrideEnvironment(options);
+            OutputLine(api.Control.Get(), api.Control4.Get(), "user overrides cleared\n");
+
+            if (target.empty())
+            {
+                return S_OK;
+            }
+        }
+
+        if (options.LastExplainOutput || options.LastFactsOutput)
+        {
+            if (!PrintCachedAnalyzeResult(api.Control.Get(), api.Control4.Get(), api.Advanced2.Get(), options, error))
+            {
+                OutputLine(api.Control.Get(), api.Control4.Get(), "error: %s\n", error.c_str());
+                return E_FAIL;
+            }
+
+            if (target.empty())
+            {
+                return S_OK;
+            }
+        }
+
+        if (options.LastJsonOutput)
+        {
+            if (g_lastRequestJson.empty() && g_lastResponseJson.empty())
+            {
+                OutputLine(api.Control.Get(), api.Control4.Get(), "error: no previous !decomp result is cached\n");
+                return E_FAIL;
+            }
+
+            OutputLine(api.Control.Get(), api.Control4.Get(), "%s\n%s\n", g_lastRequestJson.c_str(), g_lastResponseJson.c_str());
+
+            if (target.empty())
+            {
+                return S_OK;
+            }
+        }
+
+        if (options.LastDataModelOutput)
+        {
+            if (g_lastDataModelJson.empty())
+            {
+                OutputLine(api.Control.Get(), api.Control4.Get(), "error: no previous !decomp data model snapshot is cached\n");
+                return E_FAIL;
+            }
+
+            OutputLine(api.Control.Get(), api.Control4.Get(), "%s\n", g_lastDataModelJson.c_str());
+
+            if (target.empty())
+            {
+                return S_OK;
+            }
+        }
+
+        if (options.LastDebugPromptOutput)
+        {
+            if (g_lastDebugPromptDump.empty())
+            {
+                OutputLine(api.Control.Get(), api.Control4.Get(), "error: no previous !decomp prompt dump is cached\n");
+                return E_FAIL;
+            }
+
+            OutputLine(api.Control.Get(), api.Control4.Get(), "%s\n", g_lastDebugPromptDump.c_str());
+
+            if (target.empty())
+            {
+                return S_OK;
+            }
+        }
+
+        ApplyNoReturnOverrideEnvironment(options);
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "start target=%s max_instructions=%u timeout_ms=%u", target.c_str(), options.MaxInstructions, options.TimeoutMs);
+        OutputProgress(api.Control.Get(), api.Control4.Get(), options, "starting analysis for %s", target.c_str());
+
         if (!decomp::LoadLlmClientConfig(displayConfig, error, false))
         {
             OutputLine(api.Control.Get(), api.Control4.Get(), "error: config load failed: %s\n", error.c_str());
             return E_FAIL;
+        }
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "display config loaded");
+        if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "config load"))
+        {
+            return E_ABORT;
         }
 
         if (!ResolveTargetAddress(api.Symbols.Get(), target, queryAddress))
@@ -3159,14 +5253,23 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
             OutputLine(api.Control.Get(), api.Control4.Get(), "error: could not resolve target %s\n", target.c_str());
             return E_FAIL;
         }
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "resolved target address=%s", decomp::HexU64(queryAddress).c_str());
+        if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "target resolution"))
+        {
+            return E_ABORT;
+        }
 
         CollectModuleInfo(api.Symbols.Get(), queryAddress, moduleInfo);
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "module=%s base=%s size=%u", moduleInfo.ModuleName.c_str(), decomp::HexU64(moduleInfo.Base).c_str(), moduleInfo.Size);
+
         std::string resolvedSymbolName;
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "recovering function regions");
         regions = RecoverFunctionRegions(api.Symbols.Get(), api.Control.Get(), queryAddress, moduleInfo, entryAddress, options.MaxInstructions, &resolvedSymbolName);
 
         if (!resolvedSymbolName.empty())
         {
             target = resolvedSymbolName;
+            OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "resolved symbol=%s", target.c_str());
         }
 
         if (regions.empty())
@@ -3174,13 +5277,32 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
             OutputLine(api.Control.Get(), api.Control4.Get(), "error: could not recover function range\n");
             return E_FAIL;
         }
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "recovered regions=%llu entry=%s", static_cast<unsigned long long>(regions.size()), decomp::HexU64(entryAddress).c_str());
+        if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "function range recovery"))
+        {
+            return E_ABORT;
+        }
 
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "reading function bytes");
         bytes = ReadFunctionBytes(api.DataSpaces.Get(), regions);
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "read bytes=%llu", static_cast<unsigned long long>(bytes.size()));
+        if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "function byte read"))
+        {
+            return E_ABORT;
+        }
+
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "disassembling regions");
         instructions = DisassembleRegions(api.DataSpaces.Get(), api.Control.Get(), regions, options.MaxInstructions, decodedContexts);
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "decoded instructions=%llu", static_cast<unsigned long long>(instructions.size()));
+        if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "disassembly"))
+        {
+            return E_ABORT;
+        }
 
         request.RequestId = decomp::MakeRequestId();
         request.TimeoutMs = options.TimeoutMs;
         request.BriefOutput = options.BriefOutput;
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "building analyzer facts request_id=%s", request.RequestId.c_str());
         request.Facts = decomp::BuildAnalysisFacts(
             target,
             moduleInfo,
@@ -3191,17 +5313,65 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
             regions,
             bytes,
             instructions);
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "facts core blocks=%llu calls=%llu conditions=%llu", static_cast<unsigned long long>(request.Facts.Blocks.size()), static_cast<unsigned long long>(request.Facts.Calls.size()), static_cast<unsigned long long>(request.Facts.NormalizedConditions.size()));
+        if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "analyzer facts"))
+        {
+            return E_ABORT;
+        }
+
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "collecting session policy");
+        request.Facts.SessionPolicy = BuildSessionPolicyFacts(api.Control.Get());
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "enriching debug metadata");
         EnrichAnalysisFactsWithDebugMetadata(api.Symbols.Get(), api.DataSpaces.Get(), moduleInfo, decodedContexts, request.Facts);
+        if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "debug metadata enrichment"))
+        {
+            return E_ABORT;
+        }
+
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "collecting PDB facts");
         CollectPdbFacts(api.Symbols.Get(), api.Symbols5.Get(), moduleInfo, regions, request.Facts);
+        if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "PDB fact collection"))
+        {
+            return E_ABORT;
+        }
+
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "applying user corrections");
+        ApplyUserCorrections(options, request.Facts);
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "collecting observed behavior facts");
+        CollectObservedBehaviorFacts(api.Registers.Get(), api.DataSpaces.Get(), api.Symbols.Get(), regions, request.Facts);
         ApplyPreferredNaturalLanguage(displayConfig, request.Facts);
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "facts ready pre_llm_confidence=%.2f type_hints=%llu idioms=%llu callee_summaries=%llu", request.Facts.PreLlmConfidence, static_cast<unsigned long long>(request.Facts.TypeHints.size()), static_cast<unsigned long long>(request.Facts.Idioms.size()), static_cast<unsigned long long>(request.Facts.CalleeSummaries.size()));
+        OutputProgress(
+            api.Control.Get(),
+            api.Control4.Get(),
+            options,
+            "local analysis complete: %llu instructions, %llu blocks, %llu calls",
+            static_cast<unsigned long long>(instructions.size()),
+            static_cast<unsigned long long>(request.Facts.Blocks.size()),
+            static_cast<unsigned long long>(request.Facts.Calls.size()));
+        if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "observed behavior collection"))
+        {
+            return E_ABORT;
+        }
+
+        if (options.DebugPromptOutput)
+        {
+            OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "building prompt dump without LLM request");
+            g_lastDebugPromptDump = decomp::BuildDebugPromptDump(request);
+            OutputLine(api.Control.Get(), api.Control4.Get(), "%s\n", g_lastDebugPromptDump.c_str());
+            return S_OK;
+        }
 
         if (options.DisableLlm)
         {
+            OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "LLM disabled; building analyzer-only response");
+            OutputProgress(api.Control.Get(), api.Control4.Get(), options, "LLM disabled; preparing analyzer-only result");
             response = BuildAnalyzerOnlyResponse(request);
         }
         else
         {
             decomp::LlmClientConfig llmConfig;
+            OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "loading LLM config");
             if (!decomp::LoadLlmClientConfig(llmConfig, error))
             {
                 OutputLine(api.Control.Get(), api.Control4.Get(), "error: llm config load failed: %s\n", error.c_str());
@@ -3213,32 +5383,63 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
                 llmConfig.TimeoutMs = options.TimeoutMs;
             }
 
-            if (!decomp::AnalyzeWithLlm(request, llmConfig, response, error))
+            OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "starting LLM analysis endpoint=%s model=%s timeout_ms=%u", llmConfig.Endpoint.empty() ? "<mock>" : llmConfig.Endpoint.c_str(), llmConfig.Model.c_str(), llmConfig.TimeoutMs);
+            OutputProgress(
+                api.Control.Get(),
+                api.Control4.Get(),
+                options,
+                "LLM analysis started: model=%s timeout=%us, Ctrl+Break cancels",
+                llmConfig.Model.c_str(),
+                llmConfig.TimeoutMs / 1000);
+            bool cancelled = false;
+
+            if (!AnalyzeWithLlmInterruptible(request, llmConfig, api.Control.Get(), api.Control4.Get(), options, response, error, cancelled))
             {
+                if (cancelled)
+                {
+                    return E_ABORT;
+                }
+
                 OutputLine(api.Control.Get(), api.Control4.Get(), "error: llm analyze failed: %s\n", error.c_str());
                 return E_FAIL;
             }
+            OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "LLM analysis finished provider=%s confidence=%.2f", response.Provider.c_str(), response.Confidence);
+            OutputProgress(api.Control.Get(), api.Control4.Get(), options, "LLM analysis complete; verifying result");
         }
 
+        if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "LLM analysis"))
+        {
+            return E_ABORT;
+        }
+
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "tokenizing pseudo-code");
         decomp::EnsurePseudoCodeTokens(response);
+        ApplyResponseRenames(options, response);
+        response.PseudoCTokens.clear();
+        decomp::EnsurePseudoCodeTokens(response);
+        if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "pseudo-code tokenization"))
+        {
+            return E_ABORT;
+        }
+
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "running verifier");
         decomp::VerifyResponse(request, response);
-        PrintResponse(request, response, displayConfig, api.Control.Get(), api.Control4.Get(), api.Advanced2.Get(), options.JsonOutput);
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "verifier adjusted=%.2f conflicts=%u missing_evidence=%u issues=%llu", response.Verifier.AdjustedConfidence, response.Verifier.FactConflicts, response.Verifier.MissingEvidence, static_cast<unsigned long long>(response.Verifier.Issues.size()));
+        OutputProgress(api.Control.Get(), api.Control4.Get(), options, "verification complete; printing result");
+        if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "verifier"))
+        {
+            return E_ABORT;
+        }
+
+        g_lastRequestJson = decomp::SerializeAnalyzeRequest(request, true);
+        g_lastResponseJson = decomp::SerializeAnalyzeResponse(response, true);
+        g_lastDataModelJson = BuildDataModelSnapshotJson(request, response);
+        g_lastDebugPromptDump = decomp::BuildDebugPromptDump(request);
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "printing response");
+        PrintResponse(request, response, displayConfig, api.Control.Get(), api.Control4.Get(), api.Advanced2.Get(), options);
         return S_OK;
     }
     while (false);
 
     return E_FAIL;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -24,9 +24,24 @@ struct DecompOptions
     bool UseLiveMemory = true;
     bool BriefOutput = false;
     bool JsonOutput = false;
+    bool ExplainOutput = false;
+    bool FactsOnlyOutput = false;
+    bool DebugPromptOutput = false;
+    bool DataModelOutput = false;
+    bool LastExplainOutput = false;
+    bool LastFactsOutput = false;
+    bool LastJsonOutput = false;
+    bool LastDataModelOutput = false;
+    bool LastDebugPromptOutput = false;
     bool DisableLlm = false;
+    bool ClearUserOverrides = false;
+    bool VerboseOutput = false;
     uint32_t TimeoutMs = 5000;
     uint32_t MaxInstructions = 4096;
+    std::vector<std::string> NoReturnOverrides;
+    std::vector<std::string> TypeOverrides;
+    std::vector<std::string> FieldOverrides;
+    std::vector<std::string> RenameOverrides;
 };
 
 struct FunctionRegion
@@ -144,6 +159,89 @@ struct ValueMerge
     double Confidence = 0.0;
 };
 
+struct IrValue
+{
+    std::string Id;
+    std::string BlockId;
+    uint64_t DefSite = 0;
+    std::string Target;
+    std::string Expression;
+    std::string Canonical;
+    std::string Kind;
+    std::vector<std::string> Uses;
+    bool IsConstant = false;
+    bool IsCopy = false;
+    bool IsDead = false;
+    double Confidence = 0.0;
+};
+
+struct ControlFlowRegion
+{
+    std::string Kind;
+    std::string HeaderBlock;
+    std::vector<std::string> BodyBlocks;
+    std::vector<std::string> LatchBlocks;
+    std::vector<std::string> ExitBlocks;
+    std::string Condition;
+    std::string Evidence;
+    double Confidence = 0.0;
+};
+
+struct AbiFacts
+{
+    uint32_t ShadowSpaceBytes = 32;
+    bool PrologRecognized = false;
+    bool EpilogRecognized = false;
+    bool FramePointerEstablished = false;
+    std::string FrameBase;
+    std::vector<std::string> HomeSlots;
+    std::vector<std::string> NoReturnCalls;
+    std::vector<std::string> TailCalls;
+    std::vector<std::string> Thunks;
+    std::vector<std::string> ImportWrappers;
+    std::vector<std::string> Notes;
+    double Confidence = 0.0;
+};
+
+struct TypeRecoveryHint
+{
+    uint64_t Site = 0;
+    std::string Expression;
+    std::string Type;
+    std::string Source;
+    std::string Kind;
+    std::string Evidence;
+    bool PointerLike = false;
+    bool ArrayLike = false;
+    bool EnumLike = false;
+    bool BitflagLike = false;
+    double Confidence = 0.0;
+};
+
+struct IdiomPattern
+{
+    uint64_t Site = 0;
+    std::string Kind;
+    std::string Name;
+    std::string Summary;
+    std::string Replacement;
+    std::string Evidence;
+    double Confidence = 0.0;
+};
+
+struct CalleeSummary
+{
+    uint64_t Site = 0;
+    std::string Callee;
+    std::string ReturnType;
+    std::string ParameterModel;
+    std::string SideEffects;
+    std::string MemoryEffects;
+    std::string Ownership;
+    std::string Source;
+    double Confidence = 0.0;
+};
+
 struct DataReference
 {
     uint64_t Site = 0;
@@ -240,6 +338,53 @@ struct PdbFacts
     double Confidence = 0.0;
 };
 
+struct SessionPolicyFacts
+{
+    std::string DebugClass;
+    std::string Qualifier;
+    std::string ExecutionKind;
+    std::string AnalysisStrategy;
+    bool IsLive = false;
+    bool IsDump = false;
+    bool IsKernel = false;
+    bool IsTraceLike = false;
+    bool TtdAvailable = false;
+    std::vector<std::string> Notes;
+};
+
+struct ObservedArgumentValue
+{
+    std::string Name;
+    std::string Register;
+    uint64_t Value = 0;
+    std::string Symbol;
+    std::string Source;
+    double Confidence = 0.0;
+};
+
+struct ObservedMemoryHotspot
+{
+    std::string Expression;
+    std::string Kind;
+    uint32_t ReadCount = 0;
+    uint32_t WriteCount = 0;
+    std::vector<uint64_t> Sites;
+    double Confidence = 0.0;
+};
+
+struct ObservedBehaviorFacts
+{
+    bool CurrentInstructionInFunction = false;
+    uint64_t InstructionPointer = 0;
+    uint64_t StackPointer = 0;
+    uint64_t ReturnAddress = 0;
+    std::vector<ObservedArgumentValue> ArgumentSamples;
+    std::vector<ObservedMemoryHotspot> MemoryHotspots;
+    std::vector<std::string> TtdQueries;
+    std::vector<std::string> Notes;
+    double Confidence = 0.0;
+};
+
 struct AnalysisFacts
 {
     std::string Arch = "x64";
@@ -264,10 +409,18 @@ struct AnalysisFacts
     std::vector<RecoveredArgument> RecoveredArguments;
     std::vector<RecoveredLocal> RecoveredLocals;
     std::vector<ValueMerge> ValueMerges;
+    std::vector<IrValue> IrValues;
+    std::vector<ControlFlowRegion> ControlFlow;
+    AbiFacts Abi;
+    std::vector<TypeRecoveryHint> TypeHints;
+    std::vector<IdiomPattern> Idioms;
+    std::vector<CalleeSummary> CalleeSummaries;
     std::vector<DataReference> DataReferences;
     std::vector<CallTargetInfo> CallTargets;
     std::vector<NormalizedCondition> NormalizedConditions;
     PdbFacts Pdb;
+    SessionPolicyFacts SessionPolicy;
+    ObservedBehaviorFacts ObservedBehavior;
     std::vector<std::string> Facts;
     std::vector<std::string> UncertainPoints;
     double PreLlmConfidence = 0.0;
@@ -296,6 +449,14 @@ struct EvidenceItem
     std::vector<std::string> Blocks;
 };
 
+struct VerificationIssue
+{
+    std::string Code;
+    std::string Severity;
+    std::string Message;
+    std::string Evidence;
+};
+
 struct PseudoCodeToken
 {
     std::string Kind;
@@ -309,6 +470,7 @@ struct VerifyReport
     uint32_t MissingEvidence = 0;
     double AdjustedConfidence = 0.0;
     std::vector<std::string> Warnings;
+    std::vector<VerificationIssue> Issues;
 };
 
 struct AnalyzeResponse
@@ -328,5 +490,3 @@ struct AnalyzeResponse
     uint32_t TimingMs = 0;
 };
 }
-
-
