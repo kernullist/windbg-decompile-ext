@@ -46,9 +46,21 @@ Load the extension from the build output, then run `!decomp` against a symbol or
 
 ```text
 .load C:\path\to\decomp.dll
+!decomp /doctor
 !decomp module!FunctionName
 !decomp 0x7ffb`12345678
 ```
+
+Use `/doctor` when setup looks wrong or before enabling an LLM provider:
+
+```text
+!decomp /doctor
+!decomp /doctor:net
+```
+
+- `/doctor` does not require a target and does not call the provider. It reports config path/load status, provider/model/endpoint summary, auth presence without secrets, timeout/token/chunking settings, DML support, session class/qualifier, processor type, and PDB caveats.
+- `/doctor:net` is accepted as an explicit network-check request, but currently reports that provider ping is skipped. The extension does not perform a network probe from doctor mode.
+- Secret values such as API keys, bearer tokens, refresh tokens, and URL query strings are not printed.
 
 Targets can be public/private symbols, exported function names, or addresses. If the target resolves to an address inside a function, the extension tries to recover the containing function range from symbols, unwind data, and control-flow heuristics. Put quotes around targets that contain spaces:
 
@@ -64,7 +76,7 @@ The normal command path performs local analysis, builds analyzer facts, optional
 !decomp game.exe!CheckIntegrity
 ```
 
-Normal, `brief`, and `explain` output include a compact progress stream even without `/verbose`. Long LLM runs show local-analysis completion, chunk progress, retry notices, merge start, verification, and the Ctrl+Break cancellation hint. Machine-readable modes such as `/view:json`, `/view:facts`, `/view:prompt`, and `/view:data` suppress progress lines so scripts still receive clean output.
+Normal, `brief`, and `explain` output include a compact progress stream even without `/verbose`. Long LLM runs show local-analysis completion, chunk progress, retry notices, merge start, verification, and the Ctrl+Break cancellation hint. Machine-readable modes such as `/view:json`, `/view:facts`, `/view:prompt`, and `/view:data` suppress progress lines and DML helper links so scripts receive only the requested payload.
 
 Use `/view:*` to choose what you want to see. This keeps the command surface small: one option controls all output modes.
 
@@ -76,6 +88,7 @@ Use `/view:*` to choose what you want to see. This keeps the command surface sma
 !decomp /view:prompt module!FunctionName
 !decomp /view:data module!FunctionName
 !decomp /view:analyzer module!FunctionName
+!decomp /view:plan module!FunctionName
 ```
 
 - `brief` prints target, confidence, summary, and the first uncertainty or verifier warning.
@@ -85,6 +98,7 @@ Use `/view:*` to choose what you want to see. This keeps the command surface sma
 - `prompt` prints the exact system prompt, user prompt, and prompt facts. It disables the LLM call.
 - `data` prints a stable JSON snapshot intended for WinDbg JavaScript/NatVis-style automation.
 - `analyzer` renders the deterministic analyzer-only pseudo-code path without calling the LLM.
+- `plan` performs local analysis and prints a preflight plan without calling the LLM or updating the result cache. It includes target/module/range counts, PDB availability, session policy, estimated chunking, prompt-size-relevant counts, and practical recommendations.
 
 Use `/verbose` when a command appears stuck or when you want to see the full progress stream:
 
@@ -130,6 +144,9 @@ Cache and replay helpers:
 !decomp /last:data
 !decomp /view:prompt module!FunctionName
 !decomp /last:prompt
+!decomp /history
+!decomp /last:2:explain
+!decomp /last:2:json
 ```
 
 - `/last:json` prints the previous request/response JSON without re-running analysis.
@@ -137,15 +154,17 @@ Cache and replay helpers:
 - `/last:facts` prints the analyzer facts from the previous result without re-running analysis.
 - `/last:data` prints the previous data-model snapshot without re-running analysis.
 - `/last:prompt` prints the previous prompt dump without re-running analysis.
-- If you pass a target after one of the `/last:*` modes, the cached artifact is printed first and then the new target is analyzed.
-- Cached artifacts live in the loaded extension instance only. They disappear when WinDbg unloads the extension or the process exits.
+- `/history` lists the in-memory result ring buffer. Index `1` is the newest result.
+- `/last:N:explain`, `/last:N:json`, `/last:N:facts`, `/last:N:data`, and `/last:N:prompt` replay an older cached result by history index without re-running local analysis or calling the LLM.
+- `/last:*` modes are terminal replay commands. If a target is present in the same command, the cached artifact is replayed and no local analysis or LLM request is started for that target.
+- Cached artifacts live in the loaded extension instance only. The result history keeps the newest 8 results and disappears when WinDbg unloads the extension or the process exits.
 - DML action links in normal output use these cached `/last:*` views, so clicking `explain`, `json`, `facts`, `prompt`, or `data-model` does not start a new decompile run.
 - Legacy `/last-json`, `/last-explain`, `/last-facts`, `/last-data-model`, `/last-dx`, and `/last-prompt` remain supported.
 
 DML navigation:
 
 - When WinDbg reports that the current output callback is DML-aware, pseudo-code is syntax-highlighted with configured DML color slots.
-- Normal output includes an `actions` row with clickable `explain`, `json`, `facts`, `prompt`, and `data-model` links for the same target.
+- Normal output includes an `actions` row with clickable `explain`, `json`, `facts`, `prompt`, `data-model`, and `history` links for the same target.
 - Normal output also includes a `nav` row with entry disassembly, entry breakpoint, and last-artifact replay links.
 - Entry addresses, basic blocks, evidence blocks, control-flow regions, type-hint sites, observed memory-hotspot sites, TTD query suggestions, and direct call targets become clickable links where the extension has enough address information.
 - Uncertainties and verifier warnings are linked to the best recovered evidence location when the cause can be mapped to a branch, loop, switch, no-return call, return instruction, or function entry.
@@ -188,11 +207,13 @@ Malformed correction values are ignored and reported in `uncertainties` rather t
 Recommended investigation workflow:
 
 1. Start with `!decomp /view:facts target` to confirm the function range, blocks, calls, imports, PDB data, and session facts look reasonable.
-2. Use `!decomp /view:prompt target` when prompt size, language, or evidence selection looks wrong.
-3. Run `!decomp target` for the full verified pseudo-C result.
-4. If the result looks wrong, run `!decomp /view:explain target` and inspect verifier warnings and evidence coverage.
-5. Add focused corrections such as `/fix:noreturn:`, `/fix:type:`, `/fix:field:`, or `/fix:rename:` and re-run the same target.
-6. Capture `/view:json` or `/last:json` when filing bugs or comparing behavior across builds.
+2. Use `!decomp /view:plan target` to estimate chunking, prompt size, timeout risk, and symbol quality before spending an LLM request.
+3. Use `!decomp /view:prompt target` when prompt size, language, or evidence selection looks wrong.
+4. Run `!decomp target` for the full verified pseudo-C result.
+5. If the result looks wrong, run `!decomp /view:explain target` and inspect verifier warnings, evidence coverage, and suggested fixes.
+6. Add focused corrections such as `/fix:noreturn:`, `/fix:type:`, `/fix:field:`, or `/fix:rename:` and re-run the same target.
+7. Use `/history` and indexed `/last:N:*` replay when comparing several recent results.
+8. Capture `/view:json` or `/last:json` when filing bugs or comparing behavior across builds.
 
 ## Analyzer Fact Surface
 
@@ -694,6 +715,7 @@ Example `/view:json` response details:
 - `evidence_graph` exposes high-signal fact nodes and provenance edges so IR values, block value states, memory accesses, call targets, type hints, PDB hints, and observed behavior can be traced back to instruction and block evidence.
 - The verifier response includes legacy `warnings` plus structured `issues` entries. Each issue carries `severity`, `code`, `message`, and optional `evidence` so tools can filter errors such as `branch.true_target_not_successor` separately from lower-risk warnings.
 - Verifier checks now compare normalized branch true/false targets against CFG successors, compare pseudo-code branch density against recovered conditional branches, cross-check direct callee summaries against pseudo-code call effects, validate evidence-graph node/edge grounding, and check block value state references back to recovered blocks and IR values.
+- Normal and explain output may include a concise `suggested fixes` section. These are conservative `/fix:*` commands derived from verifier issues, PDB-backed rename opportunities, or repeated observed memory hotspots. DML-aware output renders immediately applicable suggestions as clickable rerun links for the same target; placeholder field-type suggestions remain plain text until `TYPE` is replaced.
 - In LLM mode, the extension automatically feeds verifier issues back into one retry prompt. The retry is kept when it preserves or improves verifier quality; otherwise the original response is retained with an added uncertainty note.
 - `session_policy` and `observed_behavior` expose WinDbg-specific context such as live/dump/kernel/TTD-like policy, current-frame register argument samples, memory hotspots, and suggested trace queries.
 - The serialized request now also includes a `pdb` object when symbol/type data is available.

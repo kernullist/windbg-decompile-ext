@@ -5227,6 +5227,29 @@ std::string BuildPreviewText(const std::string& text)
     return text.substr(0, kPreviewLimit) + "...";
 }
 
+std::string SanitizeEndpointForLog(const std::string& endpoint)
+{
+    std::string sanitized = endpoint;
+    const size_t scheme = sanitized.find("://");
+    const size_t authorityStart = scheme == std::string::npos ? 0 : scheme + 3;
+    const size_t at = sanitized.find('@', authorityStart);
+    const size_t slash = sanitized.find('/', authorityStart);
+
+    if (at != std::string::npos && (slash == std::string::npos || at < slash))
+    {
+        sanitized = sanitized.substr(0, authorityStart) + "<credentials-redacted>" + sanitized.substr(at);
+    }
+
+    const size_t query = sanitized.find('?');
+
+    if (query != std::string::npos)
+    {
+        sanitized = sanitized.substr(0, query) + "?<redacted>";
+    }
+
+    return sanitized;
+}
+
 bool ShouldRetryWithVerifierFeedback(const VerifyReport& report)
 {
     if (!report.SchemaOk || report.AdjustedConfidence < 0.55)
@@ -5347,7 +5370,7 @@ bool HttpPostBody(
 
         LogVerbose(
             config,
-            "LLM HTTP prepare endpoint=" + endpointOverride
+            "LLM HTTP prepare endpoint=" + SanitizeEndpointForLog(endpointOverride)
                 + " timeout_ms=" + std::to_string(config.TimeoutMs)
                 + " request_bytes=" + std::to_string(body.size()));
 
@@ -6670,6 +6693,63 @@ bool LoadLlmClientConfig(
     while (false);
 
     return success;
+}
+
+std::string BuildDefaultLlmConfigPath()
+{
+    return BuildDefaultConfigPath();
+}
+
+std::string BuildDefaultChatGptAuthFilePathForConfig()
+{
+    return BuildDefaultChatGptAuthFilePath();
+}
+
+bool PathExistsAsFile(const std::string& path)
+{
+    return FileExists(path);
+}
+
+bool IsChatGptProviderConfig(const LlmClientConfig& config)
+{
+    return IsChatGptProvider(config);
+}
+
+LlmChunkPlanSummary SummarizeLlmChunkPlan(
+    const AnalyzeRequest& request,
+    const LlmClientConfig& config)
+{
+    LlmChunkPlanSummary summary;
+    summary.UseChunked = ShouldUseChunkedAnalysis(request, config);
+
+    if (!summary.UseChunked)
+    {
+        summary.EstimatedChunks = 1;
+        summary.Reason = "single-pass";
+        return summary;
+    }
+
+    const std::vector<ChunkPlan> plans = BuildChunkPlans(request, config);
+    summary.EstimatedChunks = (std::max)(static_cast<size_t>(1), plans.size());
+
+    if (config.ForceChunked)
+    {
+        summary.Reason = "force_chunked";
+    }
+    else if (request.Facts.Instructions.size() >= config.ChunkTriggerInstructions)
+    {
+        summary.Reason = "instruction_threshold";
+    }
+    else if (request.Facts.Blocks.size() >= config.ChunkTriggerBlocks)
+    {
+        summary.Reason = "block_threshold";
+    }
+    else
+    {
+        summary.Reason = "planner";
+    }
+
+    return summary;
 }
 
 uint32_t GrowCompletionTokenBudget(

@@ -34,8 +34,13 @@ struct DecompOptions
     bool LastDataModelOutput = false;
     bool LastDebugPromptOutput = false;
     bool DisableLlm = false;
+    bool PlanOutput = false;
+    bool DoctorOutput = false;
+    bool DoctorNetwork = false;
+    bool HistoryOutput = false;
     bool ClearUserOverrides = false;
     bool VerboseOutput = false;
+    uint32_t LastCacheIndex = 1;
     uint32_t TimeoutMs = 5000;
     uint32_t MaxInstructions = 4096;
     std::vector<std::string> NoReturnOverrides;
@@ -581,6 +586,16 @@ struct VerifyReport
     double AdjustedConfidence = 0.0;
     std::vector<std::string> Warnings;
     std::vector<VerificationIssue> Issues;
+};
+
+struct SuggestedFix
+{
+    std::string Kind;
+    std::string SwitchText;
+    std::string Reason;
+    std::string Evidence;
+    uint64_t Site = 0;
+    double Confidence = 0.0;
 };
 
 struct AnalyzeResponse

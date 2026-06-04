@@ -1259,6 +1259,245 @@ bool LooksLikeUseBeforeDef(const AnalyzeRequest& request, const AnalyzeResponse&
 
     return false;
 }
+
+bool IsSafeFixSwitchValue(const std::string& value)
+{
+    if (value.empty())
+    {
+        return false;
+    }
+
+    for (const char ch : value)
+    {
+        if (std::isspace(static_cast<unsigned char>(ch)) != 0
+            || ch == '"'
+            || ch == '\''
+            || ch == ';'
+            || ch == '\r'
+            || ch == '\n')
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool IsGenericUserVisibleName(const std::string& name)
+{
+    auto hasNumericSuffix = [&name](const std::string& prefix)
+    {
+        if (!StartsWithInsensitive(name, prefix) || name.size() <= prefix.size())
+        {
+            return false;
+        }
+
+        for (size_t index = prefix.size(); index < name.size(); ++index)
+        {
+            if (std::isdigit(static_cast<unsigned char>(name[index])) == 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    };
+
+    return hasNumericSuffix("arg")
+        || hasNumericSuffix("v")
+        || StartsWithInsensitive(name, "local_")
+        || StartsWithInsensitive(name, "slot_")
+        || StartsWithInsensitive(name, "tmp");
+}
+
+bool HasSuggestedFixSwitch(const std::vector<SuggestedFix>& fixes, const std::string& switchText)
+{
+    for (const SuggestedFix& fix : fixes)
+    {
+        if (fix.SwitchText == switchText)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void AddSuggestedFix(
+    std::vector<SuggestedFix>& fixes,
+    const SuggestedFix& fix)
+{
+    if (fix.SwitchText.empty()
+        || !IsSafeFixSwitchValue(fix.SwitchText)
+        || HasSuggestedFixSwitch(fixes, fix.SwitchText)
+        || fixes.size() >= 5)
+    {
+        return;
+    }
+
+    fixes.push_back(fix);
+}
+
+void AddNoReturnSuggestedFixes(
+    const AnalyzeRequest& request,
+    const AnalyzeResponse& response,
+    std::vector<SuggestedFix>& fixes)
+{
+    for (const VerificationIssue& issue : response.Verifier.Issues)
+    {
+        if (issue.Code != "abi.call_noreturn_list_empty")
+        {
+            continue;
+        }
+
+        std::string target = TrimCopy(issue.Evidence);
+
+        if (target.empty())
+        {
+            for (const CallSite& call : request.Facts.Calls)
+            {
+                if (!call.Returns)
+                {
+                    target = call.Target;
+                    break;
+                }
+            }
+        }
+
+        if (target.empty())
+        {
+            continue;
+        }
+
+        SuggestedFix fix;
+        fix.Kind = "noreturn";
+        fix.SwitchText = "/fix:noreturn:" + target;
+        fix.Reason = "mark recovered non-returning call so CFG and verifier agree";
+        fix.Evidence = issue.Evidence.empty() ? target : issue.Evidence;
+        fix.Confidence = 0.82;
+        AddSuggestedFix(fixes, fix);
+    }
+}
+
+void AddRenameSuggestedFixes(
+    const AnalyzeRequest& request,
+    const AnalyzeResponse& response,
+    std::vector<SuggestedFix>& fixes)
+{
+    const size_t paramCount = (std::min)(response.Params.size(), request.Facts.Pdb.Params.size());
+
+    for (size_t index = 0; index < paramCount; ++index)
+    {
+        const std::string& oldName = response.Params[index].Name;
+        const std::string& newName = request.Facts.Pdb.Params[index].Name;
+
+        if (!IsGenericUserVisibleName(oldName)
+            || newName.empty()
+            || oldName == newName)
+        {
+            continue;
+        }
+
+        SuggestedFix fix;
+        fix.Kind = "rename";
+        fix.SwitchText = "/fix:rename:" + oldName + "=" + newName;
+        fix.Reason = "replace generic parameter name with scoped PDB name";
+        fix.Evidence = "pdb_param:" + newName;
+        fix.Site = request.Facts.Pdb.Params[index].Site;
+        fix.Confidence = request.Facts.Pdb.Params[index].Confidence;
+        AddSuggestedFix(fixes, fix);
+    }
+
+    const size_t prototypeCount = (std::min)(response.Params.size(), request.Facts.Pdb.PrototypeParameters.size());
+
+    for (size_t index = 0; index < prototypeCount; ++index)
+    {
+        const std::string& oldName = response.Params[index].Name;
+        const std::string& newName = request.Facts.Pdb.PrototypeParameters[index].Name;
+
+        if (!IsGenericUserVisibleName(oldName)
+            || newName.empty()
+            || oldName == newName)
+        {
+            continue;
+        }
+
+        SuggestedFix fix;
+        fix.Kind = "rename";
+        fix.SwitchText = "/fix:rename:" + oldName + "=" + newName;
+        fix.Reason = "replace generic parameter name with PDB prototype name";
+        fix.Evidence = "pdb_prototype_param:" + newName;
+        fix.Confidence = request.Facts.Pdb.PrototypeParameters[index].Confidence;
+        AddSuggestedFix(fixes, fix);
+    }
+
+    const size_t localCount = (std::min)(response.Locals.size(), request.Facts.Pdb.Locals.size());
+
+    for (size_t index = 0; index < localCount; ++index)
+    {
+        const std::string& oldName = response.Locals[index].Name;
+        const std::string& newName = request.Facts.Pdb.Locals[index].Name;
+
+        if (!IsGenericUserVisibleName(oldName)
+            || newName.empty()
+            || oldName == newName)
+        {
+            continue;
+        }
+
+        SuggestedFix fix;
+        fix.Kind = "rename";
+        fix.SwitchText = "/fix:rename:" + oldName + "=" + newName;
+        fix.Reason = "replace generic local name with scoped PDB name";
+        fix.Evidence = "pdb_local:" + newName;
+        fix.Site = request.Facts.Pdb.Locals[index].Site;
+        fix.Confidence = request.Facts.Pdb.Locals[index].Confidence;
+        AddSuggestedFix(fixes, fix);
+    }
+}
+
+bool HasTypeHintForExpression(const AnalysisFacts& facts, const std::string& expression)
+{
+    for (const TypeRecoveryHint& hint : facts.TypeHints)
+    {
+        if (hint.Expression == expression)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void AddFieldSuggestedFixes(
+    const AnalyzeRequest& request,
+    std::vector<SuggestedFix>& fixes)
+{
+    for (const ObservedMemoryHotspot& hotspot : request.Facts.ObservedBehavior.MemoryHotspots)
+    {
+        const uint32_t totalAccesses = hotspot.ReadCount + hotspot.WriteCount;
+        const std::string expression = TrimCopy(hotspot.Expression);
+
+        if (totalAccesses < 4
+            || expression.empty()
+            || expression.find('[') == std::string::npos
+            || ContainsInsensitive(expression, "rsp")
+            || ContainsInsensitive(expression, "rbp")
+            || HasTypeHintForExpression(request.Facts, expression))
+        {
+            continue;
+        }
+
+        SuggestedFix fix;
+        fix.Kind = "field";
+        fix.SwitchText = "/fix:field:" + expression + "=TYPE";
+        fix.Reason = "replace TYPE with the real field type for a repeated observed memory hotspot";
+        fix.Evidence = "hotspot_accesses=" + std::to_string(totalAccesses);
+        fix.Site = hotspot.Sites.empty() ? 0 : hotspot.Sites.front();
+        fix.Confidence = hotspot.Confidence;
+        AddSuggestedFix(fixes, fix);
+    }
+}
 }
 
 VerifyReport VerifyResponse(const AnalyzeRequest& request, AnalyzeResponse& response)
@@ -1391,5 +1630,18 @@ VerifyReport VerifyResponse(const AnalyzeRequest& request, AnalyzeResponse& resp
     report.AdjustedConfidence = Clamp01(adjusted);
     response.Verifier = report;
     return report;
+}
+
+std::vector<SuggestedFix> BuildSuggestedFixes(
+    const AnalyzeRequest& request,
+    const AnalyzeResponse& response)
+{
+    std::vector<SuggestedFix> fixes;
+
+    AddNoReturnSuggestedFixes(request, response, fixes);
+    AddRenameSuggestedFixes(request, response, fixes);
+    AddFieldSuggestedFixes(request, fixes);
+
+    return fixes;
 }
 }

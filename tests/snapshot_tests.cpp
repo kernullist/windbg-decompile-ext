@@ -1626,6 +1626,118 @@ void TestVerifierCoverageSnapshot()
     Expect(HasIssueCode(unconvergedReport, "dataflow.unconverged_without_uncertainty"), "verifier should flag confident responses that omit unconverged dataflow uncertainty");
     Expect(unconvergedReport.AdjustedConfidence < unconvergedResponse.Confidence, "unconverged dataflow without uncertainty should reduce verifier confidence");
 }
+
+void TestUxHelperSnapshot()
+{
+    decomp::AnalyzeRequest request;
+    request.RequestId = "ux_helper_snapshot";
+    request.Facts = BuildDiamondFacts();
+
+    decomp::LlmClientConfig config;
+    decomp::LlmChunkPlanSummary plan = decomp::SummarizeLlmChunkPlan(request, config);
+    Expect(!plan.UseChunked, "small UX plan should use single-pass analysis");
+    Expect(plan.EstimatedChunks == 1, "single-pass UX plan should report one estimated chunk");
+
+    config.ForceChunked = true;
+    plan = decomp::SummarizeLlmChunkPlan(request, config);
+    Expect(plan.UseChunked, "forced UX plan should report chunked analysis");
+    Expect(plan.EstimatedChunks >= 1, "forced UX plan should report at least one chunk");
+    Expect(plan.Reason == "force_chunked", "forced UX plan should explain chunking reason");
+
+    decomp::CallSite fatalCall;
+    fatalCall.Site = 0x1024;
+    fatalCall.Target = "snapshot!Fatal";
+    fatalCall.Kind = "direct";
+    fatalCall.Returns = false;
+    request.Facts.Calls.push_back(fatalCall);
+
+    decomp::AnalyzeResponse response;
+    response.Status = "ok";
+    response.PseudoC = "void f(void) { Fatal(); return; }";
+    response.Summary = "calls fatal helper";
+    response.Confidence = 0.88;
+
+    decomp::VerifyResponse(request, response);
+    std::vector<decomp::SuggestedFix> fixes = decomp::BuildSuggestedFixes(request, response);
+    bool foundNoReturnFix = false;
+
+    for (const decomp::SuggestedFix& fix : fixes)
+    {
+        if (fix.SwitchText == "/fix:noreturn:snapshot!Fatal")
+        {
+            foundNoReturnFix = true;
+        }
+    }
+
+    Expect(foundNoReturnFix, "suggested fixes should include conservative no-return correction");
+
+    decomp::AnalyzeRequest renameRequest;
+    renameRequest.RequestId = "ux_rename_snapshot";
+    renameRequest.Facts = BuildDiamondFacts();
+
+    decomp::PdbScopedSymbol scopedParam;
+    scopedParam.Name = "ctx";
+    scopedParam.Type = "MY_CONTEXT*";
+    scopedParam.Confidence = 0.91;
+    renameRequest.Facts.Pdb.Params.push_back(scopedParam);
+
+    decomp::AnalyzeResponse renameResponse;
+    renameResponse.Status = "ok";
+    renameResponse.PseudoC = "void f(void) { return; }";
+    renameResponse.Summary = "generic names";
+    renameResponse.Confidence = 0.75;
+
+    decomp::TypedNameConfidence genericParam;
+    genericParam.Name = "arg1";
+    genericParam.Type = "void*";
+    genericParam.Confidence = 0.60;
+    renameResponse.Params.push_back(genericParam);
+    decomp::VerifyResponse(renameRequest, renameResponse);
+    fixes = decomp::BuildSuggestedFixes(renameRequest, renameResponse);
+    bool foundRenameFix = false;
+
+    for (const decomp::SuggestedFix& fix : fixes)
+    {
+        if (fix.SwitchText == "/fix:rename:arg1=ctx")
+        {
+            foundRenameFix = true;
+        }
+    }
+
+    Expect(foundRenameFix, "suggested fixes should include PDB-backed rename correction");
+
+    decomp::AnalyzeRequest fieldRequest;
+    fieldRequest.RequestId = "ux_field_snapshot";
+    fieldRequest.Facts = BuildDiamondFacts();
+
+    decomp::ObservedMemoryHotspot hotspot;
+    hotspot.Expression = "[rcx+0x18]";
+    hotspot.Kind = "memory";
+    hotspot.ReadCount = 3;
+    hotspot.WriteCount = 1;
+    hotspot.Confidence = 0.78;
+    hotspot.Sites.push_back(0x1008);
+    fieldRequest.Facts.ObservedBehavior.MemoryHotspots.push_back(hotspot);
+
+    decomp::AnalyzeResponse fieldResponse;
+    fieldResponse.Status = "ok";
+    fieldResponse.PseudoC = "void f(void) { return; }";
+    fieldResponse.Summary = "memory hotspot";
+    fieldResponse.Confidence = 0.70;
+    decomp::VerifyResponse(fieldRequest, fieldResponse);
+    fixes = decomp::BuildSuggestedFixes(fieldRequest, fieldResponse);
+    bool foundFieldFix = false;
+
+    for (const decomp::SuggestedFix& fix : fixes)
+    {
+        if (fix.SwitchText == "/fix:field:[rcx+0x18]=TYPE")
+        {
+            foundFieldFix = true;
+        }
+    }
+
+    Expect(foundFieldFix, "suggested fixes should include repeated hotspot field correction");
+}
 }
 
 int main()
@@ -1650,6 +1762,7 @@ int main()
     TestStructuredPrototypeSchemaSnapshot();
     TestVerifierSnapshot();
     TestVerifierCoverageSnapshot();
+    TestUxHelperSnapshot();
 
     if (g_failures != 0)
     {

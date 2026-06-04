@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -54,10 +55,25 @@ struct LlmClientConfig
     PseudoCodeHighlightConfig Highlight;
 };
 
+struct LlmChunkPlanSummary
+{
+    bool UseChunked = false;
+    size_t EstimatedChunks = 1;
+    std::string Reason;
+};
+
 bool LoadLlmClientConfig(
     LlmClientConfig& config,
     std::string& error,
     bool validateProviderSettings = true);
+
+std::string BuildDefaultLlmConfigPath();
+std::string BuildDefaultChatGptAuthFilePathForConfig();
+bool PathExistsAsFile(const std::string& path);
+bool IsChatGptProviderConfig(const LlmClientConfig& config);
+LlmChunkPlanSummary SummarizeLlmChunkPlan(
+    const AnalyzeRequest& request,
+    const LlmClientConfig& config);
 
 bool AnalyzeWithLlm(
     const AnalyzeRequest& request,

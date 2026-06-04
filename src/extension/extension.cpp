@@ -18,6 +18,7 @@
 #include <cstdarg>
 #include <cstdlib>
 #include <cstdio>
+#include <ctime>
 #include <deque>
 #include <exception>
 #include <limits>
@@ -373,7 +374,8 @@ bool ShouldShowProgress(const decomp::DecompOptions& options)
         && !options.LastFactsOutput
         && !options.LastJsonOutput
         && !options.LastDataModelOutput
-        && !options.LastDebugPromptOutput;
+        && !options.LastDebugPromptOutput
+        && !options.PlanOutput;
 }
 
 void OutputProgress(IDebugControl* control, IDebugControl4* control4, const decomp::DecompOptions& options, const char* format, ...)
@@ -1025,13 +1027,41 @@ bool ApplyViewOption(const std::string& rawValue, decomp::DecompOptions& options
         return true;
     }
 
+    if (value == "plan" || value == "dry-run" || value == "dryrun")
+    {
+        options.PlanOutput = true;
+        options.DisableLlm = true;
+        return true;
+    }
+
     error = "unknown view: " + rawValue;
     return false;
 }
 
 bool ApplyLastOption(const std::string& rawValue, decomp::DecompOptions& options, std::string& error)
 {
-    const std::string value = decomp::ToLowerAscii(decomp::TrimCopy(rawValue));
+    std::string modeText = decomp::TrimCopy(rawValue);
+    const size_t indexSeparator = modeText.find(':');
+
+    if (indexSeparator != std::string::npos)
+    {
+        uint64_t parsedIndex = 0;
+        const std::string indexText = modeText.substr(0, indexSeparator);
+
+        if (decomp::TryParseUnsigned(indexText, parsedIndex))
+        {
+            if (parsedIndex == 0 || parsedIndex > 64)
+            {
+                error = "invalid cached artifact index: " + indexText;
+                return false;
+            }
+
+            options.LastCacheIndex = static_cast<uint32_t>(parsedIndex);
+            modeText = modeText.substr(indexSeparator + 1);
+        }
+    }
+
+    const std::string value = decomp::ToLowerAscii(decomp::TrimCopy(modeText));
 
     if (value == "explain")
     {
@@ -1372,8 +1402,26 @@ bool ParseCommandLine(const char* args, decomp::DecompOptions& options, std::str
             {
                 options.VerboseOutput = true;
             }
+            else if (option == "history")
+            {
+                options.HistoryOutput = true;
+            }
+            else if (option == "doctor")
+            {
+                options.DoctorOutput = true;
+            }
+            else if (option == "doctor:net")
+            {
+                options.DoctorOutput = true;
+                options.DoctorNetwork = true;
+            }
             else if (option == "no-llm")
             {
+                options.DisableLlm = true;
+            }
+            else if (option == "dry-run" || option == "dryrun" || option == "plan")
+            {
+                options.PlanOutput = true;
                 options.DisableLlm = true;
             }
             else if (option == "deep")
@@ -1463,6 +1511,8 @@ bool ParseCommandLine(const char* args, decomp::DecompOptions& options, std::str
             && !options.LastJsonOutput
             && !options.LastDataModelOutput
             && !options.LastDebugPromptOutput
+            && !options.DoctorOutput
+            && !options.HistoryOutput
             && !options.ClearUserOverrides)
         {
             error = "missing target";
@@ -5568,6 +5618,25 @@ std::vector<std::string> g_userFieldOverrides;
 std::vector<std::string> g_userRenameOverrides;
 bool g_baseNoReturnOverrideCaptured = false;
 std::string g_baseNoReturnOverrideEnvironment;
+
+struct CachedAnalyzeArtifact
+{
+    std::string RequestJson;
+    std::string ResponseJson;
+    std::string DataModelJson;
+    std::string DebugPromptDump;
+    std::string Target;
+    std::string Module;
+    std::string Provider;
+    std::string RequestId;
+    std::string Timestamp;
+    uint64_t EntryAddress = 0;
+    double Confidence = 0.0;
+    size_t VerifierIssueCount = 0;
+};
+
+constexpr size_t kAnalyzeHistoryLimit = 8;
+std::deque<CachedAnalyzeArtifact> g_analyzeHistory;
 std::string g_lastRequestJson;
 std::string g_lastResponseJson;
 std::string g_lastDataModelJson;
@@ -5825,54 +5894,344 @@ std::string BuildDataModelSnapshotJson(
     return json;
 }
 
+std::string BuildCacheTimestamp()
+{
+    const std::time_t now = std::time(nullptr);
+    std::tm localTime = {};
+    std::array<char, 32> buffer = {};
+
+    if (localtime_s(&localTime, &now) != 0)
+    {
+        return "unknown";
+    }
+
+    std::snprintf(
+        buffer.data(),
+        buffer.size(),
+        "%04d-%02d-%02d %02d:%02d:%02d",
+        localTime.tm_year + 1900,
+        localTime.tm_mon + 1,
+        localTime.tm_mday,
+        localTime.tm_hour,
+        localTime.tm_min,
+        localTime.tm_sec);
+    return buffer.data();
+}
+
+void StoreCachedAnalyzeResult(
+    const decomp::AnalyzeRequest& request,
+    const decomp::AnalyzeResponse& response)
+{
+    CachedAnalyzeArtifact artifact;
+    artifact.RequestJson = decomp::SerializeAnalyzeRequest(request, true);
+    artifact.ResponseJson = decomp::SerializeAnalyzeResponse(response, true);
+    artifact.DataModelJson = BuildDataModelSnapshotJson(request, response);
+    artifact.DebugPromptDump = decomp::BuildDebugPromptDump(request);
+    artifact.Target = request.Facts.QueryText;
+    artifact.Module = request.Facts.Module.ModuleName;
+    artifact.Provider = response.Provider;
+    artifact.RequestId = request.RequestId;
+    artifact.Timestamp = BuildCacheTimestamp();
+    artifact.EntryAddress = request.Facts.EntryAddress;
+    artifact.Confidence = response.Verifier.AdjustedConfidence;
+    artifact.VerifierIssueCount = response.Verifier.Issues.size();
+
+    g_lastRequestJson = artifact.RequestJson;
+    g_lastResponseJson = artifact.ResponseJson;
+    g_lastDataModelJson = artifact.DataModelJson;
+    g_lastDebugPromptDump = artifact.DebugPromptDump;
+
+    g_analyzeHistory.push_front(std::move(artifact));
+
+    while (g_analyzeHistory.size() > kAnalyzeHistoryLimit)
+    {
+        g_analyzeHistory.pop_back();
+    }
+}
+
+const CachedAnalyzeArtifact* GetCachedAnalyzeArtifact(uint32_t index)
+{
+    if (index == 0 || index > g_analyzeHistory.size())
+    {
+        return nullptr;
+    }
+
+    return &g_analyzeHistory[static_cast<size_t>(index - 1)];
+}
+
+void PrintAnalyzeHistory(IDebugControl* control, IDebugControl4* control4)
+{
+    if (g_analyzeHistory.empty())
+    {
+        OutputLine(control, control4, "history: no cached !decomp results\n");
+        return;
+    }
+
+    OutputLine(control, control4, "history:\n");
+    OutputLine(control, control4, "index  timestamp            entry       confidence  issues  provider  target  request_id\n");
+
+    for (size_t index = 0; index < g_analyzeHistory.size(); ++index)
+    {
+        const CachedAnalyzeArtifact& artifact = g_analyzeHistory[index];
+        OutputLine(
+            control,
+            control4,
+            "%5llu  %-19s  %-10s  %.2f        %5llu  %s  %s  %s\n",
+            static_cast<unsigned long long>(index + 1),
+            artifact.Timestamp.c_str(),
+            decomp::HexU64(artifact.EntryAddress).c_str(),
+            artifact.Confidence,
+            static_cast<unsigned long long>(artifact.VerifierIssueCount),
+            artifact.Provider.c_str(),
+            artifact.Target.c_str(),
+            artifact.RequestId.c_str());
+    }
+}
+
 void PrintUsage(IDebugControl* control, IDebugControl4* control4)
 {
-    OutputLine(control, control4, "usage: !decomp [/verbose] [/view:brief|explain|json|facts|prompt|data|analyzer] [/last:explain|facts|json|data|prompt] [/limit:deep|huge|N] [/timeout:N] <addr|module!symbol>\n");
+    OutputLine(control, control4, "usage: !decomp [/verbose] [/doctor] [/history] [/view:brief|explain|json|facts|prompt|data|analyzer|plan] [/last[:N]:explain|facts|json|data|prompt] [/limit:deep|huge|N] [/timeout:N] <addr|module!symbol>\n");
     OutputLine(control, control4, "fix  : /fix:noreturn:name /fix:type:expr=TYPE /fix:field:expr=TYPE /fix:rename:old=new /fix:clear\n");
     OutputLine(control, control4, "compat: legacy switches such as /brief, /json, /facts-only, /debug-prompt, /data-model, /last-json, /deep, and /noreturn: still work\n");
     OutputLine(control, control4, "cfg  : decomp.llm.json beside decomp.dll\n");
     OutputLine(control, control4, "env  : DECOMP_LLM_*, OPENAI_API_KEY may override config values\n");
 }
 
+std::string YesNo(bool value)
+{
+    return value ? "yes" : "no";
+}
+
+std::string SanitizeEndpointForDisplay(const std::string& endpoint)
+{
+    std::string sanitized = endpoint;
+    const size_t scheme = sanitized.find("://");
+    const size_t authorityStart = scheme == std::string::npos ? 0 : scheme + 3;
+    const size_t at = sanitized.find('@', authorityStart);
+    const size_t slash = sanitized.find('/', authorityStart);
+
+    if (at != std::string::npos && (slash == std::string::npos || at < slash))
+    {
+        sanitized = sanitized.substr(0, authorityStart) + "<credentials-redacted>" + sanitized.substr(at);
+    }
+
+    const size_t query = sanitized.find('?');
+
+    if (query != std::string::npos)
+    {
+        sanitized = sanitized.substr(0, query) + "?<redacted>";
+    }
+
+    return sanitized;
+}
+
+std::string ReadEnvironmentVariableForDoctor(const char* name)
+{
+    const DWORD size = GetEnvironmentVariableA(name, nullptr, 0);
+
+    if (size == 0)
+    {
+        return std::string();
+    }
+
+    std::string value(static_cast<size_t>(size), '\0');
+    GetEnvironmentVariableA(name, value.data(), size);
+
+    if (!value.empty() && value.back() == '\0')
+    {
+        value.pop_back();
+    }
+
+    return value;
+}
+
+std::string ProcessorTypeToString(ULONG processor)
+{
+    switch (processor)
+    {
+    case IMAGE_FILE_MACHINE_AMD64:
+        return "x64";
+    case IMAGE_FILE_MACHINE_I386:
+        return "x86";
+    case IMAGE_FILE_MACHINE_ARM64:
+        return "arm64";
+    default:
+        return "unknown(" + std::to_string(processor) + ")";
+    }
+}
+
+void PrintDoctorOutput(const DebugApi& api, const decomp::DecompOptions& options)
+{
+    std::string error;
+    decomp::LlmClientConfig config;
+    const std::string configPath = decomp::BuildDefaultLlmConfigPath();
+    const bool configPresent = decomp::PathExistsAsFile(configPath);
+    const bool configLoaded = decomp::LoadLlmClientConfig(config, error, false);
+    const bool chatGptProvider = configLoaded && decomp::IsChatGptProviderConfig(config);
+    const bool dmlAware = AreOutputCallbacksDmlAware(api.Advanced2.Get());
+    const decomp::SessionPolicyFacts session = BuildSessionPolicyFacts(api.Control.Get());
+    ULONG processor = 0;
+    const bool processorKnown = api.Control.Get() != nullptr
+        && SUCCEEDED(api.Control->GetEffectiveProcessorType(&processor));
+
+    OutputLine(api.Control.Get(), api.Control4.Get(), "doctor:\n");
+    OutputLine(api.Control.Get(), api.Control4.Get(), "config_path : %s\n", configPath.c_str());
+    OutputLine(api.Control.Get(), api.Control4.Get(), "config_file : %s\n", configPresent ? "present" : "missing (DECOMP_DOCTOR_CONFIG_MISSING)");
+
+    if (!configLoaded)
+    {
+        OutputLine(api.Control.Get(), api.Control4.Get(), "config_load : error (DECOMP_DOCTOR_CONFIG_INVALID) %s\n", error.c_str());
+    }
+    else
+    {
+        OutputLine(api.Control.Get(), api.Control4.Get(), "config_load : ok\n");
+        OutputLine(api.Control.Get(), api.Control4.Get(), "provider    : %s\n", config.Provider.c_str());
+        OutputLine(api.Control.Get(), api.Control4.Get(), "model       : %s\n", config.Model.c_str());
+        const std::string endpointDisplay = config.Endpoint.empty() ? std::string("<mock>") : SanitizeEndpointForDisplay(config.Endpoint);
+        OutputLine(api.Control.Get(), api.Control4.Get(), "endpoint    : %s\n", endpointDisplay.c_str());
+        OutputLine(api.Control.Get(), api.Control4.Get(), "timeout_ms  : %u\n", config.TimeoutMs);
+        OutputLine(api.Control.Get(), api.Control4.Get(), "tokens      : max=%u chunk=%u merge=%u\n", config.MaxCompletionTokens, config.ChunkCompletionTokens, config.MergeCompletionTokens);
+        OutputLine(
+            api.Control.Get(),
+            api.Control4.Get(),
+            "chunking    : force=%s trigger_instructions=%u trigger_blocks=%u block_limit=%u count_limit=%u\n",
+            YesNo(config.ForceChunked).c_str(),
+            config.ChunkTriggerInstructions,
+            config.ChunkTriggerBlocks,
+            config.ChunkBlockLimit,
+            config.ChunkCountLimit);
+
+        if (chatGptProvider)
+        {
+            const std::string authPath = config.ChatGptAuthFile.empty()
+                ? decomp::BuildDefaultChatGptAuthFilePathForConfig()
+                : config.ChatGptAuthFile;
+            const bool envToken = !ReadEnvironmentVariableForDoctor("DECOMP_LLM_CHATGPT_ACCESS_TOKEN").empty()
+                || !ReadEnvironmentVariableForDoctor("DECOMP_LLM_CODEX_ACCESS_TOKEN").empty()
+                || !ReadEnvironmentVariableForDoctor("KERNFORGE_CODEX_ACCESS_TOKEN").empty();
+
+            OutputLine(api.Control.Get(), api.Control4.Get(), "chatgpt_auth_file : %s\n", authPath.empty() ? "<unavailable>" : authPath.c_str());
+            OutputLine(api.Control.Get(), api.Control4.Get(), "chatgpt_auth_seen : access_token=%s env_token=%s auth_file=%s\n", YesNo(!config.ApiKey.empty()).c_str(), YesNo(envToken).c_str(), YesNo(decomp::PathExistsAsFile(authPath)).c_str());
+        }
+        else
+        {
+            const bool apiKeyEnv = !ReadEnvironmentVariableForDoctor("DECOMP_LLM_API_KEY").empty()
+                || !ReadEnvironmentVariableForDoctor("OPENAI_API_KEY").empty();
+            OutputLine(api.Control.Get(), api.Control4.Get(), "api_key_seen : configured=%s env=%s\n", YesNo(!config.ApiKey.empty()).c_str(), YesNo(apiKeyEnv).c_str());
+        }
+    }
+
+    OutputLine(api.Control.Get(), api.Control4.Get(), "dml         : %s\n", dmlAware ? "available" : "plain-text fallback");
+    OutputLine(api.Control.Get(), api.Control4.Get(), "session     : class=%s qualifier=%s execution=%s strategy=%s\n", session.DebugClass.c_str(), session.Qualifier.c_str(), session.ExecutionKind.c_str(), session.AnalysisStrategy.c_str());
+
+    if (processorKnown)
+    {
+        OutputLine(api.Control.Get(), api.Control4.Get(), "processor   : %s\n", ProcessorTypeToString(processor).c_str());
+
+        if (processor != IMAGE_FILE_MACHINE_AMD64)
+        {
+            OutputLine(api.Control.Get(), api.Control4.Get(), "warning     : DECOMP_DOCTOR_ARCH_UNSUPPORTED expected x64 target analysis\n");
+        }
+    }
+    else
+    {
+        OutputLine(api.Control.Get(), api.Control4.Get(), "processor   : unknown (DECOMP_DOCTOR_PROCESSOR_UNKNOWN)\n");
+    }
+
+    OutputLine(api.Control.Get(), api.Control4.Get(), "pdb         : target-specific; run !decomp /view:plan <target> to inspect symbol enrichment\n");
+
+    if (options.DoctorNetwork)
+    {
+        OutputLine(api.Control.Get(), api.Control4.Get(), "network     : skipped (DECOMP_DOCTOR_NET_SKIPPED) provider ping is not executed by /doctor\n");
+    }
+}
+
+void PrintPlanOutput(
+    const decomp::AnalyzeRequest& request,
+    const decomp::LlmClientConfig& llmConfig,
+    const decomp::DecompOptions& options,
+    IDebugControl* control,
+    IDebugControl4* control4)
+{
+    const decomp::LlmChunkPlanSummary chunkPlan = decomp::SummarizeLlmChunkPlan(request, llmConfig);
+    const std::string promptDump = decomp::BuildDebugPromptDump(request);
+    std::vector<std::string> recommendations;
+
+    if (request.Facts.Instructions.empty())
+    {
+        recommendations.push_back("DECOMP_PLAN_NO_INSTRUCTIONS: target resolved but no instructions were recovered");
+    }
+
+    if (request.Facts.Instructions.size() >= options.MaxInstructions)
+    {
+        recommendations.push_back("DECOMP_PLAN_LIMIT_REACHED: rerun with /limit:deep, /limit:huge, or /limit:N if the function was truncated");
+    }
+
+    if (request.Facts.Pdb.Availability == "none")
+    {
+        recommendations.push_back("DECOMP_PLAN_PDB_NONE: load private symbols/PDBs for better names, types, fields, and source lines");
+    }
+
+    if (chunkPlan.UseChunked && llmConfig.TimeoutMs < 60000)
+    {
+        recommendations.push_back("DECOMP_PLAN_TIMEOUT_LOW: use /timeout:120000 or raise timeout_ms for chunked cloud analysis");
+    }
+
+    if (chunkPlan.UseChunked && chunkPlan.EstimatedChunks >= llmConfig.ChunkCountLimit)
+    {
+        recommendations.push_back("DECOMP_PLAN_CHUNK_LIMIT: raise chunk_count_limit before lowering /limit if quality matters");
+    }
+
+    if (llmConfig.Endpoint.empty())
+    {
+        recommendations.push_back("DECOMP_PLAN_MOCK_PROVIDER: configure endpoint/provider before expecting LLM pseudo-code");
+    }
+
+    OutputLine(control, control4, "plan:\n");
+    OutputLine(control, control4, "target      : %s\n", request.Facts.QueryText.c_str());
+    OutputLine(control, control4, "entry       : %s\n", decomp::HexU64(request.Facts.EntryAddress).c_str());
+    OutputLine(control, control4, "query       : %s\n", decomp::HexU64(request.Facts.QueryAddress).c_str());
+    OutputLine(control, control4, "module      : %s\n", request.Facts.Module.ModuleName.c_str());
+    OutputLine(control, control4, "regions     : %llu\n", static_cast<unsigned long long>(request.Facts.Regions.size()));
+    OutputLine(control, control4, "instructions: %llu / limit %u\n", static_cast<unsigned long long>(request.Facts.Instructions.size()), options.MaxInstructions);
+    OutputLine(control, control4, "blocks      : %llu\n", static_cast<unsigned long long>(request.Facts.Blocks.size()));
+    OutputLine(control, control4, "calls       : direct=%llu indirect=%llu targets=%llu\n", static_cast<unsigned long long>(request.Facts.Calls.size()), static_cast<unsigned long long>(request.Facts.IndirectCalls.size()), static_cast<unsigned long long>(request.Facts.CallTargets.size()));
+    OutputLine(control, control4, "pdb         : availability=%s scope=%s params=%llu locals=%llu fields=%llu enums=%llu\n", request.Facts.Pdb.Availability.c_str(), request.Facts.Pdb.ScopeKind.c_str(), static_cast<unsigned long long>(request.Facts.Pdb.Params.size()), static_cast<unsigned long long>(request.Facts.Pdb.Locals.size()), static_cast<unsigned long long>(request.Facts.Pdb.FieldHints.size()), static_cast<unsigned long long>(request.Facts.Pdb.EnumHints.size()));
+    OutputLine(control, control4, "session     : %s/%s class=%s qualifier=%s\n", request.Facts.SessionPolicy.ExecutionKind.c_str(), request.Facts.SessionPolicy.AnalysisStrategy.c_str(), request.Facts.SessionPolicy.DebugClass.c_str(), request.Facts.SessionPolicy.Qualifier.c_str());
+    const std::string endpointDisplay = llmConfig.Endpoint.empty() ? std::string("<mock>") : SanitizeEndpointForDisplay(llmConfig.Endpoint);
+    OutputLine(control, control4, "llm         : provider=%s model=%s endpoint=%s timeout_ms=%u\n", llmConfig.Provider.c_str(), llmConfig.Model.c_str(), endpointDisplay.c_str(), llmConfig.TimeoutMs);
+    OutputLine(control, control4, "chunking    : use=%s estimated_chunks=%llu reason=%s block_limit=%u count_limit=%u\n", YesNo(chunkPlan.UseChunked).c_str(), static_cast<unsigned long long>(chunkPlan.EstimatedChunks), chunkPlan.Reason.c_str(), llmConfig.ChunkBlockLimit, llmConfig.ChunkCountLimit);
+    OutputLine(control, control4, "prompt      : dump_chars=%llu facts=%llu evidence_nodes=%llu evidence_edges=%llu\n", static_cast<unsigned long long>(promptDump.size()), static_cast<unsigned long long>(request.Facts.Facts.size()), static_cast<unsigned long long>(request.Facts.EvidenceGraph.Nodes.size()), static_cast<unsigned long long>(request.Facts.EvidenceGraph.Edges.size()));
+
+    OutputLine(control, control4, "\nrecommendations:\n");
+
+    if (recommendations.empty())
+    {
+        OutputLine(control, control4, "- none\n");
+        return;
+    }
+
+    for (const std::string& recommendation : recommendations)
+    {
+        OutputLine(control, control4, "- %s\n", recommendation.c_str());
+    }
+}
+
 void PrintFactsOnly(
     const decomp::AnalyzeRequest& request,
     IDebugControl* control,
-    IDebugControl4* control4,
-    IDebugAdvanced2* advanced2)
+    IDebugControl4* control4)
 {
     OutputLine(control, control4, "%s\n", decomp::SerializeAnalyzeRequest(request, true).c_str());
-
-    if (!request.Facts.Blocks.empty())
-    {
-        OutputLine(control, control4, "\nlinks:\n");
-
-        for (const auto& block : request.Facts.Blocks)
-        {
-            OutputDmlLine(
-                control,
-                control4,
-                advanced2,
-                "- " + block.Id + " " + decomp::HexU64(block.StartAddress) + "-" + decomp::HexU64(block.EndAddress),
-                BuildDisassembleCommand(block.StartAddress, block.EndAddress));
-        }
-    }
 }
 
 void PrintDataModelOutput(
     const decomp::AnalyzeRequest& request,
     const decomp::AnalyzeResponse& response,
     IDebugControl* control,
-    IDebugControl4* control4,
-    IDebugAdvanced2* advanced2)
+    IDebugControl4* control4)
 {
-    OutputLine(control, control4, "%s", BuildDataModelSnapshotJson(request, response).c_str());
-
-    if (request.Facts.EntryAddress != 0)
-    {
-        OutputLine(control, control4, "\nautomation links:\n");
-        OutputDmlLine(control, control4, advanced2, "- disassemble entry", BuildDisassembleCommand(request.Facts.EntryAddress, request.Facts.EntryAddress + 0x40));
-        OutputDmlLine(control, control4, advanced2, "- break on entry", "bp " + decomp::HexU64(request.Facts.EntryAddress));
-    }
+    OutputLine(control, control4, "%s\n", BuildDataModelSnapshotJson(request, response).c_str());
 }
 
 std::string BuildBlockNavigationCommand(const decomp::AnalysisFacts& facts, const std::string& blockId)
@@ -6068,6 +6427,47 @@ void PrintLinkedIssueLine(
     OutputDmlLine(control, control4, advanced2, text, command);
 }
 
+void PrintSuggestedFixes(
+    const decomp::AnalyzeRequest& request,
+    const decomp::AnalyzeResponse& response,
+    IDebugControl* control,
+    IDebugControl4* control4,
+    IDebugAdvanced2* advanced2)
+{
+    const std::vector<decomp::SuggestedFix> fixes = decomp::BuildSuggestedFixes(request, response);
+
+    if (fixes.empty())
+    {
+        return;
+    }
+
+    OutputLine(control, control4, "\nsuggested fixes:\n");
+
+    for (const decomp::SuggestedFix& fix : fixes)
+    {
+        std::string label = "- " + fix.SwitchText + " [" + fix.Kind + "] " + fix.Reason;
+
+        if (!fix.Evidence.empty())
+        {
+            label += " (" + fix.Evidence + ")";
+        }
+
+        if (fix.Site != 0)
+        {
+            label += " site=" + decomp::HexU64(fix.Site);
+        }
+
+        if (fix.SwitchText.find("=TYPE") != std::string::npos)
+        {
+            OutputLine(control, control4, "%s\n", label.c_str());
+            continue;
+        }
+
+        const std::string command = "!decomp " + fix.SwitchText + " " + QuoteCommandArgument(request.Facts.QueryText);
+        OutputDmlLine(control, control4, advanced2, label, command);
+    }
+}
+
 void PrintActionLinks(
     const decomp::AnalyzeRequest& request,
     IDebugControl* control,
@@ -6089,6 +6489,8 @@ void PrintActionLinks(
         + BuildDmlLink("prompt", "!decomp /last:prompt")
         + " "
         + BuildDmlLink("data-model", "!decomp /last:data")
+        + " "
+        + BuildDmlLink("history", "!decomp /history")
         + "\n");
 
     OutputDmlRaw(control, control4, "nav         : "
@@ -6274,13 +6676,13 @@ void PrintResponse(
 
     if (options.FactsOnlyOutput)
     {
-        PrintFactsOnly(request, control, control4, advanced2);
+        PrintFactsOnly(request, control, control4);
         return;
     }
 
     if (options.DataModelOutput)
     {
-        PrintDataModelOutput(request, response, control, control4, advanced2);
+        PrintDataModelOutput(request, response, control, control4);
         return;
     }
 
@@ -6362,6 +6764,8 @@ void PrintResponse(
         }
     }
 
+    PrintSuggestedFixes(request, response, control, control4, advanced2);
+
     if (options.ExplainOutput)
     {
         PrintExplainOutput(request, response, control, control4, advanced2);
@@ -6375,34 +6779,33 @@ bool PrintCachedAnalyzeResult(
     decomp::DecompOptions options,
     std::string& error)
 {
-    if (g_lastRequestJson.empty() || g_lastResponseJson.empty())
+    const CachedAnalyzeArtifact* artifact = GetCachedAnalyzeArtifact(options.LastCacheIndex);
+
+    if (artifact == nullptr)
     {
-        error = "no previous !decomp result is cached";
+        error = "no cached !decomp result at history index " + std::to_string(options.LastCacheIndex);
         return false;
     }
 
     decomp::AnalyzeRequest cachedRequest;
     decomp::AnalyzeResponse cachedResponse;
 
-    if (!decomp::ParseAnalyzeRequest(g_lastRequestJson, cachedRequest, error))
+    if (!decomp::ParseAnalyzeRequest(artifact->RequestJson, cachedRequest, error))
     {
         error = "failed to parse cached request: " + error;
         return false;
     }
 
-    if (!decomp::ParseAnalyzeResponse(g_lastResponseJson, cachedResponse, error))
+    if (!decomp::ParseAnalyzeResponse(artifact->ResponseJson, cachedResponse, error))
     {
         error = "failed to parse cached response: " + error;
         return false;
     }
 
     decomp::LlmClientConfig displayConfig;
+    std::string displayConfigError;
 
-    if (!decomp::LoadLlmClientConfig(displayConfig, error, false))
-    {
-        error = "cached display config load failed: " + error;
-        return false;
-    }
+    decomp::LoadLlmClientConfig(displayConfig, displayConfigError, false);
 
     if (options.LastExplainOutput)
     {
@@ -6477,6 +6880,26 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
             return E_INVALIDARG;
         }
 
+        if (options.DoctorOutput)
+        {
+            PrintDoctorOutput(api, options);
+
+            if (target.empty())
+            {
+                return S_OK;
+            }
+        }
+
+        if (options.HistoryOutput)
+        {
+            PrintAnalyzeHistory(api.Control.Get(), api.Control4.Get());
+
+            if (target.empty())
+            {
+                return S_OK;
+            }
+        }
+
         if (options.ClearUserOverrides)
         {
             ApplyNoReturnOverrideEnvironment(options);
@@ -6496,58 +6919,52 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
                 return E_FAIL;
             }
 
-            if (target.empty())
-            {
-                return S_OK;
-            }
+            return S_OK;
         }
 
         if (options.LastJsonOutput)
         {
-            if (g_lastRequestJson.empty() && g_lastResponseJson.empty())
+            const CachedAnalyzeArtifact* artifact = GetCachedAnalyzeArtifact(options.LastCacheIndex);
+
+            if (artifact == nullptr)
             {
-                OutputLine(api.Control.Get(), api.Control4.Get(), "error: no previous !decomp result is cached\n");
+                OutputLine(api.Control.Get(), api.Control4.Get(), "error: no cached !decomp result at history index %u\n", options.LastCacheIndex);
                 return E_FAIL;
             }
 
-            OutputLine(api.Control.Get(), api.Control4.Get(), "%s\n%s\n", g_lastRequestJson.c_str(), g_lastResponseJson.c_str());
+            OutputLine(api.Control.Get(), api.Control4.Get(), "%s\n%s\n", artifact->RequestJson.c_str(), artifact->ResponseJson.c_str());
 
-            if (target.empty())
-            {
-                return S_OK;
-            }
+            return S_OK;
         }
 
         if (options.LastDataModelOutput)
         {
-            if (g_lastDataModelJson.empty())
+            const CachedAnalyzeArtifact* artifact = GetCachedAnalyzeArtifact(options.LastCacheIndex);
+
+            if (artifact == nullptr)
             {
-                OutputLine(api.Control.Get(), api.Control4.Get(), "error: no previous !decomp data model snapshot is cached\n");
+                OutputLine(api.Control.Get(), api.Control4.Get(), "error: no cached !decomp data model snapshot at history index %u\n", options.LastCacheIndex);
                 return E_FAIL;
             }
 
-            OutputLine(api.Control.Get(), api.Control4.Get(), "%s\n", g_lastDataModelJson.c_str());
+            OutputLine(api.Control.Get(), api.Control4.Get(), "%s\n", artifact->DataModelJson.c_str());
 
-            if (target.empty())
-            {
-                return S_OK;
-            }
+            return S_OK;
         }
 
         if (options.LastDebugPromptOutput)
         {
-            if (g_lastDebugPromptDump.empty())
+            const CachedAnalyzeArtifact* artifact = GetCachedAnalyzeArtifact(options.LastCacheIndex);
+
+            if (artifact == nullptr && (options.LastCacheIndex != 1 || g_lastDebugPromptDump.empty()))
             {
-                OutputLine(api.Control.Get(), api.Control4.Get(), "error: no previous !decomp prompt dump is cached\n");
+                OutputLine(api.Control.Get(), api.Control4.Get(), "error: no cached !decomp prompt dump at history index %u\n", options.LastCacheIndex);
                 return E_FAIL;
             }
 
-            OutputLine(api.Control.Get(), api.Control4.Get(), "%s\n", g_lastDebugPromptDump.c_str());
+            OutputLine(api.Control.Get(), api.Control4.Get(), "%s\n", artifact == nullptr ? g_lastDebugPromptDump.c_str() : artifact->DebugPromptDump.c_str());
 
-            if (target.empty())
-            {
-                return S_OK;
-            }
+            return S_OK;
         }
 
         ApplyNoReturnOverrideEnvironment(options);
@@ -6728,6 +7145,25 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
             return E_ABORT;
         }
 
+        if (options.PlanOutput)
+        {
+            decomp::LlmClientConfig planConfig;
+            std::string planConfigError;
+
+            if (!decomp::LoadLlmClientConfig(planConfig, planConfigError, false))
+            {
+                OutputLine(api.Control.Get(), api.Control4.Get(), "warning: plan config load failed (DECOMP_PLAN_CONFIG_INVALID): %s\n", planConfigError.c_str());
+            }
+
+            if (options.TimeoutMs != 5000 || planConfig.TimeoutMs == 5000)
+            {
+                planConfig.TimeoutMs = options.TimeoutMs;
+            }
+
+            PrintPlanOutput(request, planConfig, options, api.Control.Get(), api.Control4.Get());
+            return S_OK;
+        }
+
         if (options.DebugPromptOutput)
         {
             OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "building prompt dump without LLM request");
@@ -6757,7 +7193,8 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
                 llmConfig.TimeoutMs = options.TimeoutMs;
             }
 
-            OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "starting LLM analysis endpoint=%s model=%s timeout_ms=%u", llmConfig.Endpoint.empty() ? "<mock>" : llmConfig.Endpoint.c_str(), llmConfig.Model.c_str(), llmConfig.TimeoutMs);
+            const std::string endpointDisplay = llmConfig.Endpoint.empty() ? std::string("<mock>") : SanitizeEndpointForDisplay(llmConfig.Endpoint);
+            OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "starting LLM analysis endpoint=%s model=%s timeout_ms=%u", endpointDisplay.c_str(), llmConfig.Model.c_str(), llmConfig.TimeoutMs);
             OutputProgress(
                 api.Control.Get(),
                 api.Control4.Get(),
@@ -6805,10 +7242,7 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
             return E_ABORT;
         }
 
-        g_lastRequestJson = decomp::SerializeAnalyzeRequest(request, true);
-        g_lastResponseJson = decomp::SerializeAnalyzeResponse(response, true);
-        g_lastDataModelJson = BuildDataModelSnapshotJson(request, response);
-        g_lastDebugPromptDump = decomp::BuildDebugPromptDump(request);
+        StoreCachedAnalyzeResult(request, response);
         OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "printing response");
         PrintResponse(request, response, displayConfig, api.Control.Get(), api.Control4.Get(), api.Advanced2.Get(), options);
         return S_OK;
