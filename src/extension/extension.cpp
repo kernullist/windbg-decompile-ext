@@ -21,6 +21,7 @@
 #include <ctime>
 #include <deque>
 #include <exception>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -5619,6 +5620,26 @@ std::vector<std::string> g_userRenameOverrides;
 bool g_baseNoReturnOverrideCaptured = false;
 std::string g_baseNoReturnOverrideEnvironment;
 
+struct KernelBuildFacts
+{
+    bool Available = false;
+    bool HasSystemVersion = false;
+    bool HasWin32Version = false;
+    bool HasKdVersion = false;
+    std::string DebugClass;
+    std::string Qualifier;
+    uint32_t PlatformId = 0;
+    uint32_t Win32Major = 0;
+    uint32_t Win32Minor = 0;
+    uint32_t KdMajor = 0;
+    uint32_t KdMinor = 0;
+    std::string ServicePack;
+    uint32_t ServicePackNumber = 0;
+    std::string BuildString;
+    std::string BuildLab;
+    std::string Fingerprint;
+};
+
 struct CachedAnalyzeArtifact
 {
     std::string RequestJson;
@@ -5630,7 +5651,11 @@ struct CachedAnalyzeArtifact
     std::string Provider;
     std::string RequestId;
     std::string Timestamp;
+    std::string ArtifactPath;
+    KernelBuildFacts KernelBuild;
     uint64_t EntryAddress = 0;
+    uint64_t EntryRva = 0;
+    bool HasEntryRva = false;
     double Confidence = 0.0;
     size_t VerifierIssueCount = 0;
 };
@@ -5894,6 +5919,954 @@ std::string BuildDataModelSnapshotJson(
     return json;
 }
 
+std::string FormatWin32Error(DWORD error)
+{
+    return "win32 error " + std::to_string(error);
+}
+
+std::string ReadEnvironmentVariableValue(const char* name)
+{
+    const DWORD size = GetEnvironmentVariableA(name, nullptr, 0);
+
+    if (size == 0)
+    {
+        return std::string();
+    }
+
+    std::string value(static_cast<size_t>(size), '\0');
+    GetEnvironmentVariableA(name, value.data(), size);
+
+    if (!value.empty() && value.back() == '\0')
+    {
+        value.pop_back();
+    }
+
+    return value;
+}
+
+bool IsPathSeparator(char ch)
+{
+    return ch == '\\' || ch == '/';
+}
+
+std::string TrimTrailingPathSeparators(std::string path)
+{
+    while (path.size() > 3 && IsPathSeparator(path.back()))
+    {
+        path.pop_back();
+    }
+
+    return path;
+}
+
+std::string JoinPath(const std::string& left, const std::string& right)
+{
+    if (left.empty())
+    {
+        return right;
+    }
+
+    if (right.empty())
+    {
+        return left;
+    }
+
+    if (IsPathSeparator(left.back()))
+    {
+        return left + right;
+    }
+
+    return left + "\\" + right;
+}
+
+std::string ExpandArtifactPath(const std::string& rawPath)
+{
+    std::string expanded = decomp::TrimCopy(rawPath);
+
+    if (expanded.empty())
+    {
+        return expanded;
+    }
+
+    if (expanded == "~" || decomp::StartsWithInsensitive(expanded, "~/") || decomp::StartsWithInsensitive(expanded, "~\\"))
+    {
+        const std::string home = ReadEnvironmentVariableValue("USERPROFILE");
+
+        if (!home.empty())
+        {
+            expanded = expanded.size() == 1 ? home : home + expanded.substr(1);
+        }
+    }
+
+    const DWORD required = ExpandEnvironmentStringsA(expanded.c_str(), nullptr, 0);
+
+    if (required == 0)
+    {
+        return expanded;
+    }
+
+    std::string buffer(static_cast<size_t>(required), '\0');
+
+    if (ExpandEnvironmentStringsA(expanded.c_str(), buffer.data(), required) == 0)
+    {
+        return expanded;
+    }
+
+    if (!buffer.empty() && buffer.back() == '\0')
+    {
+        buffer.pop_back();
+    }
+
+    return buffer;
+}
+
+std::string GetParentPath(const std::string& path)
+{
+    const size_t slash = path.find_last_of("\\/");
+
+    if (slash == std::string::npos)
+    {
+        return std::string();
+    }
+
+    if (slash == 2 && path.size() >= 3 && path[1] == ':')
+    {
+        return path.substr(0, 3);
+    }
+
+    return path.substr(0, slash);
+}
+
+size_t FindDirectoryCreationStart(const std::string& path)
+{
+    if (path.size() >= 3 && path[1] == ':' && IsPathSeparator(path[2]))
+    {
+        return 3;
+    }
+
+    if (path.size() >= 2 && IsPathSeparator(path[0]) && IsPathSeparator(path[1]))
+    {
+        const size_t serverEnd = path.find_first_of("\\/", 2);
+
+        if (serverEnd == std::string::npos)
+        {
+            return path.size();
+        }
+
+        const size_t shareEnd = path.find_first_of("\\/", serverEnd + 1);
+
+        if (shareEnd == std::string::npos)
+        {
+            return path.size();
+        }
+
+        return shareEnd + 1;
+    }
+
+    return 0;
+}
+
+bool EnsureDirectoryTree(const std::string& rawPath, std::string& error)
+{
+    std::string path = TrimTrailingPathSeparators(rawPath);
+
+    if (path.empty())
+    {
+        return true;
+    }
+
+    std::replace(path.begin(), path.end(), '/', '\\');
+
+    const DWORD attributes = GetFileAttributesA(path.c_str());
+
+    if (attributes != INVALID_FILE_ATTRIBUTES)
+    {
+        if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        {
+            return true;
+        }
+
+        error = "path exists but is not a directory: " + path;
+        return false;
+    }
+
+    const size_t start = FindDirectoryCreationStart(path);
+
+    for (size_t index = start; index <= path.size(); ++index)
+    {
+        if (index != path.size() && !IsPathSeparator(path[index]))
+        {
+            continue;
+        }
+
+        const std::string part = path.substr(0, index);
+
+        if (part.empty())
+        {
+            continue;
+        }
+
+        const DWORD partAttributes = GetFileAttributesA(part.c_str());
+
+        if (partAttributes != INVALID_FILE_ATTRIBUTES)
+        {
+            if ((partAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            {
+                error = "path exists but is not a directory: " + part;
+                return false;
+            }
+
+            continue;
+        }
+
+        if (CreateDirectoryA(part.c_str(), nullptr) == FALSE)
+        {
+            const DWORD createError = GetLastError();
+
+            if (createError != ERROR_ALREADY_EXISTS)
+            {
+                error = "failed to create directory " + part + ": " + FormatWin32Error(createError);
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+bool WriteTextFileAtomic(const std::string& path, const std::string& text, std::string& error)
+{
+    const std::string parent = GetParentPath(path);
+
+    if (!parent.empty() && !EnsureDirectoryTree(parent, error))
+    {
+        return false;
+    }
+
+    const std::string tempPath = path + ".tmp." + decomp::MakeRequestId();
+
+    {
+        std::ofstream stream(tempPath, std::ios::binary | std::ios::trunc);
+
+        if (!stream)
+        {
+            error = "failed to open temp artifact for write: " + tempPath;
+            return false;
+        }
+
+        stream.write(text.data(), static_cast<std::streamsize>(text.size()));
+        stream.close();
+
+        if (!stream)
+        {
+            DeleteFileA(tempPath.c_str());
+            error = "failed to write temp artifact: " + tempPath;
+            return false;
+        }
+    }
+
+    if (MoveFileExA(tempPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == FALSE)
+    {
+        const DWORD moveError = GetLastError();
+        DeleteFileA(tempPath.c_str());
+        error = "failed to replace artifact " + path + ": " + FormatWin32Error(moveError);
+        return false;
+    }
+
+    return true;
+}
+
+bool ReadTextFile(const std::string& path, std::string& text, std::string& error)
+{
+    std::ifstream stream(path, std::ios::binary);
+
+    if (!stream)
+    {
+        error = "failed to open artifact: " + path;
+        return false;
+    }
+
+    std::ostringstream buffer;
+    buffer << stream.rdbuf();
+    text = buffer.str();
+    return true;
+}
+
+std::string SanitizeFileNameComponent(const std::string& value)
+{
+    std::string sanitized;
+    sanitized.reserve(value.size());
+
+    for (const char ch : value)
+    {
+        const unsigned char byte = static_cast<unsigned char>(ch);
+        const bool invalid = byte < 0x20
+            || ch == '<'
+            || ch == '>'
+            || ch == ':'
+            || ch == '"'
+            || ch == '/'
+            || ch == '\\'
+            || ch == '|'
+            || ch == '?'
+            || ch == '*';
+
+        sanitized.push_back(invalid ? '_' : ch);
+    }
+
+    sanitized = decomp::TrimCopy(sanitized);
+
+    if (sanitized.empty())
+    {
+        sanitized = "decomp";
+    }
+
+    if (sanitized.size() > 96)
+    {
+        sanitized.resize(96);
+    }
+
+    return sanitized;
+}
+
+std::string GetCurrentExtensionModulePath()
+{
+    HMODULE module = nullptr;
+
+    if (GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(&GetCurrentExtensionModulePath),
+            &module) == FALSE)
+    {
+        return std::string();
+    }
+
+    std::vector<char> modulePath(MAX_PATH);
+
+    while (modulePath.size() <= 32768)
+    {
+        const DWORD length = GetModuleFileNameA(module, modulePath.data(), static_cast<DWORD>(modulePath.size()));
+
+        if (length == 0)
+        {
+            return std::string();
+        }
+
+        if (static_cast<size_t>(length) < modulePath.size() - 1)
+        {
+            return std::string(modulePath.data(), static_cast<size_t>(length));
+        }
+
+        modulePath.resize(modulePath.size() * 2);
+    }
+
+    return std::string();
+}
+
+std::string BuildDefaultArtifactDirectory()
+{
+    const std::string modulePath = GetCurrentExtensionModulePath();
+
+    if (!modulePath.empty())
+    {
+        const std::string directory = GetParentPath(modulePath);
+
+        if (!directory.empty())
+        {
+            return JoinPath(directory, "artifact");
+        }
+    }
+
+    return "artifact";
+}
+
+std::string BuildArtifactBuildKey(const KernelBuildFacts& facts)
+{
+    std::vector<std::string> parts;
+
+    if (facts.HasWin32Version)
+    {
+        parts.push_back("win32_" + std::to_string(facts.Win32Major) + "_" + std::to_string(facts.Win32Minor));
+    }
+
+    if (facts.HasKdVersion)
+    {
+        parts.push_back("kd_" + std::to_string(facts.KdMajor) + "_" + std::to_string(facts.KdMinor));
+    }
+
+    if (!facts.BuildString.empty())
+    {
+        parts.push_back("build_" + facts.BuildString);
+    }
+    else if (!facts.BuildLab.empty())
+    {
+        parts.push_back("buildlab_" + facts.BuildLab);
+    }
+    else if (!facts.Fingerprint.empty())
+    {
+        parts.push_back(facts.Fingerprint);
+    }
+    else
+    {
+        parts.push_back("unknown_build");
+    }
+
+    return SanitizeFileNameComponent(decomp::JoinStrings(parts, "_"));
+}
+
+std::string BuildDefaultArtifactPath(const CachedAnalyzeArtifact& artifact)
+{
+    const std::string buildKey = BuildArtifactBuildKey(artifact.KernelBuild);
+    const std::string module = SanitizeFileNameComponent(artifact.Module.empty() ? "unknown_module" : artifact.Module);
+    const uint64_t stableOffset = artifact.HasEntryRva ? artifact.EntryRva : artifact.EntryAddress;
+
+    return JoinPath(
+        JoinPath(BuildDefaultArtifactDirectory(), buildKey),
+        module + "_" + decomp::HexU64(stableOffset) + ".decomp.json");
+}
+
+bool TryReadNullTerminatedAsciiString(
+    IDebugDataSpaces4* dataSpaces,
+    uint64_t address,
+    ULONG size,
+    std::string& text)
+{
+    std::vector<uint8_t> bytes;
+
+    if (!ReadVirtualPrefix(dataSpaces, address, size, bytes))
+    {
+        return false;
+    }
+
+    std::string candidate;
+
+    for (const uint8_t byte : bytes)
+    {
+        if (byte == 0)
+        {
+            break;
+        }
+
+        if (byte < 0x20 || byte > 0x7E)
+        {
+            return false;
+        }
+
+        candidate.push_back(static_cast<char>(byte));
+    }
+
+    if (candidate.empty())
+    {
+        return false;
+    }
+
+    text = candidate;
+    return true;
+}
+
+bool TryReadNtBuildLab(IDebugDataSpaces4* dataSpaces, std::string& buildLab)
+{
+    if (dataSpaces == nullptr)
+    {
+        return false;
+    }
+
+    ULONG64 address = 0;
+    ULONG dataSize = 0;
+
+    if (FAILED(dataSpaces->ReadDebuggerData(DEBUG_DATA_NtBuildLabAddr, &address, sizeof(address), &dataSize))
+        || address == 0)
+    {
+        return false;
+    }
+
+    return TryReadNullTerminatedAsciiString(dataSpaces, address, 256, buildLab);
+}
+
+std::string BuildKernelBuildFingerprint(const KernelBuildFacts& facts)
+{
+    std::vector<std::string> parts;
+
+    if (facts.HasWin32Version)
+    {
+        parts.push_back("win32=" + std::to_string(facts.Win32Major) + "." + std::to_string(facts.Win32Minor));
+    }
+
+    if (facts.HasKdVersion)
+    {
+        parts.push_back("kd=" + std::to_string(facts.KdMajor) + "." + std::to_string(facts.KdMinor));
+    }
+
+    if (!facts.BuildString.empty())
+    {
+        parts.push_back("build_string=" + facts.BuildString);
+    }
+
+    if (!facts.BuildLab.empty())
+    {
+        parts.push_back("build_lab=" + facts.BuildLab);
+    }
+
+    return decomp::JoinStrings(parts, ";");
+}
+
+KernelBuildFacts CollectKernelBuildFacts(
+    IDebugControl* control,
+    IDebugControl4* control4,
+    IDebugDataSpaces4* dataSpaces)
+{
+    KernelBuildFacts facts;
+    const decomp::SessionPolicyFacts session = BuildSessionPolicyFacts(control);
+    facts.DebugClass = session.DebugClass;
+    facts.Qualifier = session.Qualifier;
+
+    if (control != nullptr)
+    {
+        ULONG platformId = 0;
+        ULONG kdMajor = 0;
+        ULONG kdMinor = 0;
+        ULONG servicePackUsed = 0;
+        ULONG servicePackNumber = 0;
+        ULONG buildStringUsed = 0;
+        std::array<char, 128> servicePack = {};
+        std::array<char, 256> buildString = {};
+
+        if (SUCCEEDED(control->GetSystemVersion(
+                &platformId,
+                &kdMajor,
+                &kdMinor,
+                servicePack.data(),
+                static_cast<ULONG>(servicePack.size()),
+                &servicePackUsed,
+                &servicePackNumber,
+                buildString.data(),
+                static_cast<ULONG>(buildString.size()),
+                &buildStringUsed)))
+        {
+            facts.HasSystemVersion = true;
+            facts.HasKdVersion = true;
+            facts.PlatformId = platformId;
+            facts.KdMajor = kdMajor;
+            facts.KdMinor = kdMinor;
+            facts.ServicePack = servicePack.data();
+            facts.ServicePackNumber = servicePackNumber;
+            facts.BuildString = buildString.data();
+        }
+    }
+
+    if (control4 != nullptr)
+    {
+        ULONG platformId = 0;
+        ULONG win32Major = 0;
+        ULONG win32Minor = 0;
+        ULONG kdMajor = 0;
+        ULONG kdMinor = 0;
+
+        if (SUCCEEDED(control4->GetSystemVersionValues(&platformId, &win32Major, &win32Minor, &kdMajor, &kdMinor)))
+        {
+            facts.HasWin32Version = true;
+            facts.HasKdVersion = true;
+            facts.PlatformId = platformId;
+            facts.Win32Major = win32Major;
+            facts.Win32Minor = win32Minor;
+            facts.KdMajor = kdMajor;
+            facts.KdMinor = kdMinor;
+        }
+    }
+
+    TryReadNtBuildLab(dataSpaces, facts.BuildLab);
+    facts.Fingerprint = BuildKernelBuildFingerprint(facts);
+    facts.Available = !facts.Fingerprint.empty();
+    return facts;
+}
+
+decomp::JsonValue KernelBuildFactsToJson(const KernelBuildFacts& facts)
+{
+    decomp::JsonValue object = decomp::JsonValue::MakeObject();
+    object.Set("available", decomp::JsonValue::MakeBoolean(facts.Available));
+    object.Set("debug_class", decomp::JsonValue::MakeString(facts.DebugClass));
+    object.Set("qualifier", decomp::JsonValue::MakeString(facts.Qualifier));
+    object.Set("has_system_version", decomp::JsonValue::MakeBoolean(facts.HasSystemVersion));
+    object.Set("has_win32_version", decomp::JsonValue::MakeBoolean(facts.HasWin32Version));
+    object.Set("has_kd_version", decomp::JsonValue::MakeBoolean(facts.HasKdVersion));
+    object.Set("platform_id", decomp::JsonValue::MakeNumber(static_cast<double>(facts.PlatformId)));
+    object.Set("win32_major", decomp::JsonValue::MakeNumber(static_cast<double>(facts.Win32Major)));
+    object.Set("win32_minor", decomp::JsonValue::MakeNumber(static_cast<double>(facts.Win32Minor)));
+    object.Set("kd_major", decomp::JsonValue::MakeNumber(static_cast<double>(facts.KdMajor)));
+    object.Set("kd_minor", decomp::JsonValue::MakeNumber(static_cast<double>(facts.KdMinor)));
+    object.Set("service_pack", decomp::JsonValue::MakeString(facts.ServicePack));
+    object.Set("service_pack_number", decomp::JsonValue::MakeNumber(static_cast<double>(facts.ServicePackNumber)));
+    object.Set("build_string", decomp::JsonValue::MakeString(facts.BuildString));
+    object.Set("build_lab", decomp::JsonValue::MakeString(facts.BuildLab));
+    object.Set("fingerprint", decomp::JsonValue::MakeString(facts.Fingerprint));
+    return object;
+}
+
+bool TryGetJsonStringValue(const decomp::JsonValue& object, const std::string& key, std::string& value)
+{
+    const decomp::JsonValue* member = object.Find(key);
+
+    if (member == nullptr || !member->IsString())
+    {
+        return false;
+    }
+
+    value = member->GetString();
+    return true;
+}
+
+bool TryGetJsonBoolValue(const decomp::JsonValue& object, const std::string& key, bool& value)
+{
+    const decomp::JsonValue* member = object.Find(key);
+
+    if (member == nullptr || !member->IsBoolean())
+    {
+        return false;
+    }
+
+    value = member->GetBoolean();
+    return true;
+}
+
+bool TryGetJsonU32Value(const decomp::JsonValue& object, const std::string& key, uint32_t& value)
+{
+    const decomp::JsonValue* member = object.Find(key);
+
+    if (member == nullptr
+        || !member->IsNumber()
+        || member->GetNumber() < 0.0
+        || member->GetNumber() > 4294967295.0)
+    {
+        return false;
+    }
+
+    value = static_cast<uint32_t>(member->GetNumber());
+    return true;
+}
+
+bool ParseKernelBuildFacts(const decomp::JsonValue& value, KernelBuildFacts& facts)
+{
+    if (!value.IsObject())
+    {
+        return false;
+    }
+
+    TryGetJsonBoolValue(value, "available", facts.Available);
+    TryGetJsonStringValue(value, "debug_class", facts.DebugClass);
+    TryGetJsonStringValue(value, "qualifier", facts.Qualifier);
+    TryGetJsonBoolValue(value, "has_system_version", facts.HasSystemVersion);
+    TryGetJsonBoolValue(value, "has_win32_version", facts.HasWin32Version);
+    TryGetJsonBoolValue(value, "has_kd_version", facts.HasKdVersion);
+    TryGetJsonU32Value(value, "platform_id", facts.PlatformId);
+    TryGetJsonU32Value(value, "win32_major", facts.Win32Major);
+    TryGetJsonU32Value(value, "win32_minor", facts.Win32Minor);
+    TryGetJsonU32Value(value, "kd_major", facts.KdMajor);
+    TryGetJsonU32Value(value, "kd_minor", facts.KdMinor);
+    TryGetJsonStringValue(value, "service_pack", facts.ServicePack);
+    TryGetJsonU32Value(value, "service_pack_number", facts.ServicePackNumber);
+    TryGetJsonStringValue(value, "build_string", facts.BuildString);
+    TryGetJsonStringValue(value, "build_lab", facts.BuildLab);
+    TryGetJsonStringValue(value, "fingerprint", facts.Fingerprint);
+
+    if (facts.Fingerprint.empty())
+    {
+        facts.Fingerprint = BuildKernelBuildFingerprint(facts);
+    }
+
+    facts.Available = facts.Available || !facts.Fingerprint.empty();
+    return true;
+}
+
+bool ExtractJsonMemberText(
+    const decomp::JsonValue& object,
+    const std::string& primaryKey,
+    const std::string& legacyKey,
+    std::string& text,
+    std::string& error)
+{
+    const decomp::JsonValue* member = object.Find(primaryKey);
+
+    if (member == nullptr && !legacyKey.empty())
+    {
+        member = object.Find(legacyKey);
+    }
+
+    if (member == nullptr)
+    {
+        error = "artifact is missing " + primaryKey;
+        return false;
+    }
+
+    if (member->IsString())
+    {
+        text = member->GetString();
+        return true;
+    }
+
+    text = decomp::SerializeJson(*member, true);
+    return true;
+}
+
+decomp::JsonValue ParseJsonOrString(const std::string& text)
+{
+    const decomp::JsonParseResult parsed = decomp::ParseJson(text);
+
+    if (parsed.Success)
+    {
+        return parsed.Value;
+    }
+
+    return decomp::JsonValue::MakeString(text);
+}
+
+std::string BuildPersistentArtifactJson(const CachedAnalyzeArtifact& artifact)
+{
+    decomp::JsonValue object = decomp::JsonValue::MakeObject();
+    object.Set("schema", decomp::JsonValue::MakeString("windbg-decompile-ext.decomp_artifact.v1"));
+    object.Set("kind", decomp::JsonValue::MakeString("analyze_result"));
+    object.Set("saved_at", decomp::JsonValue::MakeString(artifact.Timestamp));
+    object.Set("target", decomp::JsonValue::MakeString(artifact.Target));
+    object.Set("module", decomp::JsonValue::MakeString(artifact.Module));
+    object.Set("entry", decomp::JsonValue::MakeString(decomp::HexU64(artifact.EntryAddress)));
+    object.Set("rva", decomp::JsonValue::MakeString(decomp::HexU64(artifact.EntryRva)));
+    object.Set("has_rva", decomp::JsonValue::MakeBoolean(artifact.HasEntryRva));
+    object.Set("provider", decomp::JsonValue::MakeString(artifact.Provider));
+    object.Set("request_id", decomp::JsonValue::MakeString(artifact.RequestId));
+    object.Set("confidence", decomp::JsonValue::MakeNumber(artifact.Confidence));
+    object.Set("verifier_issue_count", decomp::JsonValue::MakeNumber(static_cast<double>(artifact.VerifierIssueCount)));
+    object.Set("kernel_build", KernelBuildFactsToJson(artifact.KernelBuild));
+    object.Set("request", ParseJsonOrString(artifact.RequestJson));
+    object.Set("response", ParseJsonOrString(artifact.ResponseJson));
+    object.Set("data_model", ParseJsonOrString(artifact.DataModelJson));
+    object.Set("debug_prompt", decomp::JsonValue::MakeString(artifact.DebugPromptDump));
+    return decomp::SerializeJson(object, true) + "\n";
+}
+
+bool SaveCachedAnalyzeArtifact(
+    const CachedAnalyzeArtifact& artifact,
+    const std::string& rawPath,
+    std::string& actualPath,
+    std::string& error)
+{
+    actualPath = rawPath.empty() ? BuildDefaultArtifactPath(artifact) : ExpandArtifactPath(rawPath);
+
+    if (actualPath.empty())
+    {
+        error = "artifact path is empty";
+        return false;
+    }
+
+    const std::string json = BuildPersistentArtifactJson(artifact);
+    return WriteTextFileAtomic(actualPath, json, error);
+}
+
+bool LoadCachedAnalyzeArtifact(
+    const std::string& rawPath,
+    CachedAnalyzeArtifact& artifact,
+    std::string& error)
+{
+    const std::string path = ExpandArtifactPath(rawPath);
+    std::string text;
+
+    if (!ReadTextFile(path, text, error))
+    {
+        return false;
+    }
+
+    const decomp::JsonParseResult parsed = decomp::ParseJson(text);
+
+    if (!parsed.Success || !parsed.Value.IsObject())
+    {
+        error = parsed.Error.empty() ? "artifact must be a JSON object" : parsed.Error;
+        return false;
+    }
+
+    std::string schema;
+    TryGetJsonStringValue(parsed.Value, "schema", schema);
+
+    if (schema != "windbg-decompile-ext.decomp_artifact.v1")
+    {
+        error = "unsupported artifact schema: " + (schema.empty() ? std::string("<missing>") : schema);
+        return false;
+    }
+
+    if (!ExtractJsonMemberText(parsed.Value, "request", "request_json", artifact.RequestJson, error)
+        || !ExtractJsonMemberText(parsed.Value, "response", "response_json", artifact.ResponseJson, error))
+    {
+        return false;
+    }
+
+    const decomp::JsonValue* dataModel = parsed.Value.Find("data_model");
+
+    if (dataModel == nullptr)
+    {
+        dataModel = parsed.Value.Find("data_model_json");
+    }
+
+    if (dataModel != nullptr)
+    {
+        artifact.DataModelJson = dataModel->IsString() ? dataModel->GetString() : decomp::SerializeJson(*dataModel, true);
+    }
+
+    TryGetJsonStringValue(parsed.Value, "debug_prompt", artifact.DebugPromptDump);
+
+    if (artifact.DebugPromptDump.empty())
+    {
+        TryGetJsonStringValue(parsed.Value, "debug_prompt_dump", artifact.DebugPromptDump);
+    }
+
+    const decomp::JsonValue* kernelBuild = parsed.Value.Find("kernel_build");
+
+    if (kernelBuild != nullptr)
+    {
+        ParseKernelBuildFacts(*kernelBuild, artifact.KernelBuild);
+    }
+
+    decomp::AnalyzeRequest request;
+    decomp::AnalyzeResponse response;
+
+    if (!decomp::ParseAnalyzeRequest(artifact.RequestJson, request, error))
+    {
+        error = "failed to parse artifact request: " + error;
+        return false;
+    }
+
+    if (!decomp::ParseAnalyzeResponse(artifact.ResponseJson, response, error))
+    {
+        error = "failed to parse artifact response: " + error;
+        return false;
+    }
+
+    if (artifact.DataModelJson.empty())
+    {
+        artifact.DataModelJson = BuildDataModelSnapshotJson(request, response);
+    }
+
+    if (artifact.DebugPromptDump.empty())
+    {
+        artifact.DebugPromptDump = decomp::BuildDebugPromptDump(request);
+    }
+
+    TryGetJsonStringValue(parsed.Value, "saved_at", artifact.Timestamp);
+    TryGetJsonStringValue(parsed.Value, "target", artifact.Target);
+    TryGetJsonStringValue(parsed.Value, "module", artifact.Module);
+    TryGetJsonStringValue(parsed.Value, "provider", artifact.Provider);
+    TryGetJsonStringValue(parsed.Value, "request_id", artifact.RequestId);
+    TryGetJsonBoolValue(parsed.Value, "has_rva", artifact.HasEntryRva);
+
+    artifact.ArtifactPath = path;
+    artifact.Target = artifact.Target.empty() ? request.Facts.QueryText : artifact.Target;
+    artifact.Module = artifact.Module.empty() ? request.Facts.Module.ModuleName : artifact.Module;
+    artifact.Provider = artifact.Provider.empty() ? response.Provider : artifact.Provider;
+    artifact.RequestId = artifact.RequestId.empty() ? request.RequestId : artifact.RequestId;
+    artifact.EntryAddress = request.Facts.EntryAddress;
+    artifact.EntryRva = request.Facts.Rva;
+    artifact.HasEntryRva = artifact.HasEntryRva
+        || (request.Facts.Module.Base != 0 && request.Facts.EntryAddress >= request.Facts.Module.Base);
+    artifact.Confidence = response.Verifier.AdjustedConfidence;
+    artifact.VerifierIssueCount = response.Verifier.Issues.size();
+    return true;
+}
+
+std::string BuildKernelBuildDisplay(const KernelBuildFacts& facts)
+{
+    if (!facts.Fingerprint.empty())
+    {
+        return facts.Fingerprint;
+    }
+
+    return "unavailable";
+}
+
+bool EqualInsensitiveString(const std::string& left, const std::string& right)
+{
+    return decomp::ToLowerAscii(left) == decomp::ToLowerAscii(right);
+}
+
+bool KernelBuildsAreCompatible(const KernelBuildFacts& saved, const KernelBuildFacts& current)
+{
+    bool hasCommonIdentity = false;
+
+    if (!saved.BuildLab.empty() && !current.BuildLab.empty())
+    {
+        if (!EqualInsensitiveString(saved.BuildLab, current.BuildLab))
+        {
+            return false;
+        }
+
+        hasCommonIdentity = true;
+    }
+
+    if (!saved.BuildString.empty() && !current.BuildString.empty())
+    {
+        if (!EqualInsensitiveString(saved.BuildString, current.BuildString))
+        {
+            return false;
+        }
+
+        hasCommonIdentity = true;
+    }
+
+    if (saved.HasKdVersion && current.HasKdVersion)
+    {
+        if (saved.KdMajor != current.KdMajor || saved.KdMinor != current.KdMinor)
+        {
+            return false;
+        }
+
+        hasCommonIdentity = true;
+    }
+
+    if (saved.HasWin32Version && current.HasWin32Version)
+    {
+        if (saved.Win32Major != current.Win32Major || saved.Win32Minor != current.Win32Minor)
+        {
+            return false;
+        }
+
+        hasCommonIdentity = true;
+    }
+
+    return hasCommonIdentity;
+}
+
+bool ValidateLoadedArtifactKernelBuild(
+    const CachedAnalyzeArtifact& artifact,
+    const KernelBuildFacts& current,
+    std::string& warning,
+    std::string& error)
+{
+    if (artifact.KernelBuild.Fingerprint.empty())
+    {
+        error = "saved artifact has no kernel_build fingerprint";
+        return false;
+    }
+
+    if (current.Fingerprint.empty())
+    {
+        error = "current session kernel_build fingerprint is unavailable; saved="
+            + BuildKernelBuildDisplay(artifact.KernelBuild);
+        return false;
+    }
+
+    if (EqualInsensitiveString(artifact.KernelBuild.Fingerprint, current.Fingerprint))
+    {
+        return true;
+    }
+
+    if (KernelBuildsAreCompatible(artifact.KernelBuild, current))
+    {
+        warning = "kernel_build matched by common build values, but optional fingerprint fields differ";
+        return true;
+    }
+
+    error = "kernel_build mismatch: saved="
+        + BuildKernelBuildDisplay(artifact.KernelBuild)
+        + " current="
+        + BuildKernelBuildDisplay(current);
+    return false;
+}
+
 std::string BuildCacheTimestamp()
 {
     const std::time_t now = std::time(nullptr);
@@ -5918,9 +6891,25 @@ std::string BuildCacheTimestamp()
     return buffer.data();
 }
 
+void RememberCachedAnalyzeArtifact(CachedAnalyzeArtifact artifact)
+{
+    g_lastRequestJson = artifact.RequestJson;
+    g_lastResponseJson = artifact.ResponseJson;
+    g_lastDataModelJson = artifact.DataModelJson;
+    g_lastDebugPromptDump = artifact.DebugPromptDump;
+
+    g_analyzeHistory.push_front(std::move(artifact));
+
+    while (g_analyzeHistory.size() > kAnalyzeHistoryLimit)
+    {
+        g_analyzeHistory.pop_back();
+    }
+}
+
 void StoreCachedAnalyzeResult(
     const decomp::AnalyzeRequest& request,
-    const decomp::AnalyzeResponse& response)
+    const decomp::AnalyzeResponse& response,
+    const KernelBuildFacts& kernelBuild)
 {
     CachedAnalyzeArtifact artifact;
     artifact.RequestJson = decomp::SerializeAnalyzeRequest(request, true);
@@ -5933,20 +6922,13 @@ void StoreCachedAnalyzeResult(
     artifact.RequestId = request.RequestId;
     artifact.Timestamp = BuildCacheTimestamp();
     artifact.EntryAddress = request.Facts.EntryAddress;
+    artifact.EntryRva = request.Facts.Rva;
+    artifact.HasEntryRva = request.Facts.Module.Base != 0 && request.Facts.EntryAddress >= request.Facts.Module.Base;
     artifact.Confidence = response.Verifier.AdjustedConfidence;
     artifact.VerifierIssueCount = response.Verifier.Issues.size();
+    artifact.KernelBuild = kernelBuild;
 
-    g_lastRequestJson = artifact.RequestJson;
-    g_lastResponseJson = artifact.ResponseJson;
-    g_lastDataModelJson = artifact.DataModelJson;
-    g_lastDebugPromptDump = artifact.DebugPromptDump;
-
-    g_analyzeHistory.push_front(std::move(artifact));
-
-    while (g_analyzeHistory.size() > kAnalyzeHistoryLimit)
-    {
-        g_analyzeHistory.pop_back();
-    }
+    RememberCachedAnalyzeArtifact(std::move(artifact));
 }
 
 const CachedAnalyzeArtifact* GetCachedAnalyzeArtifact(uint32_t index)
@@ -5992,6 +6974,7 @@ void PrintUsage(IDebugControl* control, IDebugControl4* control4)
 {
     OutputLine(control, control4, "usage: !decomp [/verbose] [/doctor] [/history] [/view:brief|explain|json|facts|prompt|data|analyzer|plan] [/last[:N]:explain|facts|json|data|prompt] [/limit:deep|huge|N] [/timeout:N] <addr|module!symbol>\n");
     OutputLine(control, control4, "fix  : /fix:noreturn:name /fix:type:expr=TYPE /fix:field:expr=TYPE /fix:rename:old=new /fix:clear\n");
+    OutputLine(control, control4, "file : successful LLM results are saved automatically beside decomp.dll under artifact\\ and replayed automatically for the same target and kernel_build\n");
     OutputLine(control, control4, "compat: legacy switches such as /brief, /json, /facts-only, /debug-prompt, /data-model, /last-json, /deep, and /noreturn: still work\n");
     OutputLine(control, control4, "cfg  : decomp.llm.json beside decomp.dll\n");
     OutputLine(control, control4, "env  : DECOMP_LLM_*, OPENAI_API_KEY may override config values\n");
@@ -6822,6 +7805,147 @@ bool PrintCachedAnalyzeResult(
     PrintResponse(cachedRequest, cachedResponse, displayConfig, control, control4, advanced2, options);
     return true;
 }
+
+bool ShouldTryPersistentArtifactReplay(const decomp::DecompOptions& options)
+{
+    if (options.PlanOutput)
+    {
+        return false;
+    }
+
+    if (options.DisableLlm)
+    {
+        return false;
+    }
+
+    if (options.ClearUserOverrides
+        || !options.NoReturnOverrides.empty()
+        || !options.TypeOverrides.empty()
+        || !options.FieldOverrides.empty()
+        || !options.RenameOverrides.empty())
+    {
+        return false;
+    }
+
+    if (options.MaxInstructions != 4096)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool PrintPersistentAnalyzeArtifact(
+    const DebugApi& api,
+    decomp::DecompOptions options,
+    const CachedAnalyzeArtifact& artifact,
+    std::string& error)
+{
+    if (options.DebugPromptOutput)
+    {
+        OutputLine(api.Control.Get(), api.Control4.Get(), "%s\n", artifact.DebugPromptDump.c_str());
+        return true;
+    }
+
+    decomp::AnalyzeRequest cachedRequest;
+    decomp::AnalyzeResponse cachedResponse;
+
+    if (!decomp::ParseAnalyzeRequest(artifact.RequestJson, cachedRequest, error))
+    {
+        error = "failed to parse artifact request: " + error;
+        return false;
+    }
+
+    if (!decomp::ParseAnalyzeResponse(artifact.ResponseJson, cachedResponse, error))
+    {
+        error = "failed to parse artifact response: " + error;
+        return false;
+    }
+
+    decomp::LlmClientConfig displayConfig;
+    std::string displayConfigError;
+    decomp::LoadLlmClientConfig(displayConfig, displayConfigError, false);
+    PrintResponse(cachedRequest, cachedResponse, displayConfig, api.Control.Get(), api.Control4.Get(), api.Advanced2.Get(), options);
+    return true;
+}
+
+bool TryReplayPersistentAnalyzeArtifact(
+    const DebugApi& api,
+    const decomp::DecompOptions& options,
+    const KernelBuildFacts& currentKernelBuild,
+    const CachedAnalyzeArtifact& lookup,
+    std::string& error)
+{
+    if (!ShouldTryPersistentArtifactReplay(options))
+    {
+        return false;
+    }
+
+    if (currentKernelBuild.Fingerprint.empty())
+    {
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "artifact replay skipped: current kernel_build unavailable");
+        return false;
+    }
+
+    const std::string path = BuildDefaultArtifactPath(lookup);
+
+    if (!decomp::PathExistsAsFile(path))
+    {
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "artifact miss path=%s", path.c_str());
+        return false;
+    }
+
+    CachedAnalyzeArtifact artifact;
+    std::string loadError;
+
+    if (!LoadCachedAnalyzeArtifact(path, artifact, loadError))
+    {
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "artifact load skipped path=%s error=%s", path.c_str(), loadError.c_str());
+        return false;
+    }
+
+    std::string warning;
+    std::string validateError;
+
+    if (!ValidateLoadedArtifactKernelBuild(artifact, currentKernelBuild, warning, validateError))
+    {
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "artifact replay skipped path=%s error=%s", path.c_str(), validateError.c_str());
+        return false;
+    }
+
+    if (!warning.empty())
+    {
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "artifact replay warning path=%s warning=%s", path.c_str(), warning.c_str());
+    }
+
+    artifact.ArtifactPath = path;
+    RememberCachedAnalyzeArtifact(artifact);
+    OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "artifact hit path=%s", path.c_str());
+    return PrintPersistentAnalyzeArtifact(api, options, artifact, error);
+}
+
+void TrySavePersistentAnalyzeArtifact(
+    const DebugApi& api,
+    const decomp::DecompOptions& options,
+    const CachedAnalyzeArtifact& artifact)
+{
+    if (artifact.KernelBuild.Fingerprint.empty())
+    {
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "artifact save skipped: kernel_build unavailable");
+        return;
+    }
+
+    std::string actualPath;
+    std::string saveError;
+
+    if (!SaveCachedAnalyzeArtifact(artifact, std::string(), actualPath, saveError))
+    {
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "artifact save failed: %s", saveError.c_str());
+        return;
+    }
+
+    OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "artifact saved path=%s", actualPath.c_str());
+}
 }
 
 extern "C" BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID)
@@ -6971,12 +8095,15 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
         OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "start target=%s max_instructions=%u timeout_ms=%u", target.c_str(), options.MaxInstructions, options.TimeoutMs);
         OutputProgress(api.Control.Get(), api.Control4.Get(), options, "starting analysis for %s", target.c_str());
 
-        if (!decomp::LoadLlmClientConfig(displayConfig, error, false))
+        std::string displayConfigError;
+        if (decomp::LoadLlmClientConfig(displayConfig, displayConfigError, false))
         {
-            OutputLine(api.Control.Get(), api.Control4.Get(), "error: config load failed: %s\n", error.c_str());
-            return E_FAIL;
+            OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "display config loaded");
         }
-        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "display config loaded");
+        else
+        {
+            OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "display config unavailable: %s", displayConfigError.c_str());
+        }
         if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "config load"))
         {
             return E_ABORT;
@@ -7015,6 +8142,27 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
         if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "function range recovery"))
         {
             return E_ABORT;
+        }
+
+        const KernelBuildFacts kernelBuild = CollectKernelBuildFacts(api.Control.Get(), api.Control4.Get(), api.DataSpaces.Get());
+        CachedAnalyzeArtifact artifactLookup;
+        artifactLookup.Target = target;
+        artifactLookup.Module = moduleInfo.ModuleName;
+        artifactLookup.Timestamp = BuildCacheTimestamp();
+        artifactLookup.EntryAddress = entryAddress;
+        artifactLookup.EntryRva = moduleInfo.Base <= entryAddress ? entryAddress - moduleInfo.Base : entryAddress;
+        artifactLookup.HasEntryRva = moduleInfo.Base != 0 && moduleInfo.Base <= entryAddress;
+        artifactLookup.KernelBuild = kernelBuild;
+
+        if (TryReplayPersistentAnalyzeArtifact(api, options, kernelBuild, artifactLookup, error))
+        {
+            return S_OK;
+        }
+
+        if (!error.empty())
+        {
+            OutputLine(api.Control.Get(), api.Control4.Get(), "error: %s\n", error.c_str());
+            return E_FAIL;
         }
 
         OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "reading function bytes");
@@ -7242,7 +8390,14 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
             return E_ABORT;
         }
 
-        StoreCachedAnalyzeResult(request, response);
+        StoreCachedAnalyzeResult(request, response, kernelBuild);
+        const CachedAnalyzeArtifact* storedArtifact = GetCachedAnalyzeArtifact(1);
+
+        if (storedArtifact != nullptr && !options.DisableLlm)
+        {
+            TrySavePersistentAnalyzeArtifact(api, options, *storedArtifact);
+        }
+
         OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "printing response");
         PrintResponse(request, response, displayConfig, api.Control.Get(), api.Control4.Get(), api.Advanced2.Get(), options);
         return S_OK;

@@ -157,7 +157,11 @@ Cache and replay helpers:
 - `/history` lists the in-memory result ring buffer. Index `1` is the newest result.
 - `/last:N:explain`, `/last:N:json`, `/last:N:facts`, `/last:N:data`, and `/last:N:prompt` replay an older cached result by history index without re-running local analysis or calling the LLM.
 - `/last:*` modes are terminal replay commands. If a target is present in the same command, the cached artifact is replayed and no local analysis or LLM request is started for that target.
-- Cached artifacts live in the loaded extension instance only. The result history keeps the newest 8 results and disappears when WinDbg unloads the extension or the process exits.
+- In-memory cached artifacts live in the loaded extension instance only. The result history keeps the newest 8 results and disappears when WinDbg unloads the extension or the process exits.
+- Successful LLM-backed results are also saved automatically under an `artifact` folder beside the loaded `decomp.dll`. The operator does not need a separate save command.
+- Persistent artifacts include `request`, `response`, `data_model`, `debug_prompt`, and a `kernel_build` object with Win32/KD version values, build string, optional `NtBuildLab`, and a build fingerprint.
+- On a later session, running the same `!decomp <target>` command automatically checks the `artifact\<kernel_build>\...` path after target resolution and function RVA recovery. If the saved `kernel_build` matches the current OS build, the extension replays the artifact without reading function bytes, running local analyzer passes, or calling the LLM.
+- Missing, unreadable, or mismatched persistent artifacts are treated as cache misses. The command falls back to a fresh analysis and overwrites the artifact only after a successful LLM-backed result.
 - DML action links in normal output use these cached `/last:*` views, so clicking `explain`, `json`, `facts`, `prompt`, or `data-model` does not start a new decompile run.
 - Legacy `/last-json`, `/last-explain`, `/last-facts`, `/last-data-model`, `/last-dx`, and `/last-prompt` remain supported.
 
