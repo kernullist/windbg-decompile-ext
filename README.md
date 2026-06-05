@@ -115,6 +115,20 @@ Use `/verbose` when a command appears stuck or when you want to see the full pro
 
 Legacy aliases such as `/brief`, `/explain`, `/json`, `/facts-only`, `/debug-prompt`, `/data-model`, `/dx`, and `/no-llm` still work for old scripts, but new examples use `/view:*`.
 
+Window viewer:
+
+```text
+!decomp /view:window module!FunctionName
+!decomp /view:window /view:explain module!FunctionName
+```
+
+- `/view:window` runs the normal `!decomp` result path for the target and opens the full rendered result in a separate viewer.
+- The viewer uses the same response renderer as the console path, then opens a native Win32 modeless tool window owned by the debugger window when one can be found.
+- The debugger output reports the native viewer window handle. If the viewer window cannot be created, the command prints a warning and falls back to the normal console result.
+- DML-only links are rendered as text labels with their command strings in the viewer. When RichEdit is available, the window uses a GitHub-style RTF layout with section headings, metadata styling, and pseudo-code highlighting; otherwise it falls back to plain text.
+- When the current session has previous cached results, the viewer shows a left-side history list so you can switch between the current output and earlier decompilation results without rerunning analysis.
+- `/view:json`, `/view:facts`, `/view:prompt`, and `/view:data` remain machine-readable console outputs and are not redirected to the viewer.
+
 Large functions:
 
 ```text

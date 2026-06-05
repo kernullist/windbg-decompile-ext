@@ -28,6 +28,7 @@ struct DecompOptions
     bool FactsOnlyOutput = false;
     bool DebugPromptOutput = false;
     bool DataModelOutput = false;
+    bool WindowOutput = false;
     bool LastExplainOutput = false;
     bool LastFactsOutput = false;
     bool LastJsonOutput = false;

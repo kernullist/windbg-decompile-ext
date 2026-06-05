@@ -5,6 +5,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <richedit.h>
 
 #include <Zydis/Zydis.h>
 #include <dbghelp.h>
@@ -18,6 +19,7 @@
 #include <cstdarg>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <deque>
 #include <exception>
@@ -657,20 +659,163 @@ std::string QuoteCommandArgument(const std::string& value)
     return quoted;
 }
 
-void OutputDmlLine(
-    IDebugControl* control,
-    IDebugControl4* control4,
-    IDebugAdvanced2* advanced2,
-    const std::string& text,
-    const std::string& command)
+class ResponseOutputSink
 {
-    if (AreOutputCallbacksDmlAware(advanced2))
+public:
+    virtual ~ResponseOutputSink() = default;
+
+    virtual bool SupportsDmlMarkup() const
     {
-        OutputDmlRaw(control, control4, BuildDmlLink(text, command) + "\n");
+        return false;
+    }
+
+    virtual bool SupportsLinks() const
+    {
+        return false;
+    }
+
+    virtual void WriteText(const std::string& text) = 0;
+
+    virtual void WriteDmlMarkup(const std::string& text)
+    {
+        WriteText(text);
+    }
+
+    virtual void WriteLink(const std::string& text, const std::string& command)
+    {
+        WriteText(text);
+
+        if (!command.empty())
+        {
+            WriteText(" [cmd: " + command + "]");
+        }
+    }
+};
+
+class ConsoleResponseOutputSink final : public ResponseOutputSink
+{
+public:
+    ConsoleResponseOutputSink(
+        IDebugControl* control,
+        IDebugControl4* control4,
+        IDebugAdvanced2* advanced2)
+        : Control(control),
+          Control4(control4),
+          DmlAware(AreOutputCallbacksDmlAware(advanced2))
+    {
+    }
+
+    bool SupportsDmlMarkup() const override
+    {
+        return DmlAware;
+    }
+
+    bool SupportsLinks() const override
+    {
+        return DmlAware;
+    }
+
+    void WriteText(const std::string& text) override
+    {
+        OutputTextRaw(Control, Control4, text);
+    }
+
+    void WriteDmlMarkup(const std::string& text) override
+    {
+        if (DmlAware)
+        {
+            OutputDmlRaw(Control, Control4, text);
+            return;
+        }
+
+        WriteText(text);
+    }
+
+    void WriteLink(const std::string& text, const std::string& command) override
+    {
+        if (DmlAware)
+        {
+            OutputDmlRaw(Control, Control4, BuildDmlLink(text, command));
+            return;
+        }
+
+        WriteText(text);
+    }
+
+private:
+    IDebugControl* Control = nullptr;
+    IDebugControl4* Control4 = nullptr;
+    bool DmlAware = false;
+};
+
+class PlainTextResponseOutputSink final : public ResponseOutputSink
+{
+public:
+    bool SupportsLinks() const override
+    {
+        return true;
+    }
+
+    void WriteText(const std::string& text) override
+    {
+        Text += text;
+    }
+
+    void WriteLink(const std::string& text, const std::string& command) override
+    {
+        Text += text;
+
+        if (!command.empty())
+        {
+            Text += " [cmd: ";
+            Text += command;
+            Text += "]";
+        }
+    }
+
+    const std::string& GetText() const
+    {
+        return Text;
+    }
+
+private:
+    std::string Text;
+};
+
+void SinkOutputLine(ResponseOutputSink& sink, const char* format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    const int required = _vscprintf(format, args);
+    va_end(args);
+
+    if (required < 0)
+    {
         return;
     }
 
-    OutputLine(control, control4, "%s\n", text.c_str());
+    std::vector<char> buffer(static_cast<size_t>(required) + 1U, '\0');
+    va_start(args, format);
+    std::vsnprintf(buffer.data(), buffer.size(), format, args);
+    va_end(args);
+    sink.WriteText(buffer.data());
+}
+
+void OutputLinkInline(ResponseOutputSink& sink, const std::string& text, const std::string& command)
+{
+    if (sink.SupportsLinks())
+    {
+        sink.WriteLink(text, command);
+        return;
+    }
+
+    sink.WriteText(text);
+}
+
+void OutputLinkLine(ResponseOutputSink& sink, const std::string& text, const std::string& command)
+{
+    OutputLinkInline(sink, text, command);
+    sink.WriteText("\n");
 }
 
 const decomp::BasicBlock* FindBlockById(const decomp::AnalysisFacts& facts, const std::string& id)
@@ -839,18 +984,16 @@ PseudoCodeTokenStyle GetPseudoCodeTokenStyle(const std::string& kind, const deco
 void PrintPseudoCodeHighlighted(
     const decomp::AnalyzeResponse& response,
     const decomp::LlmClientConfig& config,
-    IDebugControl* control,
-    IDebugControl4* control4,
-    IDebugAdvanced2* advanced2)
+    ResponseOutputSink& sink)
 {
     if (response.PseudoC.empty())
     {
         return;
     }
 
-    if (!AreOutputCallbacksDmlAware(advanced2) || response.PseudoCTokens.empty())
+    if (!sink.SupportsDmlMarkup() || response.PseudoCTokens.empty())
     {
-        OutputTextRaw(control, control4, response.PseudoC);
+        sink.WriteText(response.PseudoC);
         return;
     }
 
@@ -863,7 +1006,7 @@ void PrintPseudoCodeHighlighted(
 
         if (token.Kind == "newline" || token.Kind == "whitespace")
         {
-            OutputDmlRaw(control, control4, token.Text);
+            sink.WriteDmlMarkup(token.Text);
             continue;
         }
 
@@ -872,7 +1015,7 @@ void PrintPseudoCodeHighlighted(
 
         if (style.Foreground.empty())
         {
-            OutputDmlRaw(control, control4, escapedText);
+            sink.WriteDmlMarkup(escapedText);
             continue;
         }
 
@@ -913,7 +1056,7 @@ void PrintPseudoCodeHighlighted(
         }
 
         markup += "</col>";
-        OutputDmlRaw(control, control4, markup);
+        sink.WriteDmlMarkup(markup);
     }
 }
 
@@ -1019,6 +1162,12 @@ bool ApplyViewOption(const std::string& rawValue, decomp::DecompOptions& options
     if (value == "data" || value == "data-model" || value == "datamodel" || value == "dx")
     {
         options.DataModelOutput = true;
+        return true;
+    }
+
+    if (value == "window" || value == "viewer")
+    {
+        options.WindowOutput = true;
         return true;
     }
 
@@ -6972,7 +7121,7 @@ void PrintAnalyzeHistory(IDebugControl* control, IDebugControl4* control4)
 
 void PrintUsage(IDebugControl* control, IDebugControl4* control4)
 {
-    OutputLine(control, control4, "usage: !decomp [/verbose] [/doctor] [/history] [/view:brief|explain|json|facts|prompt|data|analyzer|plan] [/last[:N]:explain|facts|json|data|prompt] [/limit:deep|huge|N] [/timeout:N] <addr|module!symbol>\n");
+    OutputLine(control, control4, "usage: !decomp [/verbose] [/doctor] [/history] [/view:brief|explain|json|facts|prompt|data|window|analyzer|plan] [/last[:N]:explain|facts|json|data|prompt] [/limit:deep|huge|N] [/timeout:N] <addr|module!symbol>\n");
     OutputLine(control, control4, "fix  : /fix:noreturn:name /fix:type:expr=TYPE /fix:field:expr=TYPE /fix:rename:old=new /fix:clear\n");
     OutputLine(control, control4, "file : successful LLM results are saved automatically beside decomp.dll under artifact\\ and replayed automatically for the same target and kernel_build\n");
     OutputLine(control, control4, "compat: legacy switches such as /brief, /json, /facts-only, /debug-prompt, /data-model, /last-json, /deep, and /noreturn: still work\n");
@@ -7202,19 +7351,17 @@ void PrintPlanOutput(
 
 void PrintFactsOnly(
     const decomp::AnalyzeRequest& request,
-    IDebugControl* control,
-    IDebugControl4* control4)
+    ResponseOutputSink& sink)
 {
-    OutputLine(control, control4, "%s\n", decomp::SerializeAnalyzeRequest(request, true).c_str());
+    SinkOutputLine(sink, "%s\n", decomp::SerializeAnalyzeRequest(request, true).c_str());
 }
 
 void PrintDataModelOutput(
     const decomp::AnalyzeRequest& request,
     const decomp::AnalyzeResponse& response,
-    IDebugControl* control,
-    IDebugControl4* control4)
+    ResponseOutputSink& sink)
 {
-    OutputLine(control, control4, "%s\n", BuildDataModelSnapshotJson(request, response).c_str());
+    SinkOutputLine(sink, "%s\n", BuildDataModelSnapshotJson(request, response).c_str());
 }
 
 std::string BuildBlockNavigationCommand(const decomp::AnalysisFacts& facts, const std::string& blockId)
@@ -7230,9 +7377,7 @@ std::string BuildBlockNavigationCommand(const decomp::AnalysisFacts& facts, cons
 }
 
 void OutputBlockLinkList(
-    IDebugControl* control,
-    IDebugControl4* control4,
-    IDebugAdvanced2* advanced2,
+    ResponseOutputSink& sink,
     const decomp::AnalysisFacts& facts,
     const std::string& label,
     const std::vector<std::string>& blockIds)
@@ -7242,7 +7387,7 @@ void OutputBlockLinkList(
         return;
     }
 
-    OutputLine(control, control4, "  %s:\n", label.c_str());
+    SinkOutputLine(sink, "  %s:\n", label.c_str());
 
     for (const auto& blockId : blockIds)
     {
@@ -7250,14 +7395,12 @@ void OutputBlockLinkList(
 
         if (block == nullptr)
         {
-            OutputLine(control, control4, "    - %s\n", blockId.c_str());
+            SinkOutputLine(sink, "    - %s\n", blockId.c_str());
             continue;
         }
 
-        OutputDmlLine(
-            control,
-            control4,
-            advanced2,
+        OutputLinkLine(
+            sink,
             "    - " + blockId + " " + decomp::HexU64(block->StartAddress) + "-" + decomp::HexU64(block->EndAddress),
             BuildDisassembleCommand(block->StartAddress, block->EndAddress));
     }
@@ -7365,16 +7508,14 @@ void PrintLinkedIssueList(
     const char* title,
     const std::vector<std::string>& issues,
     const decomp::AnalyzeRequest& request,
-    IDebugControl* control,
-    IDebugControl4* control4,
-    IDebugAdvanced2* advanced2)
+    ResponseOutputSink& sink)
 {
     if (issues.empty())
     {
         return;
     }
 
-    OutputLine(control, control4, "\n%s:\n", title);
+    SinkOutputLine(sink, "\n%s:\n", title);
 
     for (const auto& issue : issues)
     {
@@ -7382,11 +7523,11 @@ void PrintLinkedIssueList(
 
         if (command.empty())
         {
-            OutputLine(control, control4, "- %s\n", issue.c_str());
+            SinkOutputLine(sink, "- %s\n", issue.c_str());
             continue;
         }
 
-        OutputDmlLine(control, control4, advanced2, "- " + issue, command);
+        OutputLinkLine(sink, "- " + issue, command);
     }
 }
 
@@ -7394,28 +7535,24 @@ void PrintLinkedIssueLine(
     const std::string& label,
     const std::string& issue,
     const decomp::AnalyzeRequest& request,
-    IDebugControl* control,
-    IDebugControl4* control4,
-    IDebugAdvanced2* advanced2)
+    ResponseOutputSink& sink)
 {
     const std::string text = label + issue;
     const std::string command = BuildIssueNavigationCommand(request, issue);
 
     if (command.empty())
     {
-        OutputLine(control, control4, "%s\n", text.c_str());
+        SinkOutputLine(sink, "%s\n", text.c_str());
         return;
     }
 
-    OutputDmlLine(control, control4, advanced2, text, command);
+    OutputLinkLine(sink, text, command);
 }
 
 void PrintSuggestedFixes(
     const decomp::AnalyzeRequest& request,
     const decomp::AnalyzeResponse& response,
-    IDebugControl* control,
-    IDebugControl4* control4,
-    IDebugAdvanced2* advanced2)
+    ResponseOutputSink& sink)
 {
     const std::vector<decomp::SuggestedFix> fixes = decomp::BuildSuggestedFixes(request, response);
 
@@ -7424,7 +7561,7 @@ void PrintSuggestedFixes(
         return;
     }
 
-    OutputLine(control, control4, "\nsuggested fixes:\n");
+    SinkOutputLine(sink, "\nsuggested fixes:\n");
 
     for (const decomp::SuggestedFix& fix : fixes)
     {
@@ -7442,65 +7579,72 @@ void PrintSuggestedFixes(
 
         if (fix.SwitchText.find("=TYPE") != std::string::npos)
         {
-            OutputLine(control, control4, "%s\n", label.c_str());
+            SinkOutputLine(sink, "%s\n", label.c_str());
             continue;
         }
 
         const std::string command = "!decomp " + fix.SwitchText + " " + QuoteCommandArgument(request.Facts.QueryText);
-        OutputDmlLine(control, control4, advanced2, label, command);
+        OutputLinkLine(sink, label, command);
     }
+}
+
+std::string BuildLastReplayCommand(const std::string& mode, uint32_t cacheIndex)
+{
+    if (cacheIndex <= 1)
+    {
+        return "!decomp /last:" + mode;
+    }
+
+    return "!decomp /last:" + std::to_string(cacheIndex) + ":" + mode;
 }
 
 void PrintActionLinks(
     const decomp::AnalyzeRequest& request,
-    IDebugControl* control,
-    IDebugControl4* control4,
-    IDebugAdvanced2* advanced2)
+    ResponseOutputSink& sink,
+    const decomp::DecompOptions& options)
 {
-    if (!AreOutputCallbacksDmlAware(advanced2))
+    if (!sink.SupportsLinks())
     {
         return;
     }
 
-    OutputDmlRaw(control, control4, "actions     : "
-        + BuildDmlLink("explain", "!decomp /last:explain")
-        + " "
-        + BuildDmlLink("json", "!decomp /last:json")
-        + " "
-        + BuildDmlLink("facts", "!decomp /last:facts")
-        + " "
-        + BuildDmlLink("prompt", "!decomp /last:prompt")
-        + " "
-        + BuildDmlLink("data-model", "!decomp /last:data")
-        + " "
-        + BuildDmlLink("history", "!decomp /history")
-        + "\n");
+    sink.WriteText("actions     : ");
+    OutputLinkInline(sink, "explain", BuildLastReplayCommand("explain", options.LastCacheIndex));
+    sink.WriteText(" ");
+    OutputLinkInline(sink, "json", BuildLastReplayCommand("json", options.LastCacheIndex));
+    sink.WriteText(" ");
+    OutputLinkInline(sink, "facts", BuildLastReplayCommand("facts", options.LastCacheIndex));
+    sink.WriteText(" ");
+    OutputLinkInline(sink, "prompt", BuildLastReplayCommand("prompt", options.LastCacheIndex));
+    sink.WriteText(" ");
+    OutputLinkInline(sink, "data-model", BuildLastReplayCommand("data", options.LastCacheIndex));
+    sink.WriteText(" ");
+    OutputLinkInline(sink, "history", "!decomp /history");
+    sink.WriteText("\n");
 
-    OutputDmlRaw(control, control4, "nav         : "
-        + BuildDmlLink("entry", BuildDisassembleAddressCommand(request.Facts.EntryAddress))
-        + " "
-        + BuildDmlLink("bp-entry", "bp " + decomp::HexU64(request.Facts.EntryAddress))
-        + " "
-        + BuildDmlLink("last-json", "!decomp /last:json")
-        + " "
-        + BuildDmlLink("last-dx", "!decomp /last:data")
-        + " "
-        + BuildDmlLink("last-prompt", "!decomp /last:prompt")
-        + "\n");
+    sink.WriteText("nav         : ");
+    OutputLinkInline(sink, "entry", BuildDisassembleAddressCommand(request.Facts.EntryAddress));
+    sink.WriteText(" ");
+    OutputLinkInline(sink, "bp-entry", "bp " + decomp::HexU64(request.Facts.EntryAddress));
+    sink.WriteText(" ");
+    OutputLinkInline(sink, "last-json", BuildLastReplayCommand("json", options.LastCacheIndex));
+    sink.WriteText(" ");
+    OutputLinkInline(sink, "last-dx", BuildLastReplayCommand("data", options.LastCacheIndex));
+    sink.WriteText(" ");
+    OutputLinkInline(sink, "last-prompt", BuildLastReplayCommand("prompt", options.LastCacheIndex));
+    sink.WriteText("\n");
 }
 
 void PrintExplainOutput(
     const decomp::AnalyzeRequest& request,
     const decomp::AnalyzeResponse& response,
-    IDebugControl* control,
-    IDebugControl4* control4,
-    IDebugAdvanced2* advanced2)
+    ResponseOutputSink& sink)
 {
-    OutputLine(control, control4, "\nevidence:\n");
+    SinkOutputLine(sink, "\nevidence:\n");
 
     for (const auto& evidence : response.Evidence)
     {
-        OutputLine(control, control4, "- %s\n", evidence.Claim.c_str());
+        SinkOutputLine(sink, "- %s\n", evidence.Claim.c_str());
 
         for (const auto& blockId : evidence.Blocks)
         {
@@ -7508,14 +7652,12 @@ void PrintExplainOutput(
 
             if (block == nullptr)
             {
-                OutputLine(control, control4, "  - %s\n", blockId.c_str());
+                SinkOutputLine(sink, "  - %s\n", blockId.c_str());
                 continue;
             }
 
-            OutputDmlLine(
-                control,
-                control4,
-                advanced2,
+            OutputLinkLine(
+                sink,
                 "  - " + blockId + " " + decomp::HexU64(block->StartAddress) + "-" + decomp::HexU64(block->EndAddress),
                 BuildDisassembleCommand(block->StartAddress, block->EndAddress));
         }
@@ -7523,7 +7665,7 @@ void PrintExplainOutput(
 
     if (!request.Facts.ControlFlow.empty())
     {
-        OutputLine(control, control4, "\ncontrol_flow:\n");
+        SinkOutputLine(sink, "\ncontrol_flow:\n");
 
         for (const auto& region : request.Facts.ControlFlow)
         {
@@ -7535,27 +7677,27 @@ void PrintExplainOutput(
 
             if (headerCommand.empty())
             {
-                OutputLine(control, control4, "%s\n", label.c_str());
+                SinkOutputLine(sink, "%s\n", label.c_str());
             }
             else
             {
-                OutputDmlLine(control, control4, advanced2, label, headerCommand);
+                OutputLinkLine(sink, label, headerCommand);
             }
 
             if (!region.Evidence.empty())
             {
-                OutputLine(control, control4, "  evidence: %s\n", region.Evidence.c_str());
+                SinkOutputLine(sink, "  evidence: %s\n", region.Evidence.c_str());
             }
 
-            OutputBlockLinkList(control, control4, advanced2, request.Facts, "body", region.BodyBlocks);
-            OutputBlockLinkList(control, control4, advanced2, request.Facts, "latch", region.LatchBlocks);
-            OutputBlockLinkList(control, control4, advanced2, request.Facts, "exit", region.ExitBlocks);
+            OutputBlockLinkList(sink, request.Facts, "body", region.BodyBlocks);
+            OutputBlockLinkList(sink, request.Facts, "latch", region.LatchBlocks);
+            OutputBlockLinkList(sink, request.Facts, "exit", region.ExitBlocks);
         }
     }
 
     if (!request.Facts.TypeHints.empty())
     {
-        OutputLine(control, control4, "\ntype_hints:\n");
+        SinkOutputLine(sink, "\ntype_hints:\n");
 
         for (const auto& hint : request.Facts.TypeHints)
         {
@@ -7564,24 +7706,24 @@ void PrintExplainOutput(
 
             if (hint.Site != 0)
             {
-                OutputDmlLine(control, control4, advanced2, label, BuildDisassembleAddressCommand(hint.Site));
+                OutputLinkLine(sink, label, BuildDisassembleAddressCommand(hint.Site));
             }
             else
             {
-                OutputLine(control, control4, "%s\n", label.c_str());
+                SinkOutputLine(sink, "%s\n", label.c_str());
             }
         }
     }
 
     if (!request.Facts.CallTargets.empty())
     {
-        OutputLine(control, control4, "\ncall_targets:\n");
+        SinkOutputLine(sink, "\ncall_targets:\n");
 
         for (const auto& call : request.Facts.CallTargets)
         {
             const std::string label = "- " + decomp::HexU64(call.Site) + " " + call.DisplayName + " " + call.TargetKind;
             const std::string command = call.TargetAddress != 0 ? BuildDisassembleCommand(call.TargetAddress, call.TargetAddress + 0x30) : ("u " + decomp::HexU64(call.Site));
-            OutputDmlLine(control, control4, advanced2, label, command);
+            OutputLinkLine(sink, label, command);
         }
     }
 
@@ -7589,10 +7731,9 @@ void PrintExplainOutput(
         || !request.Facts.ObservedBehavior.MemoryHotspots.empty()
         || !request.Facts.ObservedBehavior.TtdQueries.empty())
     {
-        OutputLine(control, control4, "\nobserved_behavior:\n");
-        OutputLine(
-            control,
-            control4,
+        SinkOutputLine(sink, "\nobserved_behavior:\n");
+        SinkOutputLine(
+            sink,
             "- ip=%s in_function=%s sp=%s confidence=%.2f\n",
             decomp::HexU64(request.Facts.ObservedBehavior.InstructionPointer).c_str(),
             request.Facts.ObservedBehavior.CurrentInstructionInFunction ? "true" : "false",
@@ -7601,9 +7742,8 @@ void PrintExplainOutput(
 
         for (const auto& argument : request.Facts.ObservedBehavior.ArgumentSamples)
         {
-            OutputLine(
-                control,
-                control4,
+            SinkOutputLine(
+                sink,
                 "- %s/%s = %s %s [%.2f]\n",
                 argument.Name.c_str(),
                 argument.Register.c_str(),
@@ -7614,9 +7754,8 @@ void PrintExplainOutput(
 
         for (const auto& hotspot : request.Facts.ObservedBehavior.MemoryHotspots)
         {
-            OutputLine(
-                control,
-                control4,
+            SinkOutputLine(
+                sink,
                 "- hotspot %s read=%u write=%u [%.2f]\n",
                 hotspot.Expression.c_str(),
                 hotspot.ReadCount,
@@ -7625,10 +7764,8 @@ void PrintExplainOutput(
 
             for (const auto& site : hotspot.Sites)
             {
-                OutputDmlLine(
-                    control,
-                    control4,
-                    advanced2,
+                OutputLinkLine(
+                    sink,
                     "  - site " + decomp::HexU64(site),
                     BuildDisassembleAddressCommand(site));
             }
@@ -7636,74 +7773,74 @@ void PrintExplainOutput(
 
         for (const auto& query : request.Facts.ObservedBehavior.TtdQueries)
         {
-            OutputDmlLine(control, control4, advanced2, "- " + query, query);
+            OutputLinkLine(sink, "- " + query, query);
         }
     }
 }
 
-void PrintResponse(
+void RenderResponse(
     const decomp::AnalyzeRequest& request,
     const decomp::AnalyzeResponse& response,
     const decomp::LlmClientConfig& displayConfig,
-    IDebugControl* control,
-    IDebugControl4* control4,
-    IDebugAdvanced2* advanced2,
+    ResponseOutputSink& sink,
     const decomp::DecompOptions& options)
 {
     if (options.JsonOutput)
     {
-        OutputLine(control, control4, "%s\n", decomp::SerializeAnalyzeRequest(request, true).c_str());
-        OutputLine(control, control4, "%s\n", decomp::SerializeAnalyzeResponse(response, true).c_str());
+        SinkOutputLine(sink, "%s\n", decomp::SerializeAnalyzeRequest(request, true).c_str());
+        SinkOutputLine(sink, "%s\n", decomp::SerializeAnalyzeResponse(response, true).c_str());
         return;
     }
 
     if (options.FactsOnlyOutput)
     {
-        PrintFactsOnly(request, control, control4);
+        PrintFactsOnly(request, sink);
         return;
     }
 
     if (options.DataModelOutput)
     {
-        PrintDataModelOutput(request, response, control, control4);
+        PrintDataModelOutput(request, response, sink);
         return;
     }
 
-    OutputLine(control, control4, "target      : %s\n", request.Facts.QueryText.c_str());
-    if (AreOutputCallbacksDmlAware(advanced2))
+    SinkOutputLine(sink, "target      : %s\n", request.Facts.QueryText.c_str());
+    if (sink.SupportsLinks())
     {
-        OutputDmlRaw(control, control4, "entry       : " + BuildDmlLink(decomp::HexU64(request.Facts.EntryAddress), BuildDisassembleCommand(request.Facts.EntryAddress, request.Facts.EntryAddress + 0x40)) + "\n");
+        sink.WriteText("entry       : ");
+        OutputLinkInline(sink, decomp::HexU64(request.Facts.EntryAddress), BuildDisassembleCommand(request.Facts.EntryAddress, request.Facts.EntryAddress + 0x40));
+        sink.WriteText("\n");
     }
     else
     {
-        OutputLine(control, control4, "entry       : %s\n", decomp::HexU64(request.Facts.EntryAddress).c_str());
+        SinkOutputLine(sink, "entry       : %s\n", decomp::HexU64(request.Facts.EntryAddress).c_str());
     }
-    OutputLine(control, control4, "query       : %s\n", decomp::HexU64(request.Facts.QueryAddress).c_str());
-    OutputLine(control, control4, "module      : %s\n", request.Facts.Module.ModuleName.c_str());
-    OutputLine(control, control4, "regions     : %llu\n", static_cast<unsigned long long>(request.Facts.Regions.size()));
-    OutputLine(control, control4, "session     : %s/%s\n", request.Facts.SessionPolicy.ExecutionKind.c_str(), request.Facts.SessionPolicy.AnalysisStrategy.c_str());
-    OutputLine(control, control4, "analyzer    : %.2f\n", request.Facts.PreLlmConfidence);
-    OutputLine(control, control4, "llm         : %.2f\n", response.Confidence);
-    OutputLine(control, control4, "verified    : %.2f\n", response.Verifier.AdjustedConfidence);
-    OutputLine(control, control4, "provider    : %s\n\n", response.Provider.c_str());
-    PrintActionLinks(request, control, control4, advanced2);
+    SinkOutputLine(sink, "query       : %s\n", decomp::HexU64(request.Facts.QueryAddress).c_str());
+    SinkOutputLine(sink, "module      : %s\n", request.Facts.Module.ModuleName.c_str());
+    SinkOutputLine(sink, "regions     : %llu\n", static_cast<unsigned long long>(request.Facts.Regions.size()));
+    SinkOutputLine(sink, "session     : %s/%s\n", request.Facts.SessionPolicy.ExecutionKind.c_str(), request.Facts.SessionPolicy.AnalysisStrategy.c_str());
+    SinkOutputLine(sink, "analyzer    : %.2f\n", request.Facts.PreLlmConfidence);
+    SinkOutputLine(sink, "llm         : %.2f\n", response.Confidence);
+    SinkOutputLine(sink, "verified    : %.2f\n", response.Verifier.AdjustedConfidence);
+    SinkOutputLine(sink, "provider    : %s\n\n", response.Provider.c_str());
+    PrintActionLinks(request, sink, options);
 
     if (!response.Summary.empty())
     {
         const std::string formattedSummary = FormatSummaryForDisplay(response.Summary);
-        OutputLine(control, control4, "summary:\n%s\n\n", formattedSummary.c_str());
+        SinkOutputLine(sink, "summary:\n%s\n\n", formattedSummary.c_str());
     }
 
     if (options.BriefOutput)
     {
         if (!response.Uncertainties.empty())
         {
-            PrintLinkedIssueLine("top_uncertainty: ", response.Uncertainties.front(), request, control, control4, advanced2);
+            PrintLinkedIssueLine("top_uncertainty: ", response.Uncertainties.front(), request, sink);
         }
 
         if (!response.Verifier.Warnings.empty())
         {
-            PrintLinkedIssueLine("top_warning    : ", response.Verifier.Warnings.front(), request, control, control4, advanced2);
+            PrintLinkedIssueLine("top_warning    : ", response.Verifier.Warnings.front(), request, sink);
         }
 
         return;
@@ -7711,13 +7848,13 @@ void PrintResponse(
 
     if (!response.PseudoC.empty())
     {
-        OutputLine(control, control4, "pseudo_c:\n");
-        PrintPseudoCodeHighlighted(response, displayConfig, control, control4, advanced2);
-        OutputLine(control, control4, "\n");
+        SinkOutputLine(sink, "pseudo_c:\n");
+        PrintPseudoCodeHighlighted(response, displayConfig, sink);
+        SinkOutputLine(sink, "\n");
     }
     if (!response.Uncertainties.empty())
     {
-        PrintLinkedIssueList("uncertainties", response.Uncertainties, request, control, control4, advanced2);
+        PrintLinkedIssueList("uncertainties", response.Uncertainties, request, sink);
     }
 
     if (!response.Verifier.Warnings.empty())
@@ -7739,20 +7876,1735 @@ void PrintResponse(
                 issueLines.push_back(std::move(line));
             }
 
-            PrintLinkedIssueList("verifier issues", issueLines, request, control, control4, advanced2);
+            PrintLinkedIssueList("verifier issues", issueLines, request, sink);
         }
         else
         {
-            PrintLinkedIssueList("verifier warnings", response.Verifier.Warnings, request, control, control4, advanced2);
+            PrintLinkedIssueList("verifier warnings", response.Verifier.Warnings, request, sink);
         }
     }
 
-    PrintSuggestedFixes(request, response, control, control4, advanced2);
+    PrintSuggestedFixes(request, response, sink);
 
     if (options.ExplainOutput)
     {
-        PrintExplainOutput(request, response, control, control4, advanced2);
+        PrintExplainOutput(request, response, sink);
     }
+}
+
+enum class ViewerRtfColor : int
+{
+    Text = 1,
+    Muted = 2,
+    Blue = 3,
+    Green = 4,
+    Purple = 5,
+    Red = 6,
+    Orange = 7,
+    Background = 8,
+    Border = 9
+};
+
+int ViewerRtfColorIndex(ViewerRtfColor color)
+{
+    return static_cast<int>(color);
+}
+
+void AppendRtfColor(std::string& rtf, ViewerRtfColor color)
+{
+    rtf += "\\cf";
+    rtf += std::to_string(ViewerRtfColorIndex(color));
+    rtf += " ";
+}
+
+void AppendRtfEscapedWide(std::string& rtf, const std::wstring& text)
+{
+    for (const wchar_t ch : text)
+    {
+        if (ch == L'\\')
+        {
+            rtf += "\\\\";
+        }
+        else if (ch == L'{')
+        {
+            rtf += "\\{";
+        }
+        else if (ch == L'}')
+        {
+            rtf += "\\}";
+        }
+        else if (ch == L'\t')
+        {
+            rtf += "\\tab ";
+        }
+        else if (ch == L'\r')
+        {
+            continue;
+        }
+        else if (ch == L'\n')
+        {
+            rtf += "\\line ";
+        }
+        else if (ch >= 0x20 && ch <= 0x7e)
+        {
+            rtf.push_back(static_cast<char>(ch));
+        }
+        else
+        {
+            const int signedValue = ch <= 0x7fff ? static_cast<int>(ch) : static_cast<int>(ch) - 0x10000;
+            rtf += "\\u";
+            rtf += std::to_string(signedValue);
+            rtf += "?";
+        }
+    }
+}
+
+void AppendRtfEscapedUtf8(std::string& rtf, const std::string& text)
+{
+    const std::wstring wide = Utf8ToWide(text);
+
+    if (!wide.empty() || text.empty())
+    {
+        AppendRtfEscapedWide(rtf, wide);
+        return;
+    }
+
+    for (const unsigned char ch : text)
+    {
+        if (ch == '\\')
+        {
+            rtf += "\\\\";
+        }
+        else if (ch == '{')
+        {
+            rtf += "\\{";
+        }
+        else if (ch == '}')
+        {
+            rtf += "\\}";
+        }
+        else if (ch >= 0x20 && ch <= 0x7e)
+        {
+            rtf.push_back(static_cast<char>(ch));
+        }
+        else
+        {
+            rtf += "?";
+        }
+    }
+}
+
+std::vector<std::string> SplitViewerTextLines(const std::string& text)
+{
+    std::vector<std::string> lines;
+    std::string current;
+
+    for (const char ch : text)
+    {
+        if (ch == '\r')
+        {
+            continue;
+        }
+
+        if (ch == '\n')
+        {
+            lines.push_back(current);
+            current.clear();
+            continue;
+        }
+
+        current.push_back(ch);
+    }
+
+    if (!current.empty())
+    {
+        lines.push_back(current);
+    }
+
+    return lines;
+}
+
+bool IsViewerSectionHeading(const std::string& line)
+{
+    const std::string heading = decomp::ToLowerAscii(decomp::TrimCopy(line));
+    static const std::set<std::string> kHeadings =
+    {
+        "summary:",
+        "pseudo_c:",
+        "uncertainties:",
+        "verifier issues:",
+        "verifier warnings:",
+        "suggested fixes:",
+        "evidence:",
+        "control_flow:",
+        "type_hints:",
+        "call_targets:",
+        "observed_behavior:"
+    };
+
+    return kHeadings.find(heading) != kHeadings.end();
+}
+
+bool TrySplitViewerMetadataLine(const std::string& line, std::string& key, std::string& value)
+{
+    bool success = false;
+
+    do
+    {
+        if (line.empty() || line.front() == ' ' || line.front() == '-')
+        {
+            break;
+        }
+
+        const size_t colon = line.find(':');
+
+        if (colon == std::string::npos || colon == 0 || colon > 18 || colon + 1 >= line.size())
+        {
+            break;
+        }
+
+        key = decomp::TrimCopy(line.substr(0, colon));
+        value = decomp::TrimCopy(line.substr(colon + 1));
+
+        if (key.empty() || value.empty())
+        {
+            break;
+        }
+
+        success = true;
+    }
+    while (false);
+
+    return success;
+}
+
+void AppendRtfCommandAwareText(std::string& rtf, const std::string& text)
+{
+    const std::string marker = " [cmd: ";
+    size_t cursor = 0;
+
+    while (cursor < text.size())
+    {
+        const size_t commandStart = text.find(marker, cursor);
+
+        if (commandStart == std::string::npos)
+        {
+            AppendRtfEscapedUtf8(rtf, text.substr(cursor));
+            break;
+        }
+
+        AppendRtfEscapedUtf8(rtf, text.substr(cursor, commandStart - cursor));
+
+        const size_t commandTextStart = commandStart + marker.size();
+        const size_t commandEnd = text.find(']', commandTextStart);
+
+        if (commandEnd == std::string::npos)
+        {
+            AppendRtfEscapedUtf8(rtf, text.substr(commandStart));
+            break;
+        }
+
+        rtf += "\\cf2\\f1\\fs16 ";
+        AppendRtfEscapedUtf8(rtf, "  ");
+        AppendRtfEscapedUtf8(rtf, text.substr(commandTextStart, commandEnd - commandTextStart));
+        rtf += "\\f0\\fs18\\cf1 ";
+        cursor = commandEnd + 1;
+    }
+}
+
+bool IsCodeIdentifierStart(char ch)
+{
+    return std::isalpha(static_cast<unsigned char>(ch)) != 0 || ch == '_';
+}
+
+bool IsCodeIdentifierChar(char ch)
+{
+    return std::isalnum(static_cast<unsigned char>(ch)) != 0 || ch == '_';
+}
+
+bool IsCodeKeyword(const std::string& token)
+{
+    static const std::set<std::string> kKeywords =
+    {
+        "auto",
+        "bool",
+        "break",
+        "case",
+        "char",
+        "const",
+        "continue",
+        "default",
+        "do",
+        "double",
+        "else",
+        "enum",
+        "false",
+        "float",
+        "for",
+        "goto",
+        "if",
+        "int",
+        "long",
+        "return",
+        "short",
+        "signed",
+        "sizeof",
+        "static",
+        "struct",
+        "switch",
+        "true",
+        "typedef",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "uint8_t",
+        "uintptr_t",
+        "union",
+        "unsigned",
+        "void",
+        "volatile",
+        "while"
+    };
+
+    return kKeywords.find(token) != kKeywords.end();
+}
+
+size_t GetUtf8SequenceLength(const std::string& text, size_t index)
+{
+    size_t length = 1;
+
+    do
+    {
+        if (index >= text.size())
+        {
+            break;
+        }
+
+        const unsigned char lead = static_cast<unsigned char>(text[index]);
+
+        if (lead < 0x80)
+        {
+            break;
+        }
+
+        if (lead >= 0xc2 && lead <= 0xdf)
+        {
+            length = 2;
+        }
+        else if (lead >= 0xe0 && lead <= 0xef)
+        {
+            length = 3;
+        }
+        else if (lead >= 0xf0 && lead <= 0xf4)
+        {
+            length = 4;
+        }
+
+        if (index + length > text.size())
+        {
+            length = text.size() - index;
+            break;
+        }
+
+        for (size_t offset = 1; offset < length; ++offset)
+        {
+            const unsigned char ch = static_cast<unsigned char>(text[index + offset]);
+
+            if (ch < 0x80 || ch > 0xbf)
+            {
+                length = offset;
+                break;
+            }
+        }
+    }
+    while (false);
+
+    return length;
+}
+
+void AppendRtfCodeToken(std::string& rtf, const std::string& token, ViewerRtfColor color, bool bold)
+{
+    AppendRtfColor(rtf, color);
+
+    if (bold)
+    {
+        rtf += "\\b ";
+    }
+
+    AppendRtfEscapedUtf8(rtf, token);
+
+    if (bold)
+    {
+        rtf += "\\b0 ";
+    }
+
+    AppendRtfColor(rtf, ViewerRtfColor::Text);
+}
+
+void AppendRtfHighlightedCodeLine(std::string& rtf, const std::string& line)
+{
+    size_t index = 0;
+
+    while (index < line.size())
+    {
+        if (index + 1 < line.size() && line[index] == '/' && line[index + 1] == '/')
+        {
+            AppendRtfCodeToken(rtf, line.substr(index), ViewerRtfColor::Green, false);
+            return;
+        }
+
+        if (line[index] == '"' || line[index] == '\'')
+        {
+            const char quote = line[index];
+            size_t end = index + 1;
+            bool escaped = false;
+
+            while (end < line.size())
+            {
+                const char ch = line[end];
+
+                if (!escaped && ch == quote)
+                {
+                    ++end;
+                    break;
+                }
+
+                escaped = !escaped && ch == '\\';
+
+                if (ch != '\\')
+                {
+                    escaped = false;
+                }
+
+                ++end;
+            }
+
+            AppendRtfCodeToken(rtf, line.substr(index, end - index), ViewerRtfColor::Red, false);
+            index = end;
+            continue;
+        }
+
+        if (std::isdigit(static_cast<unsigned char>(line[index])) != 0)
+        {
+            size_t end = index + 1;
+
+            while (end < line.size())
+            {
+                const char ch = line[end];
+
+                if (std::isalnum(static_cast<unsigned char>(ch)) == 0 && ch != 'x' && ch != 'X' && ch != '`' && ch != '.')
+                {
+                    break;
+                }
+
+                ++end;
+            }
+
+            AppendRtfCodeToken(rtf, line.substr(index, end - index), ViewerRtfColor::Orange, false);
+            index = end;
+            continue;
+        }
+
+        if (IsCodeIdentifierStart(line[index]))
+        {
+            size_t end = index + 1;
+
+            while (end < line.size() && IsCodeIdentifierChar(line[end]))
+            {
+                ++end;
+            }
+
+            const std::string token = line.substr(index, end - index);
+            size_t next = end;
+
+            while (next < line.size() && std::isspace(static_cast<unsigned char>(line[next])) != 0)
+            {
+                ++next;
+            }
+
+            if (IsCodeKeyword(token))
+            {
+                AppendRtfCodeToken(rtf, token, ViewerRtfColor::Purple, true);
+            }
+            else if (next < line.size() && line[next] == '(')
+            {
+                AppendRtfCodeToken(rtf, token, ViewerRtfColor::Blue, false);
+            }
+            else
+            {
+                AppendRtfEscapedUtf8(rtf, token);
+            }
+
+            index = end;
+            continue;
+        }
+
+        if ((static_cast<unsigned char>(line[index]) & 0x80) != 0)
+        {
+            const size_t length = GetUtf8SequenceLength(line, index);
+            AppendRtfEscapedUtf8(rtf, line.substr(index, length));
+            index += length;
+            continue;
+        }
+
+        AppendRtfEscapedUtf8(rtf, std::string(1, line[index]));
+        ++index;
+    }
+}
+
+void AppendRtfTitle(std::string& rtf, const decomp::AnalyzeRequest& request)
+{
+    rtf += "\\pard\\plain\\f0\\fs28\\b\\cf1 ";
+    AppendRtfEscapedUtf8(rtf, "!decomp ");
+    AppendRtfEscapedUtf8(rtf, request.Facts.QueryText);
+    rtf += "\\b0\\par\n";
+    rtf += "\\pard\\plain\\f0\\fs17\\cf2 ";
+    AppendRtfEscapedUtf8(rtf, "GitHub-style native viewer");
+    rtf += "\\par\\par\n";
+}
+
+void AppendRtfSectionHeading(std::string& rtf, const std::string& line)
+{
+    std::string label = decomp::TrimCopy(line);
+
+    if (!label.empty() && label.back() == ':')
+    {
+        label.pop_back();
+    }
+
+    rtf += "\\pard\\plain\\f0\\fs22\\b\\cf1\\sb160\\sa40 ";
+    AppendRtfEscapedUtf8(rtf, label);
+    rtf += "\\b0\\par\n";
+}
+
+void AppendRtfMetadataLine(std::string& rtf, const std::string& key, const std::string& value)
+{
+    rtf += "\\pard\\plain\\f0\\fs18\\cf1\\sa20 ";
+    rtf += "\\cf2\\b ";
+    AppendRtfEscapedUtf8(rtf, key);
+    rtf += "\\b0\\cf1  ";
+    AppendRtfCommandAwareText(rtf, value);
+    rtf += "\\par\n";
+}
+
+void AppendRtfBulletLine(std::string& rtf, const std::string& line)
+{
+    const size_t firstText = line.find_first_not_of(' ');
+    const size_t leadingSpaces = firstText == std::string::npos ? 0 : firstText;
+    const int leftIndent = 240 + static_cast<int>((leadingSpaces / 2) * 240);
+
+    rtf += "\\pard\\plain\\f0\\fs18\\cf1\\li";
+    rtf += std::to_string(leftIndent);
+    rtf += "\\fi-180 ";
+    AppendRtfCommandAwareText(rtf, decomp::TrimCopy(line));
+    rtf += "\\par\n";
+}
+
+void AppendRtfPlainLine(std::string& rtf, const std::string& line)
+{
+    rtf += "\\pard\\plain\\f0\\fs18\\cf1 ";
+    AppendRtfCommandAwareText(rtf, line);
+    rtf += "\\par\n";
+}
+
+void AppendRtfCodeLine(std::string& rtf, const std::string& line)
+{
+    rtf += "\\pard\\plain\\f1\\fs18\\cf1\\li240 ";
+
+    if (line.empty())
+    {
+        rtf += " ";
+    }
+    else
+    {
+        AppendRtfHighlightedCodeLine(rtf, line);
+    }
+
+    rtf += "\\par\n";
+}
+
+std::string BuildPrettyViewerRtf(const decomp::AnalyzeRequest& request, const std::string& text)
+{
+    std::string rtf;
+    rtf.reserve(text.size() * 2U + 4096U);
+    rtf += "{\\rtf1\\ansi\\deff0\\uc1\n";
+    rtf += "{\\fonttbl{\\f0\\fnil\\fcharset0 Segoe UI;}{\\f1\\fmodern\\fcharset0 Consolas;}}\n";
+    rtf += "{\\colortbl ;";
+    rtf += "\\red36\\green41\\blue47;";
+    rtf += "\\red87\\green96\\blue106;";
+    rtf += "\\red9\\green105\\blue218;";
+    rtf += "\\red17\\green99\\blue41;";
+    rtf += "\\red130\\green80\\blue223;";
+    rtf += "\\red207\\green34\\blue46;";
+    rtf += "\\red149\\green56\\blue0;";
+    rtf += "\\red246\\green248\\blue250;";
+    rtf += "\\red208\\green215\\blue222;";
+    rtf += "}\n";
+    rtf += "\\viewkind4\\fs18\\cf1\n";
+
+    AppendRtfTitle(rtf, request);
+
+    bool inPseudoCode = false;
+    const std::vector<std::string> lines = SplitViewerTextLines(text);
+
+    for (const std::string& line : lines)
+    {
+        const std::string trimmed = decomp::TrimCopy(line);
+        const std::string lower = decomp::ToLowerAscii(trimmed);
+
+        if (lower == "pseudo_c:")
+        {
+            AppendRtfSectionHeading(rtf, line);
+            inPseudoCode = true;
+            continue;
+        }
+
+        if (inPseudoCode && !line.empty() && line.front() != ' ' && IsViewerSectionHeading(line))
+        {
+            inPseudoCode = false;
+        }
+
+        if (inPseudoCode)
+        {
+            AppendRtfCodeLine(rtf, line);
+            continue;
+        }
+
+        if (trimmed.empty())
+        {
+            rtf += "\\pard\\plain\\f0\\fs10\\par\n";
+            continue;
+        }
+
+        if (IsViewerSectionHeading(line))
+        {
+            AppendRtfSectionHeading(rtf, line);
+            continue;
+        }
+
+        std::string key;
+        std::string value;
+
+        if (TrySplitViewerMetadataLine(line, key, value))
+        {
+            AppendRtfMetadataLine(rtf, key, value);
+            continue;
+        }
+
+        if (!trimmed.empty() && trimmed.front() == '-')
+        {
+            AppendRtfBulletLine(rtf, line);
+            continue;
+        }
+
+        AppendRtfPlainLine(rtf, line);
+    }
+
+    rtf += "}";
+    return rtf;
+}
+
+struct NativeViewerRtfStream
+{
+    const char* Data = nullptr;
+    size_t Size = 0;
+    size_t Offset = 0;
+};
+
+struct NativeViewerHistoryEntry
+{
+    std::wstring Label;
+    std::wstring Text;
+    std::string RtfText;
+};
+
+DWORD CALLBACK NativeViewerEditStreamCallback(DWORD_PTR cookie, LPBYTE buffer, LONG byteCount, LONG* copied)
+{
+    NativeViewerRtfStream* stream = reinterpret_cast<NativeViewerRtfStream*>(cookie);
+
+    if (stream == nullptr || buffer == nullptr || copied == nullptr || byteCount <= 0)
+    {
+        if (copied != nullptr)
+        {
+            *copied = 0;
+        }
+
+        return 0;
+    }
+
+    const size_t remaining = stream->Offset < stream->Size ? stream->Size - stream->Offset : 0;
+    const size_t bytesToCopy = std::min(remaining, static_cast<size_t>(byteCount));
+
+    if (bytesToCopy > 0)
+    {
+        std::memcpy(buffer, stream->Data + stream->Offset, bytesToCopy);
+        stream->Offset += bytesToCopy;
+    }
+
+    *copied = static_cast<LONG>(bytesToCopy);
+    return 0;
+}
+
+struct NativeViewerWindowState
+{
+    std::wstring Title;
+    std::wstring Text;
+    std::string RtfText;
+    HWND Edit = nullptr;
+    HWND HistoryList = nullptr;
+    HFONT Font = nullptr;
+    HMODULE RichEditModule = nullptr;
+    std::vector<NativeViewerHistoryEntry> HistoryEntries;
+    size_t ActiveHistoryIndex = 0;
+    bool SupportsEditMessages = false;
+    bool SupportsRichText = false;
+};
+
+bool StreamNativeViewerRichText(NativeViewerWindowState& state)
+{
+    bool success = false;
+
+    do
+    {
+        if (!state.SupportsRichText || state.Edit == nullptr || state.RtfText.empty())
+        {
+            break;
+        }
+
+        NativeViewerRtfStream stream;
+        stream.Data = state.RtfText.data();
+        stream.Size = state.RtfText.size();
+
+        EDITSTREAM editStream = {};
+        editStream.dwCookie = reinterpret_cast<DWORD_PTR>(&stream);
+        editStream.pfnCallback = NativeViewerEditStreamCallback;
+
+        SendMessageW(state.Edit, EM_SETREADONLY, FALSE, 0);
+        SetWindowTextW(state.Edit, L"");
+        const LRESULT result = SendMessageW(state.Edit, EM_STREAMIN, SF_RTF, reinterpret_cast<LPARAM>(&editStream));
+        SendMessageW(state.Edit, EM_SETREADONLY, TRUE, 0);
+
+        if (result == 0 || editStream.dwError != 0 || stream.Offset != stream.Size)
+        {
+            break;
+        }
+
+        success = true;
+    }
+    while (false);
+
+    return success;
+}
+
+bool SetNativeViewerEntry(NativeViewerWindowState& state, size_t index)
+{
+    bool success = false;
+
+    do
+    {
+        if (index >= state.HistoryEntries.size())
+        {
+            break;
+        }
+
+        state.ActiveHistoryIndex = index;
+        state.Text = state.HistoryEntries[index].Text;
+        state.RtfText = state.HistoryEntries[index].RtfText;
+
+        if (state.HistoryList != nullptr)
+        {
+            SendMessageW(state.HistoryList, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
+        }
+
+        if (state.Edit == nullptr)
+        {
+            success = true;
+            break;
+        }
+
+        bool usedRichText = false;
+
+        if (state.SupportsRichText)
+        {
+            SendMessageW(state.Edit, EM_SETBKGNDCOLOR, 0, RGB(246, 248, 250));
+            usedRichText = StreamNativeViewerRichText(state);
+        }
+
+        if (!usedRichText)
+        {
+            SetWindowTextW(state.Edit, state.Text.c_str());
+        }
+
+        if (state.SupportsEditMessages)
+        {
+            SendMessageW(state.Edit, EM_SETSEL, 0, 0);
+        }
+
+        success = true;
+    }
+    while (false);
+
+    return success;
+}
+
+int GetNativeViewerHistoryListWidth(int clientWidth)
+{
+    int width = 0;
+
+    do
+    {
+        if (clientWidth < 560)
+        {
+            break;
+        }
+
+        width = clientWidth / 4;
+
+        if (width < 240)
+        {
+            width = 240;
+        }
+        else if (width > 360)
+        {
+            width = 360;
+        }
+    }
+    while (false);
+
+    return width;
+}
+
+void LayoutNativeViewerControls(NativeViewerWindowState& state, int clientWidth, int clientHeight)
+{
+    const int listWidth = GetNativeViewerHistoryListWidth(clientWidth);
+
+    if (state.HistoryList != nullptr)
+    {
+        ShowWindow(state.HistoryList, listWidth > 0 ? SW_SHOW : SW_HIDE);
+        MoveWindow(state.HistoryList, 0, 0, listWidth, clientHeight, TRUE);
+    }
+
+    if (state.Edit != nullptr)
+    {
+        const int editX = listWidth > 0 ? listWidth + 1 : 0;
+        const int editWidth = clientWidth > editX ? clientWidth - editX : 0;
+        MoveWindow(state.Edit, editX, 0, editWidth, clientHeight, TRUE);
+    }
+}
+
+struct NativeViewerLaunchSync
+{
+    HANDLE ReadyEvent = nullptr;
+    bool Success = false;
+    bool Abandoned = false;
+    HWND WindowHandle = nullptr;
+    HWND OwnerHandle = nullptr;
+    std::string Error;
+    std::mutex Mutex;
+
+    ~NativeViewerLaunchSync()
+    {
+        if (ReadyEvent != nullptr)
+        {
+            CloseHandle(ReadyEvent);
+            ReadyEvent = nullptr;
+        }
+    }
+};
+
+struct NativeViewerThreadContext
+{
+    NativeViewerWindowState* State = nullptr;
+    std::shared_ptr<NativeViewerLaunchSync> Sync;
+    HWND Owner = nullptr;
+    HMODULE Module = nullptr;
+};
+
+constexpr wchar_t kNativeViewerWindowClass[] = L"WindbgDecompNativeViewerWindow";
+constexpr DWORD kNativeViewerLaunchTimeoutMs = 15000;
+constexpr UINT_PTR kNativeViewerHistoryListId = 2;
+
+LRESULT CALLBACK NativeViewerWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    NativeViewerWindowState* state = reinterpret_cast<NativeViewerWindowState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+
+    switch (message)
+    {
+    case WM_CREATE:
+    {
+        const CREATESTRUCTW* create = reinterpret_cast<const CREATESTRUCTW*>(lparam);
+        state = reinterpret_cast<NativeViewerWindowState*>(create->lpCreateParams);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+
+        if (state->HistoryEntries.empty())
+        {
+            NativeViewerHistoryEntry entry;
+            entry.Label = L"current";
+            entry.Text = state->Text;
+            entry.RtfText = state->RtfText;
+            state->HistoryEntries.push_back(std::move(entry));
+        }
+
+        if (state->HistoryEntries.size() > 1)
+        {
+            state->HistoryList = CreateWindowExW(
+                WS_EX_CLIENTEDGE,
+                L"LISTBOX",
+                L"",
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+                0,
+                0,
+                0,
+                0,
+                window,
+                reinterpret_cast<HMENU>(kNativeViewerHistoryListId),
+                GetModuleHandleW(nullptr),
+                nullptr);
+
+            if (state->HistoryList != nullptr)
+            {
+                for (const NativeViewerHistoryEntry& entry : state->HistoryEntries)
+                {
+                    SendMessageW(state->HistoryList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(entry.Label.c_str()));
+                }
+            }
+        }
+
+        state->RichEditModule = LoadLibraryW(L"Msftedit.dll");
+        const wchar_t* editClass = state->RichEditModule != nullptr ? L"RICHEDIT50W" : L"EDIT";
+        const bool requestedRichEdit = state->RichEditModule != nullptr;
+        const DWORD editStyle = WS_CHILD
+            | WS_VISIBLE
+            | WS_VSCROLL
+            | WS_HSCROLL
+            | ES_MULTILINE
+            | ES_READONLY
+            | ES_AUTOVSCROLL
+            | ES_AUTOHSCROLL;
+
+        state->Edit = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            editClass,
+            L"",
+            editStyle,
+            0,
+            0,
+            0,
+            0,
+            window,
+            reinterpret_cast<HMENU>(static_cast<UINT_PTR>(1)),
+            GetModuleHandleW(nullptr),
+            nullptr);
+        state->SupportsEditMessages = state->Edit != nullptr;
+        state->SupportsRichText = requestedRichEdit && state->Edit != nullptr;
+
+        if (state->Edit == nullptr && state->RichEditModule != nullptr)
+        {
+            FreeLibrary(state->RichEditModule);
+            state->RichEditModule = nullptr;
+            state->Edit = CreateWindowExW(
+                WS_EX_CLIENTEDGE,
+                L"EDIT",
+                L"",
+                editStyle,
+                0,
+                0,
+                0,
+                0,
+                window,
+                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(1)),
+                GetModuleHandleW(nullptr),
+                nullptr);
+            state->SupportsEditMessages = state->Edit != nullptr;
+            state->SupportsRichText = false;
+        }
+
+        if (state->Edit == nullptr)
+        {
+            state->Edit = CreateWindowExW(
+                WS_EX_CLIENTEDGE,
+                L"STATIC",
+                state->Text.c_str(),
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                0,
+                0,
+                0,
+                0,
+                window,
+                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(1)),
+                GetModuleHandleW(nullptr),
+                nullptr);
+            state->SupportsEditMessages = false;
+            state->SupportsRichText = false;
+        }
+
+        if (state->Edit != nullptr)
+        {
+            if (state->SupportsEditMessages)
+            {
+                SendMessageW(state->Edit, EM_SETLIMITTEXT, static_cast<WPARAM>(0x7FFFFFFE), 0);
+            }
+
+            state->Font = CreateFontW(
+                -14,
+                0,
+                0,
+                0,
+                FW_NORMAL,
+                FALSE,
+                FALSE,
+                FALSE,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
+                FIXED_PITCH | FF_MODERN,
+                L"Consolas");
+
+            if (state->Font != nullptr)
+            {
+                SendMessageW(state->Edit, WM_SETFONT, reinterpret_cast<WPARAM>(state->Font), TRUE);
+
+                if (state->HistoryList != nullptr)
+                {
+                    SendMessageW(state->HistoryList, WM_SETFONT, reinterpret_cast<WPARAM>(state->Font), TRUE);
+                }
+            }
+
+            SetNativeViewerEntry(*state, state->ActiveHistoryIndex);
+
+            RECT clientRect = {};
+            GetClientRect(window, &clientRect);
+            LayoutNativeViewerControls(*state, clientRect.right - clientRect.left, clientRect.bottom - clientRect.top);
+        }
+
+        return 0;
+    }
+    case WM_SIZE:
+    {
+        if (state != nullptr)
+        {
+            LayoutNativeViewerControls(*state, LOWORD(lparam), HIWORD(lparam));
+        }
+
+        return 0;
+    }
+    case WM_COMMAND:
+    {
+        if (state != nullptr
+            && LOWORD(wparam) == kNativeViewerHistoryListId
+            && HIWORD(wparam) == LBN_SELCHANGE
+            && state->HistoryList != nullptr)
+        {
+            const LRESULT selected = SendMessageW(state->HistoryList, LB_GETCURSEL, 0, 0);
+
+            if (selected >= 0)
+            {
+                SetNativeViewerEntry(*state, static_cast<size_t>(selected));
+            }
+
+            return 0;
+        }
+
+        break;
+    }
+    case WM_SETFOCUS:
+    {
+        if (state != nullptr && state->Edit != nullptr)
+        {
+            SetFocus(state->Edit);
+        }
+
+        return 0;
+    }
+    case WM_CLOSE:
+    {
+        DestroyWindow(window);
+        return 0;
+    }
+    case WM_DESTROY:
+    {
+        PostQuitMessage(0);
+        return 0;
+    }
+    case WM_NCDESTROY:
+    {
+        if (state != nullptr)
+        {
+            if (state->Font != nullptr)
+            {
+                DeleteObject(state->Font);
+                state->Font = nullptr;
+            }
+
+            if (state->RichEditModule != nullptr)
+            {
+                FreeLibrary(state->RichEditModule);
+                state->RichEditModule = nullptr;
+            }
+
+            SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+            delete state;
+        }
+
+        return 0;
+    }
+    default:
+        break;
+    }
+
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
+bool PinNativeViewerModule(HMODULE& module, std::string& error)
+{
+    bool success = false;
+    module = nullptr;
+
+    do
+    {
+        if (!GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            reinterpret_cast<LPCWSTR>(&NativeViewerWindowProc),
+            &module))
+        {
+            error = "failed to pin native viewer module: " + FormatWin32Error(GetLastError());
+            break;
+        }
+
+        success = true;
+    }
+    while (false);
+
+    return success;
+}
+
+bool RegisterNativeViewerWindowClass(HMODULE module, std::string& error)
+{
+    bool success = false;
+
+    do
+    {
+        HMODULE instance = module;
+
+        if (instance == nullptr)
+        {
+            instance = GetModuleHandleW(nullptr);
+        }
+
+        WNDCLASSEXW windowClass = {};
+        windowClass.cbSize = sizeof(windowClass);
+        windowClass.style = CS_HREDRAW | CS_VREDRAW;
+        windowClass.lpfnWndProc = NativeViewerWindowProc;
+        windowClass.hInstance = instance;
+        windowClass.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+        windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        windowClass.lpszClassName = kNativeViewerWindowClass;
+
+        if (RegisterClassExW(&windowClass) == 0)
+        {
+            const DWORD registerError = GetLastError();
+
+            if (registerError != ERROR_CLASS_ALREADY_EXISTS)
+            {
+                error = "failed to register native viewer window class: " + FormatWin32Error(registerError);
+                break;
+            }
+        }
+
+        success = true;
+    }
+    while (false);
+
+    return success;
+}
+
+struct DebuggerOwnerWindowSearch
+{
+    HWND First = nullptr;
+    HWND Preferred = nullptr;
+};
+
+BOOL CALLBACK FindDebuggerOwnerWindowProc(HWND window, LPARAM parameter)
+{
+    DebuggerOwnerWindowSearch* search = reinterpret_cast<DebuggerOwnerWindowSearch*>(parameter);
+    DWORD processId = 0;
+    GetWindowThreadProcessId(window, &processId);
+
+    if (processId != GetCurrentProcessId())
+    {
+        return TRUE;
+    }
+
+    if (!IsWindowVisible(window) || GetWindow(window, GW_OWNER) != nullptr)
+    {
+        return TRUE;
+    }
+
+    std::array<wchar_t, 128> className = {};
+    GetClassNameW(window, className.data(), static_cast<int>(className.size()));
+
+    if (std::wstring(className.data()) == kNativeViewerWindowClass)
+    {
+        return TRUE;
+    }
+
+    std::array<wchar_t, 256> title = {};
+    GetWindowTextW(window, title.data(), static_cast<int>(title.size()));
+
+    if (title[0] == L'\0')
+    {
+        return TRUE;
+    }
+
+    if (search->First == nullptr)
+    {
+        search->First = window;
+    }
+
+    const std::wstring titleText = title.data();
+
+    if (titleText.find(L"WinDbg") != std::wstring::npos
+        || titleText.find(L"Windows Debugger") != std::wstring::npos
+        || titleText.find(L"Debugger") != std::wstring::npos)
+    {
+        search->Preferred = window;
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+HWND FindDebuggerOwnerWindow()
+{
+    DebuggerOwnerWindowSearch search;
+    EnumWindows(FindDebuggerOwnerWindowProc, reinterpret_cast<LPARAM>(&search));
+    return search.Preferred != nullptr ? search.Preferred : search.First;
+}
+
+void SignalNativeViewerLaunch(
+    const std::shared_ptr<NativeViewerLaunchSync>& sync,
+    bool success,
+    HWND window,
+    HWND owner,
+    const std::string& error)
+{
+    if (!sync)
+    {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(sync->Mutex);
+        sync->Success = success;
+        sync->WindowHandle = window;
+        sync->OwnerHandle = owner;
+        sync->Error = error;
+
+        if (sync->ReadyEvent != nullptr)
+        {
+            SetEvent(sync->ReadyEvent);
+        }
+    }
+}
+
+bool TrySignalNativeViewerLaunchSuccess(
+    const std::shared_ptr<NativeViewerLaunchSync>& sync,
+    HWND window,
+    HWND owner)
+{
+    bool success = false;
+
+    do
+    {
+        if (!sync)
+        {
+            break;
+        }
+
+        std::lock_guard<std::mutex> lock(sync->Mutex);
+
+        if (sync->Abandoned)
+        {
+            break;
+        }
+
+        sync->Success = true;
+        sync->WindowHandle = window;
+        sync->OwnerHandle = owner;
+        sync->Error.clear();
+
+        if (sync->ReadyEvent != nullptr)
+        {
+            SetEvent(sync->ReadyEvent);
+        }
+
+        success = true;
+    }
+    while (false);
+
+    return success;
+}
+
+void NativeViewerThreadMain(NativeViewerThreadContext* rawContext)
+{
+    HMODULE module = rawContext != nullptr ? rawContext->Module : nullptr;
+
+    {
+        std::unique_ptr<NativeViewerThreadContext> context(rawContext);
+        std::unique_ptr<NativeViewerWindowState> state(context != nullptr ? context->State : nullptr);
+        std::string error;
+        HWND window = nullptr;
+        bool enteredMessageLoop = false;
+
+        do
+        {
+            if (context == nullptr || context->Sync == nullptr || state == nullptr)
+            {
+                error = "native viewer thread context is invalid";
+                break;
+            }
+
+            if (!RegisterNativeViewerWindowClass(module, error))
+            {
+                break;
+            }
+
+            const DWORD exStyle = WS_EX_WINDOWEDGE | (context->Owner != nullptr ? WS_EX_TOOLWINDOW : WS_EX_APPWINDOW);
+            window = CreateWindowExW(
+                exStyle,
+                kNativeViewerWindowClass,
+                state->Title.c_str(),
+                WS_OVERLAPPEDWINDOW,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                980,
+                720,
+                context->Owner,
+                nullptr,
+                module != nullptr ? module : GetModuleHandleW(nullptr),
+                state.get());
+
+            if (window == nullptr)
+            {
+                error = "failed to create native viewer window: " + FormatWin32Error(GetLastError());
+                break;
+            }
+
+            state.release();
+
+            if (!TrySignalNativeViewerLaunchSuccess(context->Sync, window, context->Owner))
+            {
+                DestroyWindow(window);
+                window = nullptr;
+                error = "native viewer launch was abandoned";
+                break;
+            }
+
+            ShowWindow(window, SW_SHOWNORMAL);
+            UpdateWindow(window);
+
+            MSG message = {};
+            enteredMessageLoop = true;
+
+            while (GetMessageW(&message, nullptr, 0, 0) > 0)
+            {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+        while (false);
+
+        if (!enteredMessageLoop)
+        {
+            if (window != nullptr)
+            {
+                DestroyWindow(window);
+                window = nullptr;
+            }
+
+            SignalNativeViewerLaunch(
+                context != nullptr ? context->Sync : nullptr,
+                false,
+                nullptr,
+                context != nullptr ? context->Owner : nullptr,
+                error.empty() ? std::string("failed to open native viewer") : error);
+        }
+    }
+
+    if (module != nullptr)
+    {
+        UnregisterClassW(kNativeViewerWindowClass, module);
+        FreeLibraryAndExitThread(module, 0);
+    }
+}
+
+bool BuildNativeViewerHistoryEntry(
+    const std::string& label,
+    const decomp::AnalyzeRequest& request,
+    const decomp::AnalyzeResponse& response,
+    const decomp::LlmClientConfig& displayConfig,
+    const decomp::DecompOptions& options,
+    uint32_t cacheIndex,
+    NativeViewerHistoryEntry& entry,
+    std::string& error)
+{
+    bool success = false;
+
+    do
+    {
+        PlainTextResponseOutputSink sink;
+        decomp::DecompOptions renderOptions = options;
+        renderOptions.WindowOutput = false;
+        renderOptions.LastCacheIndex = cacheIndex == 0 ? 1 : cacheIndex;
+        RenderResponse(request, response, displayConfig, sink, renderOptions);
+
+        entry.Label = Utf8ToWide(label);
+        entry.Text = Utf8ToWide(sink.GetText());
+        entry.RtfText = BuildPrettyViewerRtf(request, sink.GetText());
+
+        if (entry.Label.empty() && !label.empty())
+        {
+            error = "failed to convert viewer history label to UTF-16";
+            break;
+        }
+
+        if (entry.Text.empty() && !sink.GetText().empty())
+        {
+            error = "failed to convert viewer text to UTF-16";
+            break;
+        }
+
+        success = true;
+    }
+    while (false);
+
+    return success;
+}
+
+std::string BuildNativeViewerCurrentLabel(const decomp::AnalyzeRequest& request)
+{
+    return "current  " + request.Facts.QueryText;
+}
+
+std::string BuildNativeViewerArtifactLabel(const CachedAnalyzeArtifact& artifact, size_t historyIndex)
+{
+    std::string label = "#" + std::to_string(historyIndex) + "  ";
+
+    if (!artifact.Timestamp.empty())
+    {
+        label += artifact.Timestamp;
+        label += "  ";
+    }
+
+    if (artifact.EntryAddress != 0)
+    {
+        label += decomp::HexU64(artifact.EntryAddress);
+        label += "  ";
+    }
+
+    if (!artifact.Target.empty())
+    {
+        label += artifact.Target;
+    }
+    else
+    {
+        label += "<unknown>";
+    }
+
+    if (!artifact.Provider.empty())
+    {
+        label += "  ";
+        label += artifact.Provider;
+    }
+
+    if (artifact.VerifierIssueCount != 0)
+    {
+        label += "  issues=";
+        label += std::to_string(static_cast<unsigned long long>(artifact.VerifierIssueCount));
+    }
+
+    return label;
+}
+
+bool IsSameNativeViewerArtifact(
+    const CachedAnalyzeArtifact& artifact,
+    const decomp::AnalyzeRequest& request,
+    const decomp::AnalyzeResponse& response)
+{
+    bool same = false;
+
+    do
+    {
+        if (!request.RequestId.empty() && !artifact.RequestId.empty())
+        {
+            same = artifact.RequestId == request.RequestId;
+            break;
+        }
+
+        if (!request.RequestId.empty() || !artifact.RequestId.empty())
+        {
+            break;
+        }
+
+        if (artifact.Target == request.Facts.QueryText
+            && artifact.EntryAddress == request.Facts.EntryAddress
+            && artifact.Provider == response.Provider)
+        {
+            same = true;
+            break;
+        }
+    }
+    while (false);
+
+    return same;
+}
+
+std::vector<NativeViewerHistoryEntry> BuildNativeViewerHistoryEntries(
+    const decomp::AnalyzeRequest& request,
+    const decomp::AnalyzeResponse& response,
+    const decomp::LlmClientConfig& displayConfig,
+    const decomp::DecompOptions& options,
+    std::string& error)
+{
+    std::vector<NativeViewerHistoryEntry> entries;
+    NativeViewerHistoryEntry currentEntry;
+
+    if (!BuildNativeViewerHistoryEntry(BuildNativeViewerCurrentLabel(request), request, response, displayConfig, options, 1, currentEntry, error))
+    {
+        return entries;
+    }
+
+    entries.push_back(std::move(currentEntry));
+
+    for (size_t index = 0; index < g_analyzeHistory.size(); ++index)
+    {
+        const CachedAnalyzeArtifact& artifact = g_analyzeHistory[index];
+
+        if (IsSameNativeViewerArtifact(artifact, request, response))
+        {
+            continue;
+        }
+
+        decomp::AnalyzeRequest cachedRequest;
+        decomp::AnalyzeResponse cachedResponse;
+        std::string parseError;
+
+        if (!decomp::ParseAnalyzeRequest(artifact.RequestJson, cachedRequest, parseError))
+        {
+            continue;
+        }
+
+        if (!decomp::ParseAnalyzeResponse(artifact.ResponseJson, cachedResponse, parseError))
+        {
+            continue;
+        }
+
+        NativeViewerHistoryEntry entry;
+
+        if (BuildNativeViewerHistoryEntry(
+            BuildNativeViewerArtifactLabel(artifact, index + 1),
+            cachedRequest,
+            cachedResponse,
+            displayConfig,
+            options,
+            static_cast<uint32_t>(index + 1),
+            entry,
+            parseError))
+        {
+            entries.push_back(std::move(entry));
+        }
+    }
+
+    return entries;
+}
+
+std::string FormatWindowHandle(HWND window)
+{
+    return decomp::HexU64(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(window)));
+}
+
+bool OpenResponseViewer(
+    const decomp::AnalyzeRequest& request,
+    const decomp::AnalyzeResponse& response,
+    const decomp::LlmClientConfig& displayConfig,
+    const decomp::DecompOptions& options,
+    std::string& viewerDescription,
+    std::string& error)
+{
+    bool success = false;
+    std::shared_ptr<NativeViewerLaunchSync> sync = std::make_shared<NativeViewerLaunchSync>();
+    HMODULE module = nullptr;
+    size_t viewerHistoryCount = 0;
+
+    do
+    {
+        std::vector<NativeViewerHistoryEntry> historyEntries = BuildNativeViewerHistoryEntries(
+            request,
+            response,
+            displayConfig,
+            options,
+            error);
+
+        if (historyEntries.empty())
+        {
+            if (error.empty())
+            {
+                error = "failed to build native viewer history entries";
+            }
+
+            break;
+        }
+
+        sync->ReadyEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+
+        if (sync->ReadyEvent == nullptr)
+        {
+            error = "failed to create native viewer launch event: " + FormatWin32Error(GetLastError());
+            break;
+        }
+
+        std::unique_ptr<NativeViewerWindowState> state = std::make_unique<NativeViewerWindowState>();
+        state->Title = Utf8ToWide("!decomp " + request.Facts.QueryText);
+        viewerHistoryCount = historyEntries.size();
+        state->HistoryEntries = std::move(historyEntries);
+        state->Text = state->HistoryEntries.front().Text;
+        state->RtfText = state->HistoryEntries.front().RtfText;
+
+        std::unique_ptr<NativeViewerThreadContext> context = std::make_unique<NativeViewerThreadContext>();
+        context->State = state.release();
+        context->Sync = sync;
+        context->Owner = FindDebuggerOwnerWindow();
+
+        if (!PinNativeViewerModule(module, error))
+        {
+            delete context->State;
+            context->State = nullptr;
+            break;
+        }
+
+        context->Module = module;
+
+        try
+        {
+            std::thread viewerThread(NativeViewerThreadMain, context.get());
+            context.release();
+            viewerThread.detach();
+            module = nullptr;
+        }
+        catch (const std::exception& ex)
+        {
+            delete context->State;
+            context->State = nullptr;
+            error = std::string("failed to start native viewer thread: ") + ex.what();
+            break;
+        }
+        catch (...)
+        {
+            delete context->State;
+            context->State = nullptr;
+            error = "failed to start native viewer thread";
+            break;
+        }
+
+        const DWORD waitResult = WaitForSingleObject(sync->ReadyEvent, kNativeViewerLaunchTimeoutMs);
+
+        if (waitResult != WAIT_OBJECT_0)
+        {
+            {
+                std::lock_guard<std::mutex> lock(sync->Mutex);
+                sync->Abandoned = true;
+            }
+
+            if (waitResult == WAIT_TIMEOUT)
+            {
+                error = "native viewer launch timed out";
+            }
+            else
+            {
+                error = "failed to wait for native viewer launch: " + FormatWin32Error(GetLastError());
+            }
+
+            break;
+        }
+
+        bool launchSuccess = false;
+        HWND windowHandle = nullptr;
+        HWND ownerHandle = nullptr;
+        std::string launchError;
+
+        {
+            std::lock_guard<std::mutex> lock(sync->Mutex);
+            launchSuccess = sync->Success;
+            windowHandle = sync->WindowHandle;
+            ownerHandle = sync->OwnerHandle;
+            launchError = sync->Error;
+        }
+
+        if (!launchSuccess)
+        {
+            error = launchError.empty() ? std::string("failed to open native viewer") : launchError;
+            break;
+        }
+
+        viewerDescription = "hwnd=" + FormatWindowHandle(windowHandle);
+
+        if (viewerHistoryCount > 1)
+        {
+            viewerDescription += " history=" + std::to_string(static_cast<unsigned long long>(viewerHistoryCount));
+        }
+
+        if (ownerHandle != nullptr)
+        {
+            viewerDescription += " owner=" + FormatWindowHandle(ownerHandle);
+        }
+
+        success = true;
+    }
+    while (false);
+
+    if (module != nullptr)
+    {
+        FreeLibrary(module);
+        module = nullptr;
+    }
+
+    return success;
+}
+
+void PrintResponse(
+    const decomp::AnalyzeRequest& request,
+    const decomp::AnalyzeResponse& response,
+    const decomp::LlmClientConfig& displayConfig,
+    IDebugControl* control,
+    IDebugControl4* control4,
+    IDebugAdvanced2* advanced2,
+    const decomp::DecompOptions& options)
+{
+    ConsoleResponseOutputSink consoleSink(control, control4, advanced2);
+
+    if (options.JsonOutput || options.FactsOnlyOutput || options.DataModelOutput)
+    {
+        RenderResponse(request, response, displayConfig, consoleSink, options);
+        return;
+    }
+
+    if (options.WindowOutput)
+    {
+        std::string viewerDescription;
+        std::string error;
+
+        if (OpenResponseViewer(request, response, displayConfig, options, viewerDescription, error))
+        {
+            OutputLine(control, control4, "decomp native viewer opened: %s\n", viewerDescription.c_str());
+            return;
+        }
+
+        OutputLine(control, control4, "warning: decomp native viewer failed: %s\n", error.c_str());
+        OutputLine(control, control4, "warning: falling back to console output\n");
+    }
+
+    RenderResponse(request, response, displayConfig, consoleSink, options);
 }
 
 bool PrintCachedAnalyzeResult(
