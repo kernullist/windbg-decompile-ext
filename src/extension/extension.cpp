@@ -45,6 +45,14 @@
 
 using Microsoft::WRL::ComPtr;
 
+#ifndef EM_SETEDITSTYLE
+#define EM_SETEDITSTYLE (WM_USER + 204)
+#endif
+
+#ifndef SES_EXTENDBACKCOLOR
+#define SES_EXTENDBACKCOLOR 0x00000004
+#endif
+
 namespace
 {
 struct DebugApi
@@ -751,9 +759,14 @@ private:
 class PlainTextResponseOutputSink final : public ResponseOutputSink
 {
 public:
+    explicit PlainTextResponseOutputSink(bool supportsLinks = true)
+        : LinkSupport(supportsLinks)
+    {
+    }
+
     bool SupportsLinks() const override
     {
-        return true;
+        return LinkSupport;
     }
 
     void WriteText(const std::string& text) override
@@ -779,6 +792,7 @@ public:
     }
 
 private:
+    bool LinkSupport = true;
     std::string Text;
 };
 
@@ -1663,6 +1677,7 @@ bool ParseCommandLine(const char* args, decomp::DecompOptions& options, std::str
             && !options.LastDebugPromptOutput
             && !options.DoctorOutput
             && !options.HistoryOutput
+            && !options.WindowOutput
             && !options.ClearUserOverrides)
         {
             error = "missing target";
@@ -7122,6 +7137,7 @@ void PrintAnalyzeHistory(IDebugControl* control, IDebugControl4* control4)
 void PrintUsage(IDebugControl* control, IDebugControl4* control4)
 {
     OutputLine(control, control4, "usage: !decomp [/verbose] [/doctor] [/history] [/view:brief|explain|json|facts|prompt|data|window|analyzer|plan] [/last[:N]:explain|facts|json|data|prompt] [/limit:deep|huge|N] [/timeout:N] <addr|module!symbol>\n");
+    OutputLine(control, control4, "view : !decomp /view:window opens cached analyzed functions when no target is supplied; /view:window /history does the same explicitly\n");
     OutputLine(control, control4, "fix  : /fix:noreturn:name /fix:type:expr=TYPE /fix:field:expr=TYPE /fix:rename:old=new /fix:clear\n");
     OutputLine(control, control4, "file : successful LLM results are saved automatically beside decomp.dll under artifact\\ and replayed automatically for the same target and kernel_build\n");
     OutputLine(control, control4, "compat: legacy switches such as /brief, /json, /facts-only, /debug-prompt, /data-model, /last-json, /deep, and /noreturn: still work\n");
@@ -7902,8 +7918,19 @@ enum class ViewerRtfColor : int
     Red = 6,
     Orange = 7,
     Background = 8,
-    Border = 9
+    Border = 9,
+    Surface = 10
 };
+
+constexpr COLORREF kNativeViewerBackgroundColor = RGB(13, 17, 23);
+constexpr COLORREF kNativeViewerSurfaceColor = RGB(22, 27, 34);
+constexpr COLORREF kNativeViewerSelectedColor = RGB(31, 111, 235);
+constexpr COLORREF kNativeViewerTextColor = RGB(201, 209, 217);
+constexpr COLORREF kNativeViewerMutedTextColor = RGB(139, 148, 158);
+constexpr int kNativeViewerOuterMargin = 12;
+constexpr int kNativeViewerControlGap = 10;
+constexpr int kNativeViewerPanelHeaderHeight = 42;
+constexpr int kNativeViewerFunctionItemHeight = 52;
 
 int ViewerRtfColorIndex(ViewerRtfColor color)
 {
@@ -8104,10 +8131,10 @@ void AppendRtfCommandAwareText(std::string& rtf, const std::string& text)
             break;
         }
 
-        rtf += "\\cf2\\f1\\fs16 ";
+        rtf += "\\cf3\\f1\\fs16 ";
         AppendRtfEscapedUtf8(rtf, "  ");
         AppendRtfEscapedUtf8(rtf, text.substr(commandTextStart, commandEnd - commandTextStart));
-        rtf += "\\f0\\fs18\\cf1 ";
+        rtf += "\\f0\\fs19\\cf1 ";
         cursor = commandEnd + 1;
     }
 }
@@ -8354,12 +8381,22 @@ void AppendRtfHighlightedCodeLine(std::string& rtf, const std::string& line)
 
 void AppendRtfTitle(std::string& rtf, const decomp::AnalyzeRequest& request)
 {
-    rtf += "\\pard\\plain\\f0\\fs28\\b\\cf1 ";
+    rtf += "\\pard\\plain\\f0\\fs34\\b\\cf1\\sa20 ";
     AppendRtfEscapedUtf8(rtf, "!decomp ");
     AppendRtfEscapedUtf8(rtf, request.Facts.QueryText);
     rtf += "\\b0\\par\n";
-    rtf += "\\pard\\plain\\f0\\fs17\\cf2 ";
-    AppendRtfEscapedUtf8(rtf, "GitHub-style native viewer");
+
+    rtf += "\\pard\\plain\\f0\\fs18\\cf2\\sa180 ";
+
+    if (!request.Facts.Module.ModuleName.empty())
+    {
+        AppendRtfEscapedUtf8(rtf, request.Facts.Module.ModuleName);
+    }
+    else
+    {
+        AppendRtfEscapedUtf8(rtf, "native decompile viewer");
+    }
+
     rtf += "\\par\\par\n";
 }
 
@@ -8372,17 +8409,17 @@ void AppendRtfSectionHeading(std::string& rtf, const std::string& line)
         label.pop_back();
     }
 
-    rtf += "\\pard\\plain\\f0\\fs22\\b\\cf1\\sb160\\sa40 ";
+    rtf += "\\pard\\plain\\f0\\fs23\\b\\cf3\\sb180\\sa60 ";
     AppendRtfEscapedUtf8(rtf, label);
     rtf += "\\b0\\par\n";
 }
 
 void AppendRtfMetadataLine(std::string& rtf, const std::string& key, const std::string& value)
 {
-    rtf += "\\pard\\plain\\f0\\fs18\\cf1\\sa20 ";
+    rtf += "\\pard\\plain\\f0\\fs19\\cf1\\li1680\\fi-1440\\tx1680\\sa24 ";
     rtf += "\\cf2\\b ";
     AppendRtfEscapedUtf8(rtf, key);
-    rtf += "\\b0\\cf1  ";
+    rtf += "\\b0\\tab\\cf1 ";
     AppendRtfCommandAwareText(rtf, value);
     rtf += "\\par\n";
 }
@@ -8393,23 +8430,23 @@ void AppendRtfBulletLine(std::string& rtf, const std::string& line)
     const size_t leadingSpaces = firstText == std::string::npos ? 0 : firstText;
     const int leftIndent = 240 + static_cast<int>((leadingSpaces / 2) * 240);
 
-    rtf += "\\pard\\plain\\f0\\fs18\\cf1\\li";
+    rtf += "\\pard\\plain\\f0\\fs19\\cf1\\li";
     rtf += std::to_string(leftIndent);
-    rtf += "\\fi-180 ";
+    rtf += "\\fi-180\\sa20 ";
     AppendRtfCommandAwareText(rtf, decomp::TrimCopy(line));
     rtf += "\\par\n";
 }
 
 void AppendRtfPlainLine(std::string& rtf, const std::string& line)
 {
-    rtf += "\\pard\\plain\\f0\\fs18\\cf1 ";
+    rtf += "\\pard\\plain\\f0\\fs19\\cf1\\sa20 ";
     AppendRtfCommandAwareText(rtf, line);
     rtf += "\\par\n";
 }
 
 void AppendRtfCodeLine(std::string& rtf, const std::string& line)
 {
-    rtf += "\\pard\\plain\\f1\\fs18\\cf1\\li240 ";
+    rtf += "\\pard\\plain\\f1\\fs18\\cf1\\cb10\\li300\\ri300\\sa0 ";
 
     if (line.empty())
     {
@@ -8430,17 +8467,18 @@ std::string BuildPrettyViewerRtf(const decomp::AnalyzeRequest& request, const st
     rtf += "{\\rtf1\\ansi\\deff0\\uc1\n";
     rtf += "{\\fonttbl{\\f0\\fnil\\fcharset0 Segoe UI;}{\\f1\\fmodern\\fcharset0 Consolas;}}\n";
     rtf += "{\\colortbl ;";
-    rtf += "\\red36\\green41\\blue47;";
-    rtf += "\\red87\\green96\\blue106;";
-    rtf += "\\red9\\green105\\blue218;";
-    rtf += "\\red17\\green99\\blue41;";
-    rtf += "\\red130\\green80\\blue223;";
-    rtf += "\\red207\\green34\\blue46;";
-    rtf += "\\red149\\green56\\blue0;";
-    rtf += "\\red246\\green248\\blue250;";
-    rtf += "\\red208\\green215\\blue222;";
+    rtf += "\\red201\\green209\\blue217;";
+    rtf += "\\red139\\green148\\blue158;";
+    rtf += "\\red88\\green166\\blue255;";
+    rtf += "\\red63\\green185\\blue80;";
+    rtf += "\\red210\\green168\\blue255;";
+    rtf += "\\red255\\green123\\blue114;";
+    rtf += "\\red255\\green166\\blue87;";
+    rtf += "\\red13\\green17\\blue23;";
+    rtf += "\\red48\\green54\\blue61;";
+    rtf += "\\red22\\green27\\blue34;";
     rtf += "}\n";
-    rtf += "\\viewkind4\\fs18\\cf1\n";
+    rtf += "\\viewkind4\\fs19\\cf1\\cb8\n";
 
     AppendRtfTitle(rtf, request);
 
@@ -8514,6 +8552,8 @@ struct NativeViewerRtfStream
 struct NativeViewerHistoryEntry
 {
     std::wstring Label;
+    std::wstring SecondaryLabel;
+    std::wstring WindowTitle;
     std::wstring Text;
     std::string RtfText;
 };
@@ -8550,15 +8590,113 @@ struct NativeViewerWindowState
     std::wstring Title;
     std::wstring Text;
     std::string RtfText;
+    HWND Window = nullptr;
     HWND Edit = nullptr;
+    HWND HistoryHeader = nullptr;
     HWND HistoryList = nullptr;
-    HFONT Font = nullptr;
+    HFONT EditFont = nullptr;
+    HFONT HistoryFont = nullptr;
+    HBRUSH BackgroundBrush = nullptr;
+    HBRUSH SurfaceBrush = nullptr;
+    HBRUSH SelectedBrush = nullptr;
+    HICON Icon = nullptr;
+    HICON SmallIcon = nullptr;
+    WNDPROC OriginalEditProc = nullptr;
     HMODULE RichEditModule = nullptr;
     std::vector<NativeViewerHistoryEntry> HistoryEntries;
     size_t ActiveHistoryIndex = 0;
     bool SupportsEditMessages = false;
     bool SupportsRichText = false;
 };
+
+void RedrawNativeViewerEdit(HWND edit)
+{
+    if (edit == nullptr || !IsWindow(edit))
+    {
+        return;
+    }
+
+    RedrawWindow(
+        edit,
+        nullptr,
+        nullptr,
+        RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_FRAME);
+}
+
+bool IsNativeViewerScrollKey(WPARAM key)
+{
+    return key == VK_UP
+        || key == VK_DOWN
+        || key == VK_PRIOR
+        || key == VK_NEXT
+        || key == VK_HOME
+        || key == VK_END
+        || key == VK_LEFT
+        || key == VK_RIGHT;
+}
+
+LRESULT CALLBACK NativeViewerEditWindowProc(HWND edit, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    NativeViewerWindowState* state = reinterpret_cast<NativeViewerWindowState*>(GetWindowLongPtrW(edit, GWLP_USERDATA));
+    WNDPROC original = state != nullptr ? state->OriginalEditProc : nullptr;
+
+    if (original == nullptr)
+    {
+        return DefWindowProcW(edit, message, wparam, lparam);
+    }
+
+    const LRESULT result = CallWindowProcW(original, edit, message, wparam, lparam);
+    bool redraw = false;
+
+    switch (message)
+    {
+    case WM_VSCROLL:
+    case WM_HSCROLL:
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL:
+        redraw = true;
+        break;
+    case WM_KEYDOWN:
+        redraw = IsNativeViewerScrollKey(wparam);
+        break;
+    default:
+        break;
+    }
+
+    if (redraw)
+    {
+        RedrawNativeViewerEdit(edit);
+    }
+
+    return result;
+}
+
+void InstallNativeViewerEditSubclass(NativeViewerWindowState& state)
+{
+    if (state.Edit == nullptr || !state.SupportsEditMessages)
+    {
+        return;
+    }
+
+    SetLastError(ERROR_SUCCESS);
+    SetWindowLongPtrW(state.Edit, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&state));
+
+    if (GetLastError() != ERROR_SUCCESS)
+    {
+        return;
+    }
+
+    SetLastError(ERROR_SUCCESS);
+    state.OriginalEditProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+        state.Edit,
+        GWLP_WNDPROC,
+        reinterpret_cast<LONG_PTR>(NativeViewerEditWindowProc)));
+
+    if (state.OriginalEditProc == nullptr && GetLastError() != ERROR_SUCCESS)
+    {
+        SetWindowLongPtrW(state.Edit, GWLP_USERDATA, 0);
+    }
+}
 
 bool StreamNativeViewerRichText(NativeViewerWindowState& state)
 {
@@ -8590,6 +8728,7 @@ bool StreamNativeViewerRichText(NativeViewerWindowState& state)
         }
 
         success = true;
+        RedrawNativeViewerEdit(state.Edit);
     }
     while (false);
 
@@ -8611,6 +8750,11 @@ bool SetNativeViewerEntry(NativeViewerWindowState& state, size_t index)
         state.Text = state.HistoryEntries[index].Text;
         state.RtfText = state.HistoryEntries[index].RtfText;
 
+        if (state.Window != nullptr && !state.HistoryEntries[index].WindowTitle.empty())
+        {
+            SetWindowTextW(state.Window, state.HistoryEntries[index].WindowTitle.c_str());
+        }
+
         if (state.HistoryList != nullptr)
         {
             SendMessageW(state.HistoryList, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
@@ -8626,7 +8770,7 @@ bool SetNativeViewerEntry(NativeViewerWindowState& state, size_t index)
 
         if (state.SupportsRichText)
         {
-            SendMessageW(state.Edit, EM_SETBKGNDCOLOR, 0, RGB(246, 248, 250));
+            SendMessageW(state.Edit, EM_SETBKGNDCOLOR, 0, kNativeViewerBackgroundColor);
             usedRichText = StreamNativeViewerRichText(state);
         }
 
@@ -8640,6 +8784,7 @@ bool SetNativeViewerEntry(NativeViewerWindowState& state, size_t index)
             SendMessageW(state.Edit, EM_SETSEL, 0, 0);
         }
 
+        RedrawNativeViewerEdit(state.Edit);
         success = true;
     }
     while (false);
@@ -8653,20 +8798,20 @@ int GetNativeViewerHistoryListWidth(int clientWidth)
 
     do
     {
-        if (clientWidth < 560)
+        if (clientWidth < 760)
         {
             break;
         }
 
-        width = clientWidth / 4;
+        width = clientWidth / 5;
 
-        if (width < 240)
+        if (width < 280)
         {
-            width = 240;
+            width = 280;
         }
-        else if (width > 360)
+        else if (width > 380)
         {
-            width = 360;
+            width = 380;
         }
     }
     while (false);
@@ -8677,18 +8822,50 @@ int GetNativeViewerHistoryListWidth(int clientWidth)
 void LayoutNativeViewerControls(NativeViewerWindowState& state, int clientWidth, int clientHeight)
 {
     const int listWidth = GetNativeViewerHistoryListWidth(clientWidth);
+    const int contentHeight = (std::max)(0, clientHeight - (kNativeViewerOuterMargin * 2));
+
+    if (state.HistoryHeader != nullptr)
+    {
+        ShowWindow(state.HistoryHeader, listWidth > 0 ? SW_SHOW : SW_HIDE);
+        MoveWindow(
+            state.HistoryHeader,
+            kNativeViewerOuterMargin,
+            kNativeViewerOuterMargin,
+            listWidth,
+            kNativeViewerPanelHeaderHeight,
+            TRUE);
+    }
 
     if (state.HistoryList != nullptr)
     {
         ShowWindow(state.HistoryList, listWidth > 0 ? SW_SHOW : SW_HIDE);
-        MoveWindow(state.HistoryList, 0, 0, listWidth, clientHeight, TRUE);
+        MoveWindow(
+            state.HistoryList,
+            kNativeViewerOuterMargin,
+            kNativeViewerOuterMargin + kNativeViewerPanelHeaderHeight,
+            listWidth,
+            (std::max)(0, contentHeight - kNativeViewerPanelHeaderHeight),
+            TRUE);
     }
 
     if (state.Edit != nullptr)
     {
-        const int editX = listWidth > 0 ? listWidth + 1 : 0;
-        const int editWidth = clientWidth > editX ? clientWidth - editX : 0;
-        MoveWindow(state.Edit, editX, 0, editWidth, clientHeight, TRUE);
+        int editX = kNativeViewerOuterMargin;
+
+        if (listWidth > 0)
+        {
+            editX += listWidth + kNativeViewerControlGap;
+        }
+
+        const int editWidth = (std::max)(0, clientWidth - editX - kNativeViewerOuterMargin);
+
+        MoveWindow(
+            state.Edit,
+            editX,
+            kNativeViewerOuterMargin,
+            editWidth,
+            contentHeight,
+            TRUE);
     }
 }
 
@@ -8724,6 +8901,259 @@ constexpr wchar_t kNativeViewerWindowClass[] = L"WindbgDecompNativeViewerWindow"
 constexpr DWORD kNativeViewerLaunchTimeoutMs = 15000;
 constexpr UINT_PTR kNativeViewerHistoryListId = 2;
 
+uint32_t MakeNativeViewerIconPixel(COLORREF color)
+{
+    return 0xff000000U
+        | (static_cast<uint32_t>(GetRValue(color)) << 16)
+        | (static_cast<uint32_t>(GetGValue(color)) << 8)
+        | static_cast<uint32_t>(GetBValue(color));
+}
+
+int ScaleNativeViewerIconCoord(int value, int size)
+{
+    return (std::max)(1, (value * size) / 32);
+}
+
+void FillNativeViewerIconRect(
+    uint32_t* pixels,
+    int size,
+    int left,
+    int top,
+    int right,
+    int bottom,
+    COLORREF color)
+{
+    const int clampedLeft = (std::max)(0, (std::min)(size, left));
+    const int clampedTop = (std::max)(0, (std::min)(size, top));
+    const int clampedRight = (std::max)(0, (std::min)(size, right));
+    const int clampedBottom = (std::max)(0, (std::min)(size, bottom));
+    const uint32_t pixel = MakeNativeViewerIconPixel(color);
+
+    for (int y = clampedTop; y < clampedBottom; ++y)
+    {
+        for (int x = clampedLeft; x < clampedRight; ++x)
+        {
+            pixels[(y * size) + x] = pixel;
+        }
+    }
+}
+
+HICON CreateNativeViewerIcon(int size)
+{
+    HICON icon = nullptr;
+    HBITMAP colorBitmap = nullptr;
+    HBITMAP maskBitmap = nullptr;
+
+    do
+    {
+        if (size <= 0)
+        {
+            break;
+        }
+
+        BITMAPINFO bitmapInfo = {};
+        bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+        bitmapInfo.bmiHeader.biWidth = size;
+        bitmapInfo.bmiHeader.biHeight = -size;
+        bitmapInfo.bmiHeader.biPlanes = 1;
+        bitmapInfo.bmiHeader.biBitCount = 32;
+        bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+        void* bits = nullptr;
+        HDC screen = GetDC(nullptr);
+
+        if (screen == nullptr)
+        {
+            break;
+        }
+
+        colorBitmap = CreateDIBSection(screen, &bitmapInfo, DIB_RGB_COLORS, &bits, nullptr, 0);
+        ReleaseDC(nullptr, screen);
+
+        if (colorBitmap == nullptr || bits == nullptr)
+        {
+            break;
+        }
+
+        uint32_t* pixels = static_cast<uint32_t*>(bits);
+        const uint32_t background = MakeNativeViewerIconPixel(kNativeViewerBackgroundColor);
+
+        for (int index = 0; index < size * size; ++index)
+        {
+            pixels[index] = background;
+        }
+
+        FillNativeViewerIconRect(pixels, size, 0, 0, size, ScaleNativeViewerIconCoord(2, size), RGB(88, 166, 255));
+        FillNativeViewerIconRect(pixels, size, 0, size - ScaleNativeViewerIconCoord(2, size), size, size, RGB(88, 166, 255));
+        FillNativeViewerIconRect(pixels, size, 0, 0, ScaleNativeViewerIconCoord(2, size), size, RGB(88, 166, 255));
+        FillNativeViewerIconRect(pixels, size, size - ScaleNativeViewerIconCoord(2, size), 0, size, size, RGB(88, 166, 255));
+        FillNativeViewerIconRect(pixels, size, ScaleNativeViewerIconCoord(4, size), ScaleNativeViewerIconCoord(4, size), ScaleNativeViewerIconCoord(7, size), size - ScaleNativeViewerIconCoord(4, size), RGB(31, 111, 235));
+
+        const COLORREF glyph = RGB(201, 209, 217);
+        FillNativeViewerIconRect(pixels, size, ScaleNativeViewerIconCoord(10, size), ScaleNativeViewerIconCoord(8, size), ScaleNativeViewerIconCoord(13, size), ScaleNativeViewerIconCoord(24, size), glyph);
+        FillNativeViewerIconRect(pixels, size, ScaleNativeViewerIconCoord(13, size), ScaleNativeViewerIconCoord(8, size), ScaleNativeViewerIconCoord(22, size), ScaleNativeViewerIconCoord(11, size), glyph);
+        FillNativeViewerIconRect(pixels, size, ScaleNativeViewerIconCoord(13, size), ScaleNativeViewerIconCoord(21, size), ScaleNativeViewerIconCoord(22, size), ScaleNativeViewerIconCoord(24, size), glyph);
+        FillNativeViewerIconRect(pixels, size, ScaleNativeViewerIconCoord(21, size), ScaleNativeViewerIconCoord(11, size), ScaleNativeViewerIconCoord(24, size), ScaleNativeViewerIconCoord(21, size), glyph);
+
+        const int maskStride = ((size + 15) / 16) * 2;
+        std::vector<uint8_t> maskBits(static_cast<size_t>(maskStride * size), 0);
+        maskBitmap = CreateBitmap(size, size, 1, 1, maskBits.data());
+
+        if (maskBitmap == nullptr)
+        {
+            break;
+        }
+
+        ICONINFO iconInfo = {};
+        iconInfo.fIcon = TRUE;
+        iconInfo.hbmColor = colorBitmap;
+        iconInfo.hbmMask = maskBitmap;
+        icon = CreateIconIndirect(&iconInfo);
+    }
+    while (false);
+
+    if (colorBitmap != nullptr)
+    {
+        DeleteObject(colorBitmap);
+    }
+
+    if (maskBitmap != nullptr)
+    {
+        DeleteObject(maskBitmap);
+    }
+
+    return icon;
+}
+
+void InstallNativeViewerWindowIcons(NativeViewerWindowState& state)
+{
+    if (state.Window == nullptr)
+    {
+        return;
+    }
+
+    state.Icon = CreateNativeViewerIcon(32);
+    state.SmallIcon = CreateNativeViewerIcon(16);
+
+    if (state.Icon != nullptr)
+    {
+        SendMessageW(state.Window, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(state.Icon));
+    }
+
+    if (state.SmallIcon != nullptr)
+    {
+        SendMessageW(state.Window, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(state.SmallIcon));
+    }
+}
+
+void ApplyNativeViewerDarkFrame(HWND window)
+{
+    using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+
+    HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+
+    do
+    {
+        if (dwm == nullptr)
+        {
+            break;
+        }
+
+        DwmSetWindowAttributeFn setWindowAttribute = reinterpret_cast<DwmSetWindowAttributeFn>(
+            GetProcAddress(dwm, "DwmSetWindowAttribute"));
+
+        if (setWindowAttribute == nullptr)
+        {
+            break;
+        }
+
+        const BOOL enabled = TRUE;
+        HRESULT result = setWindowAttribute(window, 20, &enabled, sizeof(enabled));
+
+        if (FAILED(result))
+        {
+            setWindowAttribute(window, 19, &enabled, sizeof(enabled));
+        }
+    }
+    while (false);
+
+    if (dwm != nullptr)
+    {
+        FreeLibrary(dwm);
+    }
+}
+
+void TryAttachNativeViewerInputThread(
+    DWORD currentThread,
+    DWORD targetThread,
+    std::vector<DWORD>& attachedThreads)
+{
+    if (targetThread == 0 || targetThread == currentThread)
+    {
+        return;
+    }
+
+    if (std::find(attachedThreads.begin(), attachedThreads.end(), targetThread) != attachedThreads.end())
+    {
+        return;
+    }
+
+    if (AttachThreadInput(currentThread, targetThread, TRUE))
+    {
+        attachedThreads.push_back(targetThread);
+    }
+}
+
+void DetachNativeViewerInputThreads(DWORD currentThread, const std::vector<DWORD>& attachedThreads)
+{
+    for (DWORD targetThread : attachedThreads)
+    {
+        AttachThreadInput(currentThread, targetThread, FALSE);
+    }
+}
+
+void ShowNativeViewerWindowInFront(HWND window)
+{
+    if (window == nullptr)
+    {
+        return;
+    }
+
+    const DWORD currentThread = GetCurrentThreadId();
+    std::vector<DWORD> attachedThreads;
+    HWND owner = GetWindow(window, GW_OWNER);
+    HWND foreground = GetForegroundWindow();
+    DWORD ownerThread = owner != nullptr ? GetWindowThreadProcessId(owner, nullptr) : 0;
+    DWORD foregroundThread = foreground != nullptr ? GetWindowThreadProcessId(foreground, nullptr) : 0;
+
+    TryAttachNativeViewerInputThread(currentThread, ownerThread, attachedThreads);
+    TryAttachNativeViewerInputThread(currentThread, foregroundThread, attachedThreads);
+
+    ShowWindow(window, SW_SHOWNORMAL);
+    SetWindowPos(
+        window,
+        HWND_TOPMOST,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetWindowPos(
+        window,
+        HWND_NOTOPMOST,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    BringWindowToTop(window);
+    SetForegroundWindow(window);
+    SetActiveWindow(window);
+    SetFocus(window);
+    UpdateWindow(window);
+    DetachNativeViewerInputThreads(currentThread, attachedThreads);
+}
+
 LRESULT CALLBACK NativeViewerWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
     NativeViewerWindowState* state = reinterpret_cast<NativeViewerWindowState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -8734,40 +9164,75 @@ LRESULT CALLBACK NativeViewerWindowProc(HWND window, UINT message, WPARAM wparam
     {
         const CREATESTRUCTW* create = reinterpret_cast<const CREATESTRUCTW*>(lparam);
         state = reinterpret_cast<NativeViewerWindowState*>(create->lpCreateParams);
+        state->Window = window;
         SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        state->BackgroundBrush = CreateSolidBrush(kNativeViewerBackgroundColor);
+        state->SurfaceBrush = CreateSolidBrush(kNativeViewerSurfaceColor);
+        state->SelectedBrush = CreateSolidBrush(kNativeViewerSelectedColor);
+        InstallNativeViewerWindowIcons(*state);
 
         if (state->HistoryEntries.empty())
         {
             NativeViewerHistoryEntry entry;
             entry.Label = L"current";
+            entry.SecondaryLabel = L"Current result";
+            entry.WindowTitle = L"Decompile Viewer";
             entry.Text = state->Text;
             entry.RtfText = state->RtfText;
             state->HistoryEntries.push_back(std::move(entry));
         }
 
-        if (state->HistoryEntries.size() > 1)
-        {
-            state->HistoryList = CreateWindowExW(
-                WS_EX_CLIENTEDGE,
-                L"LISTBOX",
-                L"",
-                WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
-                0,
-                0,
-                0,
-                0,
-                window,
-                reinterpret_cast<HMENU>(kNativeViewerHistoryListId),
-                GetModuleHandleW(nullptr),
-                nullptr);
+        std::wstring header = L"Analyzed functions";
 
-            if (state->HistoryList != nullptr)
+        if (!state->HistoryEntries.empty())
+        {
+            header += L"  ";
+            header += std::to_wstring(static_cast<unsigned long long>(state->HistoryEntries.size()));
+        }
+
+        state->HistoryHeader = CreateWindowExW(
+            0,
+            L"STATIC",
+            header.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_LEFT | SS_CENTERIMAGE,
+            0,
+            0,
+            0,
+            0,
+            window,
+            reinterpret_cast<HMENU>(static_cast<UINT_PTR>(3)),
+            GetModuleHandleW(nullptr),
+            nullptr);
+
+        state->HistoryList = CreateWindowExW(
+            0,
+            L"LISTBOX",
+            L"",
+            WS_CHILD
+                | WS_VISIBLE
+                | WS_CLIPSIBLINGS
+                | WS_VSCROLL
+                | LBS_NOTIFY
+                | LBS_NOINTEGRALHEIGHT
+                | LBS_OWNERDRAWFIXED
+                | LBS_HASSTRINGS,
+            0,
+            0,
+            0,
+            0,
+            window,
+            reinterpret_cast<HMENU>(kNativeViewerHistoryListId),
+            GetModuleHandleW(nullptr),
+            nullptr);
+
+        if (state->HistoryList != nullptr)
+        {
+            for (const NativeViewerHistoryEntry& entry : state->HistoryEntries)
             {
-                for (const NativeViewerHistoryEntry& entry : state->HistoryEntries)
-                {
-                    SendMessageW(state->HistoryList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(entry.Label.c_str()));
-                }
+                SendMessageW(state->HistoryList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(entry.Label.c_str()));
             }
+
+            SendMessageW(state->HistoryList, LB_SETITEMHEIGHT, 0, kNativeViewerFunctionItemHeight);
         }
 
         state->RichEditModule = LoadLibraryW(L"Msftedit.dll");
@@ -8775,6 +9240,7 @@ LRESULT CALLBACK NativeViewerWindowProc(HWND window, UINT message, WPARAM wparam
         const bool requestedRichEdit = state->RichEditModule != nullptr;
         const DWORD editStyle = WS_CHILD
             | WS_VISIBLE
+            | WS_CLIPSIBLINGS
             | WS_VSCROLL
             | WS_HSCROLL
             | ES_MULTILINE
@@ -8783,7 +9249,7 @@ LRESULT CALLBACK NativeViewerWindowProc(HWND window, UINT message, WPARAM wparam
             | ES_AUTOHSCROLL;
 
         state->Edit = CreateWindowExW(
-            WS_EX_CLIENTEDGE,
+            0,
             editClass,
             L"",
             editStyle,
@@ -8803,7 +9269,7 @@ LRESULT CALLBACK NativeViewerWindowProc(HWND window, UINT message, WPARAM wparam
             FreeLibrary(state->RichEditModule);
             state->RichEditModule = nullptr;
             state->Edit = CreateWindowExW(
-                WS_EX_CLIENTEDGE,
+                0,
                 L"EDIT",
                 L"",
                 editStyle,
@@ -8822,10 +9288,10 @@ LRESULT CALLBACK NativeViewerWindowProc(HWND window, UINT message, WPARAM wparam
         if (state->Edit == nullptr)
         {
             state->Edit = CreateWindowExW(
-                WS_EX_CLIENTEDGE,
+                0,
                 L"STATIC",
                 state->Text.c_str(),
-                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_LEFT,
                 0,
                 0,
                 0,
@@ -8840,13 +9306,26 @@ LRESULT CALLBACK NativeViewerWindowProc(HWND window, UINT message, WPARAM wparam
 
         if (state->Edit != nullptr)
         {
+            InstallNativeViewerEditSubclass(*state);
+
             if (state->SupportsEditMessages)
             {
                 SendMessageW(state->Edit, EM_SETLIMITTEXT, static_cast<WPARAM>(0x7FFFFFFE), 0);
+                SendMessageW(
+                    state->Edit,
+                    EM_SETMARGINS,
+                    EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                    MAKELPARAM(16, 16));
             }
 
-            state->Font = CreateFontW(
-                -14,
+            if (state->SupportsRichText)
+            {
+                SendMessageW(state->Edit, EM_SETBKGNDCOLOR, 0, kNativeViewerBackgroundColor);
+                SendMessageW(state->Edit, EM_SETEDITSTYLE, SES_EXTENDBACKCOLOR, SES_EXTENDBACKCOLOR);
+            }
+
+            state->EditFont = CreateFontW(
+                -15,
                 0,
                 0,
                 0,
@@ -8860,15 +9339,35 @@ LRESULT CALLBACK NativeViewerWindowProc(HWND window, UINT message, WPARAM wparam
                 CLEARTYPE_QUALITY,
                 FIXED_PITCH | FF_MODERN,
                 L"Consolas");
+            state->HistoryFont = CreateFontW(
+                -14,
+                0,
+                0,
+                0,
+                FW_NORMAL,
+                FALSE,
+                FALSE,
+                FALSE,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
+                VARIABLE_PITCH | FF_SWISS,
+                L"Segoe UI");
 
-            if (state->Font != nullptr)
+            if (state->EditFont != nullptr)
             {
-                SendMessageW(state->Edit, WM_SETFONT, reinterpret_cast<WPARAM>(state->Font), TRUE);
+                SendMessageW(state->Edit, WM_SETFONT, reinterpret_cast<WPARAM>(state->EditFont), TRUE);
+            }
 
-                if (state->HistoryList != nullptr)
-                {
-                    SendMessageW(state->HistoryList, WM_SETFONT, reinterpret_cast<WPARAM>(state->Font), TRUE);
-                }
+            if (state->HistoryFont != nullptr && state->HistoryList != nullptr)
+            {
+                SendMessageW(state->HistoryList, WM_SETFONT, reinterpret_cast<WPARAM>(state->HistoryFont), TRUE);
+            }
+
+            if (state->HistoryFont != nullptr && state->HistoryHeader != nullptr)
+            {
+                SendMessageW(state->HistoryHeader, WM_SETFONT, reinterpret_cast<WPARAM>(state->HistoryFont), TRUE);
             }
 
             SetNativeViewerEntry(*state, state->ActiveHistoryIndex);
@@ -8879,6 +9378,120 @@ LRESULT CALLBACK NativeViewerWindowProc(HWND window, UINT message, WPARAM wparam
         }
 
         return 0;
+    }
+    case WM_ERASEBKGND:
+    {
+        HDC deviceContext = reinterpret_cast<HDC>(wparam);
+        RECT clientRect = {};
+        GetClientRect(window, &clientRect);
+
+        HBRUSH brush = state != nullptr && state->BackgroundBrush != nullptr
+            ? state->BackgroundBrush
+            : reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+
+        FillRect(deviceContext, &clientRect, brush);
+        return 1;
+    }
+    case WM_CTLCOLORLISTBOX:
+    {
+        HDC deviceContext = reinterpret_cast<HDC>(wparam);
+        SetTextColor(deviceContext, kNativeViewerTextColor);
+        SetBkColor(deviceContext, kNativeViewerSurfaceColor);
+
+        if (state != nullptr && state->SurfaceBrush != nullptr)
+        {
+            return reinterpret_cast<LRESULT>(state->SurfaceBrush);
+        }
+
+        return reinterpret_cast<LRESULT>(GetStockObject(BLACK_BRUSH));
+    }
+    case WM_MEASUREITEM:
+    {
+        MEASUREITEMSTRUCT* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lparam);
+
+        if (measure != nullptr && measure->CtlID == kNativeViewerHistoryListId)
+        {
+            measure->itemHeight = kNativeViewerFunctionItemHeight;
+            return TRUE;
+        }
+
+        break;
+    }
+    case WM_DRAWITEM:
+    {
+        const DRAWITEMSTRUCT* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lparam);
+
+        if (state != nullptr
+            && draw != nullptr
+            && draw->CtlID == kNativeViewerHistoryListId
+            && draw->itemID != static_cast<UINT>(-1)
+            && draw->itemID < state->HistoryEntries.size())
+        {
+            const bool selected = (draw->itemState & ODS_SELECTED) != 0;
+            HBRUSH brush = selected && state->SelectedBrush != nullptr
+                ? state->SelectedBrush
+                : state->SurfaceBrush;
+
+            if (brush == nullptr)
+            {
+                brush = reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+            }
+
+            FillRect(draw->hDC, &draw->rcItem, brush);
+            SetBkMode(draw->hDC, TRANSPARENT);
+            SetTextColor(draw->hDC, selected ? RGB(255, 255, 255) : kNativeViewerTextColor);
+
+            RECT primary = draw->rcItem;
+            primary.left += 12;
+            primary.right -= 10;
+            primary.top += 7;
+            primary.bottom = primary.top + 20;
+            DrawTextW(
+                draw->hDC,
+                state->HistoryEntries[draw->itemID].Label.c_str(),
+                -1,
+                &primary,
+                DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+            SetTextColor(draw->hDC, selected ? RGB(220, 235, 255) : kNativeViewerMutedTextColor);
+
+            RECT secondary = draw->rcItem;
+            secondary.left += 12;
+            secondary.right -= 10;
+            secondary.top += 28;
+            secondary.bottom -= 4;
+            DrawTextW(
+                draw->hDC,
+                state->HistoryEntries[draw->itemID].SecondaryLabel.c_str(),
+                -1,
+                &secondary,
+                DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+            return TRUE;
+        }
+
+        break;
+    }
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORSTATIC:
+    {
+        HDC deviceContext = reinterpret_cast<HDC>(wparam);
+        HWND control = reinterpret_cast<HWND>(lparam);
+        const bool isHistoryList = state != nullptr && control == state->HistoryList;
+        SetTextColor(deviceContext, kNativeViewerTextColor);
+        SetBkColor(deviceContext, isHistoryList ? kNativeViewerSurfaceColor : kNativeViewerBackgroundColor);
+
+        if (state != nullptr)
+        {
+            HBRUSH brush = isHistoryList ? state->SurfaceBrush : state->BackgroundBrush;
+
+            if (brush != nullptr)
+            {
+                return reinterpret_cast<LRESULT>(brush);
+            }
+        }
+
+        return reinterpret_cast<LRESULT>(GetStockObject(BLACK_BRUSH));
     }
     case WM_SIZE:
     {
@@ -8931,10 +9544,58 @@ LRESULT CALLBACK NativeViewerWindowProc(HWND window, UINT message, WPARAM wparam
     {
         if (state != nullptr)
         {
-            if (state->Font != nullptr)
+            if (state->Edit != nullptr && IsWindow(state->Edit))
             {
-                DeleteObject(state->Font);
-                state->Font = nullptr;
+                if (state->OriginalEditProc != nullptr)
+                {
+                    SetWindowLongPtrW(state->Edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(state->OriginalEditProc));
+                }
+
+                SetWindowLongPtrW(state->Edit, GWLP_USERDATA, 0);
+            }
+
+            state->OriginalEditProc = nullptr;
+
+            if (state->EditFont != nullptr)
+            {
+                DeleteObject(state->EditFont);
+                state->EditFont = nullptr;
+            }
+
+            if (state->HistoryFont != nullptr)
+            {
+                DeleteObject(state->HistoryFont);
+                state->HistoryFont = nullptr;
+            }
+
+            if (state->BackgroundBrush != nullptr)
+            {
+                DeleteObject(state->BackgroundBrush);
+                state->BackgroundBrush = nullptr;
+            }
+
+            if (state->SurfaceBrush != nullptr)
+            {
+                DeleteObject(state->SurfaceBrush);
+                state->SurfaceBrush = nullptr;
+            }
+
+            if (state->SelectedBrush != nullptr)
+            {
+                DeleteObject(state->SelectedBrush);
+                state->SelectedBrush = nullptr;
+            }
+
+            if (state->Icon != nullptr)
+            {
+                DestroyIcon(state->Icon);
+                state->Icon = nullptr;
+            }
+
+            if (state->SmallIcon != nullptr)
+            {
+                DestroyIcon(state->SmallIcon);
+                state->SmallIcon = nullptr;
             }
 
             if (state->RichEditModule != nullptr)
@@ -8998,7 +9659,9 @@ bool RegisterNativeViewerWindowClass(HMODULE module, std::string& error)
         windowClass.lpfnWndProc = NativeViewerWindowProc;
         windowClass.hInstance = instance;
         windowClass.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
-        windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        windowClass.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
+        windowClass.hIconSm = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
+        windowClass.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
         windowClass.lpszClassName = kNativeViewerWindowClass;
 
         if (RegisterClassExW(&windowClass) == 0)
@@ -9170,12 +9833,12 @@ void NativeViewerThreadMain(NativeViewerThreadContext* rawContext)
                 break;
             }
 
-            const DWORD exStyle = WS_EX_WINDOWEDGE | (context->Owner != nullptr ? WS_EX_TOOLWINDOW : WS_EX_APPWINDOW);
+            const DWORD exStyle = WS_EX_WINDOWEDGE | (context->Owner != nullptr ? 0 : WS_EX_APPWINDOW);
             window = CreateWindowExW(
                 exStyle,
                 kNativeViewerWindowClass,
                 state->Title.c_str(),
-                WS_OVERLAPPEDWINDOW,
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 980,
@@ -9191,6 +9854,7 @@ void NativeViewerThreadMain(NativeViewerThreadContext* rawContext)
                 break;
             }
 
+            ApplyNativeViewerDarkFrame(window);
             state.release();
 
             if (!TrySignalNativeViewerLaunchSuccess(context->Sync, window, context->Owner))
@@ -9201,8 +9865,7 @@ void NativeViewerThreadMain(NativeViewerThreadContext* rawContext)
                 break;
             }
 
-            ShowWindow(window, SW_SHOWNORMAL);
-            UpdateWindow(window);
+            ShowNativeViewerWindowInFront(window);
 
             MSG message = {};
             enteredMessageLoop = true;
@@ -9239,8 +9902,193 @@ void NativeViewerThreadMain(NativeViewerThreadContext* rawContext)
     }
 }
 
+std::string BuildNativeViewerDisplayTarget(const std::string& module, const std::string& target)
+{
+    if (target.empty())
+    {
+        return module.empty() ? std::string("<unknown>") : module;
+    }
+
+    if (target.find('!') != std::string::npos || module.empty())
+    {
+        return target;
+    }
+
+    return module + "!" + target;
+}
+
+std::string BuildNativeViewerWindowTitle(const std::string& displayTarget)
+{
+    return "Decompile Viewer - " + displayTarget;
+}
+
+std::string BuildNativeViewerRequestIdentity(
+    const decomp::AnalyzeRequest& request,
+    const decomp::AnalyzeResponse& response)
+{
+    if (!request.RequestId.empty())
+    {
+        return "request:" + request.RequestId;
+    }
+
+    const uint64_t stableOffset = request.Facts.Module.Base != 0 && request.Facts.EntryAddress >= request.Facts.Module.Base
+        ? request.Facts.EntryAddress - request.Facts.Module.Base
+        : request.Facts.EntryAddress;
+
+    return decomp::ToLowerAscii(request.Facts.Module.ModuleName)
+        + "|"
+        + decomp::HexU64(stableOffset)
+        + "|"
+        + decomp::ToLowerAscii(request.Facts.QueryText)
+        + "|"
+        + decomp::ToLowerAscii(response.Provider);
+}
+
+std::string BuildNativeViewerArtifactIdentity(const CachedAnalyzeArtifact& artifact)
+{
+    if (!artifact.RequestId.empty())
+    {
+        return "request:" + artifact.RequestId;
+    }
+
+    const uint64_t stableOffset = artifact.HasEntryRva ? artifact.EntryRva : artifact.EntryAddress;
+
+    return decomp::ToLowerAscii(artifact.Module)
+        + "|"
+        + decomp::HexU64(stableOffset)
+        + "|"
+        + decomp::ToLowerAscii(artifact.Target)
+        + "|"
+        + decomp::ToLowerAscii(artifact.Provider);
+}
+
+std::string BuildNativeViewerEntrySecondaryLabel(
+    const CachedAnalyzeArtifact& artifact,
+    bool current)
+{
+    std::vector<std::string> parts;
+
+    if (current)
+    {
+        parts.push_back("current");
+    }
+    else if (!artifact.Timestamp.empty())
+    {
+        parts.push_back(artifact.Timestamp);
+    }
+
+    if (artifact.EntryAddress != 0)
+    {
+        parts.push_back(decomp::HexU64(artifact.EntryAddress));
+    }
+
+    if (artifact.Confidence > 0.0)
+    {
+        std::array<char, 32> confidence = {};
+        std::snprintf(confidence.data(), confidence.size(), "confidence %.2f", artifact.Confidence);
+        parts.push_back(confidence.data());
+    }
+
+    if (artifact.VerifierIssueCount != 0)
+    {
+        parts.push_back("issues " + std::to_string(static_cast<unsigned long long>(artifact.VerifierIssueCount)));
+    }
+
+    return decomp::JoinStrings(parts, "  ");
+}
+
+KernelBuildFacts ResolveNativeViewerCurrentKernelBuild(
+    const decomp::AnalyzeRequest& request,
+    const decomp::AnalyzeResponse& response)
+{
+    KernelBuildFacts facts;
+    const std::string currentIdentity = BuildNativeViewerRequestIdentity(request, response);
+
+    for (const CachedAnalyzeArtifact& artifact : g_analyzeHistory)
+    {
+        if (BuildNativeViewerArtifactIdentity(artifact) == currentIdentity)
+        {
+            facts = artifact.KernelBuild;
+            break;
+        }
+    }
+
+    return facts;
+}
+
+bool NativeViewerArtifactMatchesKernelBuild(
+    const CachedAnalyzeArtifact& artifact,
+    const KernelBuildFacts& current)
+{
+    bool matches = false;
+
+    do
+    {
+        if (current.Fingerprint.empty() || artifact.KernelBuild.Fingerprint.empty())
+        {
+            break;
+        }
+
+        if (EqualInsensitiveString(artifact.KernelBuild.Fingerprint, current.Fingerprint))
+        {
+            matches = true;
+            break;
+        }
+
+        if (KernelBuildsAreCompatible(artifact.KernelBuild, current))
+        {
+            matches = true;
+            break;
+        }
+    }
+    while (false);
+
+    return matches;
+}
+
+std::vector<std::string> EnumerateNativeViewerArtifactPaths(const KernelBuildFacts& current)
+{
+    std::vector<std::string> paths;
+
+    do
+    {
+        if (current.Fingerprint.empty())
+        {
+            break;
+        }
+
+        const std::string directory = JoinPath(BuildDefaultArtifactDirectory(), BuildArtifactBuildKey(current));
+        const std::string pattern = JoinPath(directory, "*.decomp.json");
+        WIN32_FIND_DATAA data = {};
+        HANDLE find = FindFirstFileA(pattern.c_str(), &data);
+
+        if (find == INVALID_HANDLE_VALUE)
+        {
+            break;
+        }
+
+        do
+        {
+            if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+            {
+                continue;
+            }
+
+            paths.push_back(JoinPath(directory, data.cFileName));
+        }
+        while (FindNextFileA(find, &data) != FALSE);
+
+        FindClose(find);
+        std::sort(paths.begin(), paths.end());
+    }
+    while (false);
+
+    return paths;
+}
+
 bool BuildNativeViewerHistoryEntry(
     const std::string& label,
+    const std::string& secondaryLabel,
     const decomp::AnalyzeRequest& request,
     const decomp::AnalyzeResponse& response,
     const decomp::LlmClientConfig& displayConfig,
@@ -9253,19 +10101,32 @@ bool BuildNativeViewerHistoryEntry(
 
     do
     {
-        PlainTextResponseOutputSink sink;
+        PlainTextResponseOutputSink sink(cacheIndex != 0);
         decomp::DecompOptions renderOptions = options;
         renderOptions.WindowOutput = false;
-        renderOptions.LastCacheIndex = cacheIndex == 0 ? 1 : cacheIndex;
+
+        if (cacheIndex != 0)
+        {
+            renderOptions.LastCacheIndex = cacheIndex;
+        }
+
         RenderResponse(request, response, displayConfig, sink, renderOptions);
 
         entry.Label = Utf8ToWide(label);
+        entry.SecondaryLabel = Utf8ToWide(secondaryLabel);
+        entry.WindowTitle = Utf8ToWide(BuildNativeViewerWindowTitle(label));
         entry.Text = Utf8ToWide(sink.GetText());
         entry.RtfText = BuildPrettyViewerRtf(request, sink.GetText());
 
         if (entry.Label.empty() && !label.empty())
         {
             error = "failed to convert viewer history label to UTF-16";
+            break;
+        }
+
+        if (entry.SecondaryLabel.empty() && !secondaryLabel.empty())
+        {
+            error = "failed to convert viewer history detail to UTF-16";
             break;
         }
 
@@ -9284,80 +10145,39 @@ bool BuildNativeViewerHistoryEntry(
 
 std::string BuildNativeViewerCurrentLabel(const decomp::AnalyzeRequest& request)
 {
-    return "current  " + request.Facts.QueryText;
+    return BuildNativeViewerDisplayTarget(request.Facts.Module.ModuleName, request.Facts.QueryText);
 }
 
-std::string BuildNativeViewerArtifactLabel(const CachedAnalyzeArtifact& artifact, size_t historyIndex)
-{
-    std::string label = "#" + std::to_string(historyIndex) + "  ";
-
-    if (!artifact.Timestamp.empty())
-    {
-        label += artifact.Timestamp;
-        label += "  ";
-    }
-
-    if (artifact.EntryAddress != 0)
-    {
-        label += decomp::HexU64(artifact.EntryAddress);
-        label += "  ";
-    }
-
-    if (!artifact.Target.empty())
-    {
-        label += artifact.Target;
-    }
-    else
-    {
-        label += "<unknown>";
-    }
-
-    if (!artifact.Provider.empty())
-    {
-        label += "  ";
-        label += artifact.Provider;
-    }
-
-    if (artifact.VerifierIssueCount != 0)
-    {
-        label += "  issues=";
-        label += std::to_string(static_cast<unsigned long long>(artifact.VerifierIssueCount));
-    }
-
-    return label;
-}
-
-bool IsSameNativeViewerArtifact(
-    const CachedAnalyzeArtifact& artifact,
+std::string BuildNativeViewerCurrentSecondaryLabel(
     const decomp::AnalyzeRequest& request,
     const decomp::AnalyzeResponse& response)
 {
-    bool same = false;
+    std::vector<std::string> parts;
+    parts.push_back("current");
 
-    do
+    if (request.Facts.EntryAddress != 0)
     {
-        if (!request.RequestId.empty() && !artifact.RequestId.empty())
-        {
-            same = artifact.RequestId == request.RequestId;
-            break;
-        }
-
-        if (!request.RequestId.empty() || !artifact.RequestId.empty())
-        {
-            break;
-        }
-
-        if (artifact.Target == request.Facts.QueryText
-            && artifact.EntryAddress == request.Facts.EntryAddress
-            && artifact.Provider == response.Provider)
-        {
-            same = true;
-            break;
-        }
+        parts.push_back(decomp::HexU64(request.Facts.EntryAddress));
     }
-    while (false);
 
-    return same;
+    if (response.Verifier.AdjustedConfidence > 0.0)
+    {
+        std::array<char, 32> confidence = {};
+        std::snprintf(confidence.data(), confidence.size(), "confidence %.2f", response.Verifier.AdjustedConfidence);
+        parts.push_back(confidence.data());
+    }
+
+    if (!response.Provider.empty())
+    {
+        parts.push_back(response.Provider);
+    }
+
+    return decomp::JoinStrings(parts, "  ");
+}
+
+std::string BuildNativeViewerArtifactLabel(const CachedAnalyzeArtifact& artifact)
+{
+    return BuildNativeViewerDisplayTarget(artifact.Module, artifact.Target);
 }
 
 std::vector<NativeViewerHistoryEntry> BuildNativeViewerHistoryEntries(
@@ -9369,19 +10189,39 @@ std::vector<NativeViewerHistoryEntry> BuildNativeViewerHistoryEntries(
 {
     std::vector<NativeViewerHistoryEntry> entries;
     NativeViewerHistoryEntry currentEntry;
+    const KernelBuildFacts currentKernelBuild = ResolveNativeViewerCurrentKernelBuild(request, response);
+    std::set<std::string> identities;
+    const std::string currentIdentity = BuildNativeViewerRequestIdentity(request, response);
+    const uint32_t currentCacheIndex = options.LastCacheIndex == 0 ? 1 : options.LastCacheIndex;
 
-    if (!BuildNativeViewerHistoryEntry(BuildNativeViewerCurrentLabel(request), request, response, displayConfig, options, 1, currentEntry, error))
+    if (!BuildNativeViewerHistoryEntry(
+        BuildNativeViewerCurrentLabel(request),
+        BuildNativeViewerCurrentSecondaryLabel(request, response),
+        request,
+        response,
+        displayConfig,
+        options,
+        currentCacheIndex,
+        currentEntry,
+        error))
     {
         return entries;
     }
 
     entries.push_back(std::move(currentEntry));
+    identities.insert(currentIdentity);
 
     for (size_t index = 0; index < g_analyzeHistory.size(); ++index)
     {
         const CachedAnalyzeArtifact& artifact = g_analyzeHistory[index];
+        const std::string identity = BuildNativeViewerArtifactIdentity(artifact);
 
-        if (IsSameNativeViewerArtifact(artifact, request, response))
+        if (identities.find(identity) != identities.end())
+        {
+            continue;
+        }
+
+        if (!NativeViewerArtifactMatchesKernelBuild(artifact, currentKernelBuild))
         {
             continue;
         }
@@ -9403,7 +10243,8 @@ std::vector<NativeViewerHistoryEntry> BuildNativeViewerHistoryEntries(
         NativeViewerHistoryEntry entry;
 
         if (BuildNativeViewerHistoryEntry(
-            BuildNativeViewerArtifactLabel(artifact, index + 1),
+            BuildNativeViewerArtifactLabel(artifact),
+            BuildNativeViewerEntrySecondaryLabel(artifact, false),
             cachedRequest,
             cachedResponse,
             displayConfig,
@@ -9413,6 +10254,175 @@ std::vector<NativeViewerHistoryEntry> BuildNativeViewerHistoryEntries(
             parseError))
         {
             entries.push_back(std::move(entry));
+            identities.insert(identity);
+        }
+    }
+
+    for (const std::string& path : EnumerateNativeViewerArtifactPaths(currentKernelBuild))
+    {
+        CachedAnalyzeArtifact artifact;
+        std::string parseError;
+
+        if (!LoadCachedAnalyzeArtifact(path, artifact, parseError))
+        {
+            continue;
+        }
+
+        if (!NativeViewerArtifactMatchesKernelBuild(artifact, currentKernelBuild))
+        {
+            continue;
+        }
+
+        const std::string identity = BuildNativeViewerArtifactIdentity(artifact);
+
+        if (identities.find(identity) != identities.end())
+        {
+            continue;
+        }
+
+        decomp::AnalyzeRequest cachedRequest;
+        decomp::AnalyzeResponse cachedResponse;
+
+        if (!decomp::ParseAnalyzeRequest(artifact.RequestJson, cachedRequest, parseError))
+        {
+            continue;
+        }
+
+        if (!decomp::ParseAnalyzeResponse(artifact.ResponseJson, cachedResponse, parseError))
+        {
+            continue;
+        }
+
+        NativeViewerHistoryEntry entry;
+
+        if (BuildNativeViewerHistoryEntry(
+            BuildNativeViewerArtifactLabel(artifact),
+            BuildNativeViewerEntrySecondaryLabel(artifact, false),
+            cachedRequest,
+            cachedResponse,
+            displayConfig,
+            options,
+            0,
+            entry,
+            parseError))
+        {
+            entries.push_back(std::move(entry));
+            identities.insert(identity);
+        }
+    }
+
+    return entries;
+}
+
+bool TryAppendNativeViewerArtifactEntry(
+    const CachedAnalyzeArtifact& artifact,
+    const decomp::LlmClientConfig& displayConfig,
+    const decomp::DecompOptions& options,
+    uint32_t cacheIndex,
+    std::set<std::string>& identities,
+    std::vector<NativeViewerHistoryEntry>& entries)
+{
+    bool success = false;
+
+    do
+    {
+        const std::string identity = BuildNativeViewerArtifactIdentity(artifact);
+
+        if (identities.find(identity) != identities.end())
+        {
+            break;
+        }
+
+        decomp::AnalyzeRequest cachedRequest;
+        decomp::AnalyzeResponse cachedResponse;
+        std::string parseError;
+
+        if (!decomp::ParseAnalyzeRequest(artifact.RequestJson, cachedRequest, parseError))
+        {
+            break;
+        }
+
+        if (!decomp::ParseAnalyzeResponse(artifact.ResponseJson, cachedResponse, parseError))
+        {
+            break;
+        }
+
+        NativeViewerHistoryEntry entry;
+
+        if (!BuildNativeViewerHistoryEntry(
+                BuildNativeViewerArtifactLabel(artifact),
+                BuildNativeViewerEntrySecondaryLabel(artifact, false),
+                cachedRequest,
+                cachedResponse,
+                displayConfig,
+                options,
+                cacheIndex,
+                entry,
+                parseError))
+        {
+            break;
+        }
+
+        entries.push_back(std::move(entry));
+        identities.insert(identity);
+        success = true;
+    }
+    while (false);
+
+    return success;
+}
+
+std::vector<NativeViewerHistoryEntry> BuildNativeViewerCachedHistoryEntries(
+    const KernelBuildFacts& currentKernelBuild,
+    const decomp::LlmClientConfig& displayConfig,
+    const decomp::DecompOptions& options)
+{
+    std::vector<NativeViewerHistoryEntry> entries;
+    std::set<std::string> identities;
+    const bool hasKernelBuild = !currentKernelBuild.Fingerprint.empty();
+
+    for (size_t index = 0; index < g_analyzeHistory.size(); ++index)
+    {
+        const CachedAnalyzeArtifact& artifact = g_analyzeHistory[index];
+
+        if (hasKernelBuild && !NativeViewerArtifactMatchesKernelBuild(artifact, currentKernelBuild))
+        {
+            continue;
+        }
+
+        TryAppendNativeViewerArtifactEntry(
+            artifact,
+            displayConfig,
+            options,
+            static_cast<uint32_t>(index + 1),
+            identities,
+            entries);
+    }
+
+    if (hasKernelBuild)
+    {
+        for (const std::string& path : EnumerateNativeViewerArtifactPaths(currentKernelBuild))
+        {
+            CachedAnalyzeArtifact artifact;
+            std::string loadError;
+
+            if (!LoadCachedAnalyzeArtifact(path, artifact, loadError))
+            {
+                continue;
+            }
+
+            if (!NativeViewerArtifactMatchesKernelBuild(artifact, currentKernelBuild))
+            {
+                continue;
+            }
+
+            TryAppendNativeViewerArtifactEntry(
+                artifact,
+                displayConfig,
+                options,
+                0,
+                identities,
+                entries);
         }
     }
 
@@ -9424,11 +10434,9 @@ std::string FormatWindowHandle(HWND window)
     return decomp::HexU64(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(window)));
 }
 
-bool OpenResponseViewer(
-    const decomp::AnalyzeRequest& request,
-    const decomp::AnalyzeResponse& response,
-    const decomp::LlmClientConfig& displayConfig,
-    const decomp::DecompOptions& options,
+bool OpenNativeViewerEntries(
+    std::vector<NativeViewerHistoryEntry> historyEntries,
+    const std::wstring& fallbackTitle,
     std::string& viewerDescription,
     std::string& error)
 {
@@ -9439,18 +10447,11 @@ bool OpenResponseViewer(
 
     do
     {
-        std::vector<NativeViewerHistoryEntry> historyEntries = BuildNativeViewerHistoryEntries(
-            request,
-            response,
-            displayConfig,
-            options,
-            error);
-
         if (historyEntries.empty())
         {
             if (error.empty())
             {
-                error = "failed to build native viewer history entries";
+                error = "no cached !decomp results are available for the native viewer";
             }
 
             break;
@@ -9465,9 +10466,11 @@ bool OpenResponseViewer(
         }
 
         std::unique_ptr<NativeViewerWindowState> state = std::make_unique<NativeViewerWindowState>();
-        state->Title = Utf8ToWide("!decomp " + request.Facts.QueryText);
         viewerHistoryCount = historyEntries.size();
         state->HistoryEntries = std::move(historyEntries);
+        state->Title = !state->HistoryEntries.front().WindowTitle.empty()
+            ? state->HistoryEntries.front().WindowTitle
+            : fallbackTitle;
         state->Text = state->HistoryEntries.front().Text;
         state->RtfText = state->HistoryEntries.front().RtfText;
 
@@ -9551,7 +10554,7 @@ bool OpenResponseViewer(
 
         if (viewerHistoryCount > 1)
         {
-            viewerDescription += " history=" + std::to_string(static_cast<unsigned long long>(viewerHistoryCount));
+            viewerDescription += " functions=" + std::to_string(static_cast<unsigned long long>(viewerHistoryCount));
         }
 
         if (ownerHandle != nullptr)
@@ -9570,6 +10573,68 @@ bool OpenResponseViewer(
     }
 
     return success;
+}
+
+bool OpenResponseViewer(
+    const decomp::AnalyzeRequest& request,
+    const decomp::AnalyzeResponse& response,
+    const decomp::LlmClientConfig& displayConfig,
+    const decomp::DecompOptions& options,
+    std::string& viewerDescription,
+    std::string& error)
+{
+    std::vector<NativeViewerHistoryEntry> historyEntries = BuildNativeViewerHistoryEntries(
+        request,
+        response,
+        displayConfig,
+        options,
+        error);
+
+    return OpenNativeViewerEntries(
+        std::move(historyEntries),
+        Utf8ToWide(BuildNativeViewerWindowTitle(BuildNativeViewerCurrentLabel(request))),
+        viewerDescription,
+        error);
+}
+
+bool OpenAnalyzeHistoryViewer(
+    const DebugApi& api,
+    const decomp::DecompOptions& options,
+    std::string& viewerDescription,
+    std::string& error)
+{
+    decomp::LlmClientConfig displayConfig;
+    std::string displayConfigError;
+    decomp::LoadLlmClientConfig(displayConfig, displayConfigError, false);
+
+    const KernelBuildFacts kernelBuild = CollectKernelBuildFacts(
+        api.Control.Get(),
+        api.Control4.Get(),
+        api.DataSpaces.Get());
+    std::vector<NativeViewerHistoryEntry> historyEntries = BuildNativeViewerCachedHistoryEntries(
+        kernelBuild,
+        displayConfig,
+        options);
+
+    if (historyEntries.empty())
+    {
+        if (kernelBuild.Fingerprint.empty())
+        {
+            error = "no cached !decomp results are available and current kernel_build fingerprint is unavailable";
+        }
+        else
+        {
+            error = "no cached !decomp results are available for the current kernel_build";
+        }
+
+        return false;
+    }
+
+    return OpenNativeViewerEntries(
+        std::move(historyEntries),
+        L"Decompile Viewer - Analyzed functions",
+        viewerDescription,
+        error);
 }
 
 void PrintResponse(
@@ -9868,12 +10933,54 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
 
         if (options.HistoryOutput)
         {
-            PrintAnalyzeHistory(api.Control.Get(), api.Control4.Get());
+            if (options.WindowOutput)
+            {
+                std::string viewerDescription;
+
+                if (OpenAnalyzeHistoryViewer(api, options, viewerDescription, error))
+                {
+                    OutputLine(api.Control.Get(), api.Control4.Get(), "decomp native viewer opened: %s\n", viewerDescription.c_str());
+
+                    if (target.empty())
+                    {
+                        return S_OK;
+                    }
+                }
+                else
+                {
+                    OutputLine(api.Control.Get(), api.Control4.Get(), "error: %s\n", error.c_str());
+
+                    if (target.empty())
+                    {
+                        return E_FAIL;
+                    }
+
+                    error.clear();
+                }
+            }
+            else
+            {
+                PrintAnalyzeHistory(api.Control.Get(), api.Control4.Get());
+            }
 
             if (target.empty())
             {
                 return S_OK;
             }
+        }
+
+        if (target.empty() && options.WindowOutput)
+        {
+            std::string viewerDescription;
+
+            if (!OpenAnalyzeHistoryViewer(api, options, viewerDescription, error))
+            {
+                OutputLine(api.Control.Get(), api.Control4.Get(), "error: %s\n", error.c_str());
+                return E_FAIL;
+            }
+
+            OutputLine(api.Control.Get(), api.Control4.Get(), "decomp native viewer opened: %s\n", viewerDescription.c_str());
+            return S_OK;
         }
 
         if (options.ClearUserOverrides)

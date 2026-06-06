@@ -1,5 +1,7 @@
 # Windbg Decompile Extension via LLM
 
+![native decompile viewer](demo/screenshot-viewwindow.png)
+
 ![screenshot](demo/screenshot.png)
 
 This project is a Windows x64 WinDbg extension skeleton that resolves a function by name or address, reconstructs a deterministic control-flow view, and asks an LLM directly from the extension to produce pseudocode.
