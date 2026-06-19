@@ -5795,6 +5795,63 @@ std::string FormatStateValue(int64_t value)
         : HexU64(static_cast<uint64_t>(value));
 }
 
+std::string NormalizeObfuscationBranchMnemonic(const std::string& mnemonic)
+{
+    const std::string lower = ToLowerAscii(TrimCopy(mnemonic));
+
+    if (lower == "jz")
+    {
+        return "je";
+    }
+
+    if (lower == "jnz")
+    {
+        return "jne";
+    }
+
+    if (lower == "jnbe")
+    {
+        return "ja";
+    }
+
+    if (lower == "jnb" || lower == "jnc")
+    {
+        return "jae";
+    }
+
+    if (lower == "jnae" || lower == "jc")
+    {
+        return "jb";
+    }
+
+    if (lower == "jna")
+    {
+        return "jbe";
+    }
+
+    if (lower == "jnle")
+    {
+        return "jg";
+    }
+
+    if (lower == "jnl")
+    {
+        return "jge";
+    }
+
+    if (lower == "jnge")
+    {
+        return "jl";
+    }
+
+    if (lower == "jng")
+    {
+        return "jle";
+    }
+
+    return lower;
+}
+
 bool IsEqualityBranchMnemonic(const std::string& mnemonic)
 {
     const std::string lower = ToLowerAscii(TrimCopy(mnemonic));
@@ -6667,6 +6724,249 @@ std::vector<EvaluatedStateTransition> EvaluateStateTransitionsInBlock(
     return {};
 }
 
+struct OpaqueBranchProof
+{
+    bool Proven = false;
+    bool BranchTaken = false;
+    uint64_t Site = 0;
+    std::string Predicate;
+    std::string Evidence;
+};
+
+bool TryEvaluateCompareBranch(
+    const std::string& branchMnemonic,
+    int64_t signedLeft,
+    int64_t signedRight,
+    uint64_t unsignedLeft,
+    uint64_t unsignedRight,
+    bool& branchTaken)
+{
+    const std::string branch = NormalizeObfuscationBranchMnemonic(branchMnemonic);
+
+    if (branch == "je")
+    {
+        branchTaken = unsignedLeft == unsignedRight;
+        return true;
+    }
+
+    if (branch == "jne")
+    {
+        branchTaken = unsignedLeft != unsignedRight;
+        return true;
+    }
+
+    if (branch == "ja")
+    {
+        branchTaken = unsignedLeft > unsignedRight;
+        return true;
+    }
+
+    if (branch == "jae")
+    {
+        branchTaken = unsignedLeft >= unsignedRight;
+        return true;
+    }
+
+    if (branch == "jb")
+    {
+        branchTaken = unsignedLeft < unsignedRight;
+        return true;
+    }
+
+    if (branch == "jbe")
+    {
+        branchTaken = unsignedLeft <= unsignedRight;
+        return true;
+    }
+
+    if (branch == "jg")
+    {
+        branchTaken = signedLeft > signedRight;
+        return true;
+    }
+
+    if (branch == "jge")
+    {
+        branchTaken = signedLeft >= signedRight;
+        return true;
+    }
+
+    if (branch == "jl")
+    {
+        branchTaken = signedLeft < signedRight;
+        return true;
+    }
+
+    if (branch == "jle")
+    {
+        branchTaken = signedLeft <= signedRight;
+        return true;
+    }
+
+    return false;
+}
+
+bool TryBuildOpaqueBranchProof(
+    const DisassembledInstruction& compareInstruction,
+    const DisassembledInstruction& branchInstruction,
+    OpaqueBranchProof& proof)
+{
+    const std::vector<std::string> operands = SplitOperands(compareInstruction.OperandText);
+
+    if (operands.size() < 2)
+    {
+        return false;
+    }
+
+    const std::string mnemonic = ToLowerAscii(TrimCopy(compareInstruction.Mnemonic));
+    const std::string left = StripPointerDecorators(operands[0]);
+    const std::string right = StripPointerDecorators(operands[1]);
+    bool branchTaken = false;
+
+    if (mnemonic == "cmp")
+    {
+        int64_t signedLeft = 0;
+        int64_t signedRight = 0;
+        bool evaluated = false;
+
+        if (left.find('[') == std::string::npos
+            && right.find('[') == std::string::npos
+            && !left.empty()
+            && left == right)
+        {
+            evaluated = true;
+            proof.Evidence = HexU64(compareInstruction.Address) + " compares identical operands";
+        }
+        else if (TryParseSignedValue(left, signedLeft) && TryParseSignedValue(right, signedRight))
+        {
+            evaluated = true;
+            proof.Evidence = HexU64(compareInstruction.Address) + " compares constants";
+        }
+
+        if (!evaluated
+            || !TryEvaluateCompareBranch(
+                branchInstruction.Mnemonic,
+                signedLeft,
+                signedRight,
+                static_cast<uint64_t>(signedLeft),
+                static_cast<uint64_t>(signedRight),
+                branchTaken))
+        {
+            return false;
+        }
+
+        proof.Proven = true;
+        proof.BranchTaken = branchTaken;
+        proof.Site = branchInstruction.Address;
+        proof.Predicate = FormatConditionOperand(operands[0]) + " cmp " + FormatConditionOperand(operands[1]);
+        return true;
+    }
+
+    if (mnemonic == "test")
+    {
+        int64_t signedLeft = 0;
+        int64_t signedRight = 0;
+
+        if ((!TryParseSignedValue(left, signedLeft) || signedLeft != 0)
+            && (!TryParseSignedValue(right, signedRight) || signedRight != 0))
+        {
+            return false;
+        }
+
+        if (!TryEvaluateCompareBranch(branchInstruction.Mnemonic, 0, 0, 0, 0, branchTaken))
+        {
+            return false;
+        }
+
+        proof.Proven = true;
+        proof.BranchTaken = branchTaken;
+        proof.Site = branchInstruction.Address;
+        proof.Predicate = FormatConditionOperand(operands[0]) + " test " + FormatConditionOperand(operands[1]);
+        proof.Evidence = HexU64(compareInstruction.Address) + " tests against zero";
+        return true;
+    }
+
+    return false;
+}
+
+std::vector<OpaquePredicateFact> AnalyzeOpaquePredicateFacts(
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::vector<BasicBlock>& blocks,
+    const std::vector<NormalizedCondition>& conditions)
+{
+    std::vector<OpaquePredicateFact> facts;
+    std::set<std::string> seen;
+
+    for (const BasicBlock& block : blocks)
+    {
+        const NormalizedCondition* condition = FindConditionForBlock(conditions, block.Id);
+
+        if (condition == nullptr)
+        {
+            continue;
+        }
+
+        const DisassembledInstruction* pendingCompare = nullptr;
+
+        for (const DisassembledInstruction* instruction : GetBlockInstructions(block, instructions))
+        {
+            if (instruction == nullptr)
+            {
+                continue;
+            }
+
+            const std::string mnemonic = ToLowerAscii(TrimCopy(instruction->Mnemonic));
+
+            if (mnemonic == "cmp" || mnemonic == "test")
+            {
+                pendingCompare = instruction;
+                continue;
+            }
+
+            if (instruction->IsConditionalBranch)
+            {
+                if (pendingCompare == nullptr || instruction->Address != condition->Site)
+                {
+                    continue;
+                }
+
+                OpaqueBranchProof proof;
+
+                if (!TryBuildOpaqueBranchProof(*pendingCompare, *instruction, proof))
+                {
+                    continue;
+                }
+
+                OpaquePredicateFact fact;
+                fact.Site = proof.Site;
+                fact.BlockId = block.Id;
+                fact.Predicate = condition->Expression.empty() ? proof.Predicate : condition->Expression;
+                fact.ConstantResult = proof.BranchTaken ? "true" : "false";
+                fact.LiveTargetBlock = proof.BranchTaken ? condition->TrueTargetBlock : condition->FalseTargetBlock;
+                fact.DeadTargetBlock = proof.BranchTaken ? condition->FalseTargetBlock : condition->TrueTargetBlock;
+                fact.Evidence = proof.Evidence;
+                fact.Confidence = 0.90;
+
+                const std::string key = fact.BlockId + "\n" + fact.LiveTargetBlock + "\n" + fact.DeadTargetBlock;
+
+                if (!fact.LiveTargetBlock.empty() && !fact.DeadTargetBlock.empty() && seen.insert(key).second)
+                {
+                    facts.push_back(std::move(fact));
+                }
+
+                continue;
+            }
+
+            if (InstructionWritesFlags(*instruction))
+            {
+                pendingCompare = nullptr;
+            }
+        }
+    }
+
+    return facts;
+}
+
 std::vector<RecoveredControlFlowEdge> RecoverObfuscationEdges(
     const std::vector<DisassembledInstruction>& instructions,
     const std::vector<BasicBlock>& blocks,
@@ -6753,9 +7053,15 @@ ObfuscationFacts AnalyzeObfuscationFacts(
 {
     (void)blockValueStates;
     ObfuscationFacts facts;
+    facts.OpaquePredicates = AnalyzeOpaquePredicateFacts(instructions, blocks, conditions);
 
     if (blocks.size() < 5)
     {
+        for (const OpaquePredicateFact& predicate : facts.OpaquePredicates)
+        {
+            facts.Confidence = (std::max)(facts.Confidence, predicate.Confidence);
+        }
+
         return facts;
     }
 
@@ -6891,8 +7197,235 @@ ObfuscationFacts AnalyzeObfuscationFacts(
         facts.Notes.push_back("switch-like control flow exists but no conservative flattening dispatcher was proven");
     }
 
+    for (const OpaquePredicateFact& predicate : facts.OpaquePredicates)
+    {
+        bestConfidence = (std::max)(bestConfidence, predicate.Confidence);
+    }
+
     facts.Confidence = bestConfidence;
     return facts;
+}
+
+bool SplitLastBinaryExpression(
+    const std::string& expression,
+    const std::string& op,
+    std::string& left,
+    std::string& right)
+{
+    const std::string delimiter = " " + op + " ";
+    const size_t position = expression.rfind(delimiter);
+
+    if (position == std::string::npos)
+    {
+        return false;
+    }
+
+    left = TrimCopy(expression.substr(0, position));
+    right = TrimCopy(expression.substr(position + delimiter.size()));
+    return !left.empty() && !right.empty();
+}
+
+bool TryParseExpressionImmediate(const std::string& expression, int64_t& value)
+{
+    return TryParseSignedValue(StripPointerDecorators(expression), value);
+}
+
+bool SimplifySubstitutionExpression(
+    const std::string& expression,
+    std::string& simplified,
+    std::string& pattern)
+{
+    std::string left;
+    std::string right;
+    int64_t immediate = 0;
+
+    if (SplitLastBinaryExpression(expression, "+", left, right)
+        && TryParseExpressionImmediate(right, immediate)
+        && immediate == 0)
+    {
+        simplified = left;
+        pattern = "identity_add_zero";
+        return true;
+    }
+
+    if (SplitLastBinaryExpression(expression, "-", left, right)
+        && TryParseExpressionImmediate(right, immediate))
+    {
+        if (immediate == 0)
+        {
+            simplified = left;
+            pattern = "identity_sub_zero";
+            return true;
+        }
+
+        if (immediate < 0)
+        {
+            simplified = left + " + " + FormatStateValue(static_cast<uint64_t>(-immediate));
+            pattern = "subtract_negative";
+            return true;
+        }
+    }
+
+    if (SplitLastBinaryExpression(expression, "^", left, right)
+        && TryParseExpressionImmediate(right, immediate)
+        && immediate == 0)
+    {
+        simplified = left;
+        pattern = "identity_xor_zero";
+        return true;
+    }
+
+    if (SplitLastBinaryExpression(expression, "|", left, right)
+        && TryParseExpressionImmediate(right, immediate)
+        && immediate == 0)
+    {
+        simplified = left;
+        pattern = "identity_or_zero";
+        return true;
+    }
+
+    if (SplitLastBinaryExpression(expression, "&", left, right)
+        && TryParseExpressionImmediate(right, immediate)
+        && immediate == -1)
+    {
+        simplified = left;
+        pattern = "identity_and_all_ones";
+        return true;
+    }
+
+    if (SplitLastBinaryExpression(expression, "*", left, right)
+        && TryParseExpressionImmediate(right, immediate)
+        && immediate == 1)
+    {
+        simplified = left;
+        pattern = "identity_mul_one";
+        return true;
+    }
+
+    if (SplitLastBinaryExpression(expression, "<<", left, right)
+        && TryParseExpressionImmediate(right, immediate)
+        && immediate == 0)
+    {
+        simplified = left;
+        pattern = "identity_shl_zero";
+        return true;
+    }
+
+    if (SplitLastBinaryExpression(expression, ">>", left, right)
+        && TryParseExpressionImmediate(right, immediate)
+        && immediate == 0)
+    {
+        simplified = left;
+        pattern = "identity_shr_zero";
+        return true;
+    }
+
+    if (SplitLastBinaryExpression(expression, "^", left, right))
+    {
+        std::string base;
+        std::string innerRight;
+        int64_t outerImmediate = 0;
+        int64_t innerImmediate = 0;
+
+        if (SplitLastBinaryExpression(left, "^", base, innerRight)
+            && TryParseExpressionImmediate(right, outerImmediate)
+            && TryParseExpressionImmediate(innerRight, innerImmediate)
+            && outerImmediate == innerImmediate)
+        {
+            simplified = base;
+            pattern = "xor_same_constant_twice";
+            return true;
+        }
+    }
+
+    if (SplitLastBinaryExpression(expression, "-", left, right))
+    {
+        std::string base;
+        std::string innerRight;
+        int64_t outerImmediate = 0;
+        int64_t innerImmediate = 0;
+
+        if (SplitLastBinaryExpression(left, "+", base, innerRight)
+            && TryParseExpressionImmediate(right, outerImmediate)
+            && TryParseExpressionImmediate(innerRight, innerImmediate)
+            && outerImmediate == innerImmediate)
+        {
+            simplified = base;
+            pattern = "add_then_sub_same_constant";
+            return true;
+        }
+    }
+
+    if (SplitLastBinaryExpression(expression, "+", left, right))
+    {
+        std::string base;
+        std::string innerRight;
+        int64_t outerImmediate = 0;
+        int64_t innerImmediate = 0;
+
+        if (SplitLastBinaryExpression(left, "-", base, innerRight)
+            && TryParseExpressionImmediate(right, outerImmediate)
+            && TryParseExpressionImmediate(innerRight, innerImmediate)
+            && outerImmediate == innerImmediate)
+        {
+            simplified = base;
+            pattern = "sub_then_add_same_constant";
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::vector<SubstitutionIdiomFact> CanonicalizeSubstitutionIdioms(std::vector<IrValue>& values)
+{
+    std::vector<SubstitutionIdiomFact> facts;
+
+    for (IrValue& value : values)
+    {
+        std::string current = value.Canonical.empty() ? value.Expression : value.Canonical;
+        std::string simplified;
+        std::string pattern;
+
+        for (size_t depth = 0; depth < 4; ++depth)
+        {
+            if (!SimplifySubstitutionExpression(current, simplified, pattern) || simplified == current)
+            {
+                break;
+            }
+
+            SubstitutionIdiomFact fact;
+            fact.Site = value.DefSite;
+            fact.BlockId = value.BlockId;
+            fact.OriginalExpression = current;
+            fact.SimplifiedExpression = simplified;
+            fact.Pattern = pattern;
+            fact.Evidence = "local integer identity in " + value.Id;
+            fact.Confidence = 0.88;
+            facts.push_back(std::move(fact));
+            current = simplified;
+        }
+
+        value.Canonical = current;
+        value.IsConstant = IsConstantExpression(value.Canonical);
+        value.IsCopy = value.Target == value.Canonical;
+
+        if (value.IsConstant)
+        {
+            value.Kind = "constant";
+        }
+    }
+
+    return facts;
+}
+
+void AppendSubstitutionIdioms(ObfuscationFacts& obfuscation, const std::vector<SubstitutionIdiomFact>& idioms)
+{
+    for (const SubstitutionIdiomFact& idiom : idioms)
+    {
+        obfuscation.SubstitutionIdioms.push_back(idiom);
+        obfuscation.Confidence = (std::max)(obfuscation.Confidence, idiom.Confidence);
+    }
 }
 
 bool TryExtractInductionStep(
@@ -9039,13 +9572,22 @@ EvidenceGraphFacts BuildEvidenceGraphFacts(const AnalysisFacts& facts)
     for (size_t index = 0; index < facts.Obfuscation.SubstitutionIdioms.size(); ++index)
     {
         const SubstitutionIdiomFact& idiom = facts.Obfuscation.SubstitutionIdioms[index];
-        builder.AddSiteFact(
+        const std::string nodeId = builder.AddSiteFact(
             BuildEvidenceIndexedNodeId("obf_substitution", index),
             "obfuscation.substitution_idiom",
             idiom.Pattern + " " + idiom.SimplifiedExpression,
             idiom.Site,
             idiom.BlockId,
             idiom.Confidence);
+
+        for (const IrValue& value : facts.IrValues)
+        {
+            if (value.DefSite == idiom.Site)
+            {
+                builder.AddEdge(nodeId, "ir:" + value.Id, "simplifies", idiom.Confidence);
+                break;
+            }
+        }
     }
 
     for (size_t index = 0; index < facts.ControlFlow.size(); ++index)
@@ -9365,6 +9907,7 @@ void RefreshDerivedAnalysisFacts(AnalysisFacts& facts)
         facts.MemoryAccesses,
         facts.RecoveredArguments,
         facts.RecoveredLocals);
+    const std::vector<SubstitutionIdiomFact> substitutionIdioms = CanonicalizeSubstitutionIdioms(facts.IrValues);
     facts.BlockValueStates = CollectBlockValueStates(facts.Blocks, facts.IrValues);
     facts.NormalizedConditions = CollectNormalizedConditions(
         facts.Instructions,
@@ -9379,6 +9922,7 @@ void RefreshDerivedAnalysisFacts(AnalysisFacts& facts)
         facts.BlockValueStates,
         facts.NormalizedConditions,
         facts.Switches);
+    AppendSubstitutionIdioms(facts.Obfuscation, substitutionIdioms);
     facts.ControlFlow = AnalyzeControlFlow(facts.Instructions, facts.Blocks, facts.NormalizedConditions, facts.Switches);
     RefreshEvidenceGraph(facts);
 }
@@ -9463,6 +10007,7 @@ AnalysisFacts BuildAnalysisFacts(
     facts.CallArguments = CollectCallArgumentFacts(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
     facts.ValueMerges = CollectValueMerges(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
     facts.IrValues = CollectIrValues(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
+    const std::vector<SubstitutionIdiomFact> substitutionIdioms = CanonicalizeSubstitutionIdioms(facts.IrValues);
     facts.BlockValueStates = CollectBlockValueStates(facts.Blocks, facts.IrValues);
     facts.NormalizedConditions = CollectNormalizedConditions(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
     facts.Obfuscation = AnalyzeObfuscationFacts(
@@ -9472,6 +10017,7 @@ AnalysisFacts BuildAnalysisFacts(
         facts.BlockValueStates,
         facts.NormalizedConditions,
         facts.Switches);
+    AppendSubstitutionIdioms(facts.Obfuscation, substitutionIdioms);
     facts.ControlFlow = AnalyzeControlFlow(facts.Instructions, facts.Blocks, facts.NormalizedConditions, facts.Switches);
     facts.Abi = AnalyzeAbiFacts(instructions, facts.MemoryAccesses, facts.StackFrame, entryAddress);
     facts.TypeHints = CollectTypeRecoveryHints(instructions, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);

@@ -612,6 +612,93 @@ void CheckSwitchEvidenceConsistency(const AnalyzeRequest& request, const Analyze
     }
 }
 
+bool HasHighConfidenceDispatcherFact(const AnalysisFacts& facts)
+{
+    for (const ObfuscationDispatcher& dispatcher : facts.Obfuscation.Dispatchers)
+    {
+        if (dispatcher.Confidence >= 0.75)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool MentionsDispatcherRecoveryClaim(const AnalyzeResponse& response)
+{
+    return ContainsInsensitive(response.Summary, "unflatten")
+        || ContainsInsensitive(response.PseudoC, "unflatten")
+        || ContainsInsensitive(response.Summary, "deobfuscat")
+        || ContainsInsensitive(response.PseudoC, "deobfuscat")
+        || ContainsInsensitive(response.Summary, "control-flow flatten")
+        || ContainsInsensitive(response.PseudoC, "control-flow flatten")
+        || ((ContainsInsensitive(response.Summary, "dispatcher") || ContainsInsensitive(response.PseudoC, "dispatcher"))
+            && (ContainsInsensitive(response.Summary, "recovered") || ContainsInsensitive(response.PseudoC, "recovered")));
+}
+
+bool MentionsOpaqueDeadEdgeClaim(const AnalyzeResponse& response)
+{
+    return ContainsInsensitive(response.Summary, "opaque predicate")
+        || ContainsInsensitive(response.PseudoC, "opaque predicate")
+        || ContainsInsensitive(response.Summary, "bogus control")
+        || ContainsInsensitive(response.PseudoC, "bogus control")
+        || ContainsInsensitive(response.Summary, "dead branch")
+        || ContainsInsensitive(response.PseudoC, "dead branch")
+        || ContainsInsensitive(response.Summary, "dead block")
+        || ContainsInsensitive(response.PseudoC, "dead block")
+        || ContainsInsensitive(response.Summary, "junk block")
+        || ContainsInsensitive(response.PseudoC, "junk block");
+}
+
+bool MentionsSubstitutionSimplificationClaim(const AnalyzeResponse& response)
+{
+    return ContainsInsensitive(response.Summary, "instruction substitution")
+        || ContainsInsensitive(response.PseudoC, "instruction substitution")
+        || ContainsInsensitive(response.Summary, "substitution idiom")
+        || ContainsInsensitive(response.PseudoC, "substitution idiom")
+        || ContainsInsensitive(response.Summary, "algebraic identity")
+        || ContainsInsensitive(response.PseudoC, "algebraic identity");
+}
+
+void CheckObfuscationClaimSupport(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
+{
+    if (response.Confidence <= 0.60)
+    {
+        return;
+    }
+
+    if (MentionsDispatcherRecoveryClaim(response) && !HasHighConfidenceDispatcherFact(request.Facts))
+    {
+        ++report.FactConflicts;
+        AddIssue(
+            report,
+            "obfuscation.dispatcher_claim_without_evidence",
+            "warning",
+            "response claims flattening recovery without a high-confidence dispatcher fact");
+    }
+
+    if (MentionsOpaqueDeadEdgeClaim(response) && request.Facts.Obfuscation.OpaquePredicates.empty())
+    {
+        ++report.FactConflicts;
+        AddIssue(
+            report,
+            "obfuscation.dead_edge_claim_without_opaque_predicate",
+            "warning",
+            "response claims a dead or bogus edge without an opaque predicate fact");
+    }
+
+    if (MentionsSubstitutionSimplificationClaim(response) && request.Facts.Obfuscation.SubstitutionIdioms.empty())
+    {
+        ++report.FactConflicts;
+        AddIssue(
+            report,
+            "obfuscation.substitution_claim_without_evidence",
+            "warning",
+            "response claims instruction-substitution simplification without substitution facts");
+    }
+}
+
 void CheckRecoveredCallCoverage(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
 {
     if (response.Confidence <= 0.65)
@@ -1534,6 +1621,7 @@ VerifyReport VerifyResponse(const AnalyzeRequest& request, AnalyzeResponse& resp
     CheckBranchTargetEdges(request, report);
     CheckPseudoBranchDensity(request, response, report);
     CheckSwitchEvidenceConsistency(request, response, report);
+    CheckObfuscationClaimSupport(request, response, report);
     CheckCalleeSummaryConsistency(request, response, report);
     CheckRecoveredCallCoverage(request, response, report);
     CheckRecoveredCallArgumentConsistency(request, response, report);

@@ -2707,7 +2707,7 @@ JsonValue BuildObfuscationJson(const AnalyzeRequest& request, bool* truncated)
     object.Set("confidence", JsonValue::MakeNumber(request.Facts.Obfuscation.Confidence));
     object.Set(
         "usage_guidance",
-        JsonValue::MakeString("Prefer high-confidence recovered_edges over raw dispatcher loop edges; preserve uncertainty for unresolved state transitions."));
+        JsonValue::MakeString("Prefer high-confidence recovered_edges over raw dispatcher loop edges; use opaque_predicates only for proven dead edges; use substitution_idioms only as local simplification evidence; preserve uncertainty for unresolved state transitions."));
 
     if (truncated != nullptr)
     {
@@ -5201,6 +5201,7 @@ std::string BuildChunkSystemPrompt(const AnalyzeRequest& request)
         "Do not invent external call targets that are not present in the input. "
         "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, obfuscation, data_references, call_targets, and pdb facts as high-signal semantic hints when present. "
         "When obfuscation exposes high-confidence recovered_edges, prefer those semantic edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
+        "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
         "Prefer explicit memory reads, writes, compares, branches, and state transitions over vague summaries. "
         "When information is incomplete, preserve only the missing part as uncertain instead of collapsing the whole chunk into a short summary. "
         "The evidence field must be an array of objects shaped like {\"claim\": string, \"blocks\": [string, ...]}. Use evidence.blocks values that reference only valid basic block ids from the input chunk.";
@@ -5244,6 +5245,7 @@ std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
         "Use the chunk summaries to produce a fuller function-level pseudocode than a single-pass summary. "
         "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, obfuscation, and pdb facts to preserve semantic names and control-flow intent. "
         "When obfuscation exposes high-confidence recovered_edges, prefer those semantic edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
+        "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
         "Prefer reconstructing concrete reads, writes, branches, and helper interactions when the chunk evidence supports them. "
         "Do not invent calls or fields that are not grounded by the chunk summaries or global facts. "
         "Use UNKNOWN_TYPE for uncertain types and preserve only the truly unresolved parts in uncertainties. The evidence field must be an array of objects shaped like {\"claim\": string, \"blocks\": [string, ...]}.";
@@ -5287,6 +5289,7 @@ std::string BuildSystemPrompt(const AnalyzeRequest& request)
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style as appropriate. "
         "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, obfuscation, type_hints, idioms, callee_summaries, graph_summary, session_policy, observed_behavior, and pdb facts as high-confidence semantic hints when available. "
         "When obfuscation exposes high-confidence recovered_edges, prefer those semantic edges over raw dispatcher loop edges and do not render the dispatcher as business logic unless recovery confidence is low. "
+        "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
         "Use evidence.blocks values that reference only valid basic block ids from the input. "
         "Blocks are a representative selection, not necessarily the first contiguous blocks in the function. "
         "Treat analyzer_skeleton as the draft to refine and graph_summary as the authoritative graph outline. "
@@ -5319,6 +5322,7 @@ std::string BuildUserPrompt(const AnalyzeRequest& request)
     prompt += "12. Refine analyzer_skeleton instead of writing from scratch; preserve its evidence-backed regions, calls, idioms, and uncertainties unless contradicted by stronger facts.\n";
     prompt += "13. Use graph_summary as the authoritative CFG/region outline; do not invent loops, switches, or branches that graph_summary and control_flow do not support.\n";
     prompt += "14. If obfuscation.dispatchers contains high-confidence recovered_edges, reconstruct control flow from those semantic edges before describing raw dispatcher blocks; keep missing state transitions uncertain.\n";
+    prompt += "15. Use obfuscation.opaque_predicates only to justify proven dead edges, and use obfuscation.substitution_idioms only as local simplification evidence.\n";
     return prompt;
 }
 

@@ -125,6 +125,19 @@ bool HasEvidenceNodeKind(const decomp::AnalysisFacts& facts, const std::string& 
     return false;
 }
 
+bool HasEvidenceEdgeRelation(const decomp::AnalysisFacts& facts, const std::string& relation)
+{
+    for (const decomp::EvidenceEdge& edge : facts.EvidenceGraph.Edges)
+    {
+        if (edge.Relation == relation)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 const decomp::ObfuscationDispatcher* FindHighConfidenceDispatcher(const decomp::AnalysisFacts& facts)
 {
     for (const decomp::ObfuscationDispatcher& dispatcher : facts.Obfuscation.Dispatchers)
@@ -960,6 +973,68 @@ decomp::AnalysisFacts BuildConditionalFlattenedDispatcherFacts()
         instructions);
 }
 
+decomp::AnalysisFacts BuildOpaquePredicateFacts()
+{
+    decomp::ModuleInfo module;
+    module.ModuleName = "snapshot";
+    module.ImageName = "snapshot.exe";
+    module.Base = 0x18000;
+    module.Size = 0x1000;
+
+    std::vector<decomp::FunctionRegion> regions = { { 0x18000, 0x18030 } };
+    std::vector<uint8_t> bytes(0x30, 0x90);
+    std::vector<decomp::DisassembledInstruction> instructions;
+    instructions.push_back(MakeInstruction(0x18000, 0x18003, "cmp", "ecx, ecx"));
+    instructions.push_back(MakeBranch(0x18003, 0x18005, "je", 0x18010));
+    instructions.push_back(MakeInstruction(0x18005, 0x1800A, "mov", "eax, 0xDEAD"));
+    instructions.push_back(MakeInstruction(0x1800A, 0x1800B, "ret"));
+    instructions.push_back(MakeInstruction(0x18010, 0x18015, "mov", "eax, 1"));
+    instructions.push_back(MakeInstruction(0x18015, 0x18016, "ret"));
+
+    decomp::DecompOptions options;
+    return decomp::BuildAnalysisFacts(
+        "snapshot!OpaquePredicate",
+        module,
+        decomp::DebugSessionKind::User,
+        options,
+        0x18000,
+        0x18000,
+        regions,
+        bytes,
+        instructions);
+}
+
+decomp::AnalysisFacts BuildSubstitutionFacts()
+{
+    decomp::ModuleInfo module;
+    module.ModuleName = "snapshot";
+    module.ImageName = "snapshot.exe";
+    module.Base = 0x19000;
+    module.Size = 0x1000;
+
+    std::vector<decomp::FunctionRegion> regions = { { 0x19000, 0x19030 } };
+    std::vector<uint8_t> bytes(0x30, 0x90);
+    std::vector<decomp::DisassembledInstruction> instructions;
+    instructions.push_back(MakeInstruction(0x19000, 0x19005, "mov", "eax, 5"));
+    instructions.push_back(MakeInstruction(0x19005, 0x19008, "add", "eax, 0"));
+    instructions.push_back(MakeInstruction(0x19008, 0x1900B, "xor", "eax, 0"));
+    instructions.push_back(MakeInstruction(0x1900B, 0x1900E, "or", "eax, 0"));
+    instructions.push_back(MakeInstruction(0x1900E, 0x19011, "shl", "eax, 0"));
+    instructions.push_back(MakeInstruction(0x19011, 0x19012, "ret"));
+
+    decomp::DecompOptions options;
+    return decomp::BuildAnalysisFacts(
+        "snapshot!Substitution",
+        module,
+        decomp::DebugSessionKind::User,
+        options,
+        0x19000,
+        0x19000,
+        regions,
+        bytes,
+        instructions);
+}
+
 void TestAnalyzerSnapshot()
 {
     decomp::AnalysisFacts facts = BuildDiamondFacts();
@@ -1535,6 +1610,54 @@ void TestObfuscationFactsSnapshot()
 
     Expect(foundConditionalState1, "conditional state recovery should keep the retained cmov state edge");
     Expect(foundConditionalState2, "conditional state recovery should recover the selected cmov state edge");
+
+    const decomp::AnalysisFacts opaqueFacts = BuildOpaquePredicateFacts();
+    const decomp::BasicBlock* opaqueDeadBlock = FindBlockStartingAt(opaqueFacts, 0x18005);
+    bool foundOpaquePredicate = false;
+
+    for (const decomp::OpaquePredicateFact& predicate : opaqueFacts.Obfuscation.OpaquePredicates)
+    {
+        if (predicate.ConstantResult == "true"
+            && opaqueDeadBlock != nullptr
+            && predicate.DeadTargetBlock == opaqueDeadBlock->Id)
+        {
+            foundOpaquePredicate = true;
+        }
+    }
+
+    Expect(foundOpaquePredicate, "opaque predicate fixture should prove the dead branch target");
+    Expect(HasEvidenceNodeKind(opaqueFacts, "obfuscation.opaque_predicate"), "evidence graph should expose opaque predicate nodes");
+
+    const decomp::AnalysisFacts substitutionFacts = BuildSubstitutionFacts();
+    bool foundAddZero = false;
+    bool foundCanonicalAdd = false;
+
+    for (const decomp::SubstitutionIdiomFact& idiom : substitutionFacts.Obfuscation.SubstitutionIdioms)
+    {
+        if (idiom.Pattern == "identity_add_zero")
+        {
+            foundAddZero = true;
+        }
+    }
+
+    for (const decomp::IrValue& value : substitutionFacts.IrValues)
+    {
+        if (value.DefSite == 0x19005 && value.Canonical.find("+ 0") == std::string::npos)
+        {
+            foundCanonicalAdd = true;
+        }
+    }
+
+    Expect(foundAddZero, "substitution fixture should record an add-zero identity");
+    Expect(foundCanonicalAdd, "substitution canonicalizer should simplify add-zero canonical values");
+    Expect(HasEvidenceNodeKind(substitutionFacts, "obfuscation.substitution_idiom"), "evidence graph should expose substitution idiom nodes");
+    Expect(HasEvidenceEdgeRelation(substitutionFacts, "simplifies"), "evidence graph should link substitution facts to IR values");
+
+    decomp::AnalyzeRequest obfuscationRequest;
+    obfuscationRequest.RequestId = "obfuscation_phase3_snapshot";
+    obfuscationRequest.Facts = substitutionFacts;
+    const std::string phase3PromptDump = decomp::BuildDebugPromptDump(obfuscationRequest);
+    Expect(phase3PromptDump.find("\"substitution_idioms\"") != std::string::npos, "prompt dump should include substitution idioms");
 }
 
 void TestSimdAbiSnapshot()
@@ -2000,6 +2123,21 @@ void TestVerifierCoverageSnapshot()
     const decomp::VerifyReport unconvergedReport = decomp::VerifyResponse(unconvergedRequest, unconvergedResponse);
     Expect(HasIssueCode(unconvergedReport, "dataflow.unconverged_without_uncertainty"), "verifier should flag confident responses that omit unconverged dataflow uncertainty");
     Expect(unconvergedReport.AdjustedConfidence < unconvergedResponse.Confidence, "unconverged dataflow without uncertainty should reduce verifier confidence");
+
+    decomp::AnalyzeRequest unsupportedObfuscationRequest;
+    unsupportedObfuscationRequest.RequestId = "unsupported_obfuscation_claims";
+    unsupportedObfuscationRequest.Facts = BuildDiamondFacts();
+
+    decomp::AnalyzeResponse unsupportedObfuscationResponse;
+    unsupportedObfuscationResponse.Status = "ok";
+    unsupportedObfuscationResponse.PseudoC = "void f(void) { return; }";
+    unsupportedObfuscationResponse.Summary = "recovered control-flow flattening dispatcher, removed opaque predicate dead branch, and applied instruction substitution idiom";
+    unsupportedObfuscationResponse.Confidence = 0.91;
+
+    const decomp::VerifyReport unsupportedObfuscationReport = decomp::VerifyResponse(unsupportedObfuscationRequest, unsupportedObfuscationResponse);
+    Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.dispatcher_claim_without_evidence"), "verifier should reject unsupported dispatcher recovery claims");
+    Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.dead_edge_claim_without_opaque_predicate"), "verifier should reject unsupported opaque dead-edge claims");
+    Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.substitution_claim_without_evidence"), "verifier should reject unsupported substitution claims");
 }
 
 void TestUxHelperSnapshot()
