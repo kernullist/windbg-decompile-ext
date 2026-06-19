@@ -1612,6 +1612,14 @@ void TestObfuscationFactsSnapshot()
     outsideChunkEdge.Confidence = 0.99;
     chunkScopedRequest.Facts.SemanticControlFlow.Edges.push_back(outsideChunkEdge);
 
+    decomp::NormalizedCondition outsideChunkCondition;
+    outsideChunkCondition.BlockId = "bb_outside_condition";
+    outsideChunkCondition.Expression = "OUTSIDE_CHUNK_CONDITION_MARKER";
+    outsideChunkCondition.TrueTargetBlock = "bb_outside_true";
+    outsideChunkCondition.FalseTargetBlock = "bb_outside_false";
+    outsideChunkCondition.Confidence = 0.99;
+    chunkScopedRequest.Facts.NormalizedConditions.push_back(outsideChunkCondition);
+
     decomp::LlmClientConfig chunkConfig;
     chunkConfig.ChunkBlockLimit = 4;
     chunkConfig.ChunkCountLimit = 8;
@@ -1621,6 +1629,7 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_OBF_MARKER") == std::string::npos, "chunk prompt should omit obfuscation facts outside the chunk block set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_SEMANTIC_MARKER") == std::string::npos, "chunk prompt should omit semantic CFG edges outside the chunk block set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_FACT_MARKER") == std::string::npos, "chunk prompt should omit obfuscation detail facts outside the chunk block set");
+    Expect(chunkPromptDump.find("OUTSIDE_CHUNK_CONDITION_MARKER") == std::string::npos, "chunk graph summary should omit normalized conditions outside the chunk block set");
     Expect(chunkPromptDump.find("bb_outside_chunk") == std::string::npos, "chunk graph summary should omit semantic edge blocks outside the chunk block set");
     Expect(chunkPromptDump.find("bb_other_outside_chunk") == std::string::npos, "chunk graph summary should omit semantic edge targets outside the chunk block set");
 

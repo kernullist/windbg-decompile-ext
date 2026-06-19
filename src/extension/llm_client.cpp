@@ -3813,9 +3813,21 @@ JsonValue BuildGraphSummaryJson(
         regions.PushBack(item);
     }
 
-    for (size_t index = 0; index < request.Facts.NormalizedConditions.size() && index < kPromptNormalizedConditionLimit; ++index)
+    for (size_t index = 0;
+        index < request.Facts.NormalizedConditions.size()
+        && conditions.GetArray().size() < kPromptNormalizedConditionLimit;
+        ++index)
     {
         const NormalizedCondition& condition = request.Facts.NormalizedConditions[index];
+
+        if (blockIds != nullptr
+            && !IsPromptBlockSelected(blockIds, condition.BlockId)
+            && !IsPromptBlockSelected(blockIds, condition.TrueTargetBlock)
+            && !IsPromptBlockSelected(blockIds, condition.FalseTargetBlock))
+        {
+            continue;
+        }
+
         JsonValue item = JsonValue::MakeObject();
         item.Set("block", JsonValue::MakeString(condition.BlockId));
         item.Set("expression", JsonValue::MakeString(condition.Expression));
