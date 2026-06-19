@@ -4876,6 +4876,96 @@ JsonValue BuildDataReferencesJsonForAddresses(
     return array;
 }
 
+JsonValue BuildTypeHintsJsonForAddresses(
+    const AnalyzeRequest& request,
+    const std::set<uint64_t>& instructionAddresses,
+    bool* truncated)
+{
+    std::vector<size_t> filteredIndices;
+
+    for (size_t index = 0; index < request.Facts.TypeHints.size(); ++index)
+    {
+        if (instructionAddresses.find(request.Facts.TypeHints[index].Site) != instructionAddresses.end())
+        {
+            filteredIndices.push_back(index);
+        }
+    }
+
+    if (truncated != nullptr)
+    {
+        *truncated = filteredIndices.size() > kPromptTypeHintLimit;
+    }
+
+    JsonValue array = JsonValue::MakeArray();
+    const std::vector<size_t> sampled = SelectRankedSpreadIndices(
+        filteredIndices.size(),
+        kPromptTypeHintLimit,
+        [&request, &filteredIndices](size_t relativeIndex)
+        {
+            return ScorePromptTypeHint(request.Facts.TypeHints[filteredIndices[relativeIndex]]);
+        });
+
+    for (size_t relativeIndex : sampled)
+    {
+        const TypeRecoveryHint& hint = request.Facts.TypeHints[filteredIndices[relativeIndex]];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("site", JsonValue::MakeString(HexU64(hint.Site)));
+        item.Set("expression", JsonValue::MakeString(hint.Expression));
+        item.Set("type", JsonValue::MakeString(hint.Type));
+        item.Set("source", JsonValue::MakeString(hint.Source));
+        item.Set("kind", JsonValue::MakeString(hint.Kind));
+        item.Set("evidence", JsonValue::MakeString(hint.Evidence));
+        item.Set("pointer_like", JsonValue::MakeBoolean(hint.PointerLike));
+        item.Set("array_like", JsonValue::MakeBoolean(hint.ArrayLike));
+        item.Set("enum_like", JsonValue::MakeBoolean(hint.EnumLike));
+        item.Set("bitflag_like", JsonValue::MakeBoolean(hint.BitflagLike));
+        item.Set("confidence", JsonValue::MakeNumber(hint.Confidence));
+        array.PushBack(item);
+    }
+
+    return array;
+}
+
+JsonValue BuildIdiomsJsonForAddresses(
+    const AnalyzeRequest& request,
+    const std::set<uint64_t>& instructionAddresses,
+    bool* truncated)
+{
+    std::vector<size_t> filteredIndices;
+
+    for (size_t index = 0; index < request.Facts.Idioms.size(); ++index)
+    {
+        if (instructionAddresses.find(request.Facts.Idioms[index].Site) != instructionAddresses.end())
+        {
+            filteredIndices.push_back(index);
+        }
+    }
+
+    if (truncated != nullptr)
+    {
+        *truncated = filteredIndices.size() > kPromptIdiomLimit;
+    }
+
+    JsonValue array = JsonValue::MakeArray();
+    const std::vector<size_t> sampled = SelectSpreadIndices(filteredIndices.size(), kPromptIdiomLimit);
+
+    for (size_t relativeIndex : sampled)
+    {
+        const IdiomPattern& idiom = request.Facts.Idioms[filteredIndices[relativeIndex]];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("site", JsonValue::MakeString(HexU64(idiom.Site)));
+        item.Set("kind", JsonValue::MakeString(idiom.Kind));
+        item.Set("name", JsonValue::MakeString(idiom.Name));
+        item.Set("summary", JsonValue::MakeString(idiom.Summary));
+        item.Set("replacement", JsonValue::MakeString(idiom.Replacement));
+        item.Set("evidence", JsonValue::MakeString(idiom.Evidence));
+        item.Set("confidence", JsonValue::MakeNumber(idiom.Confidence));
+        array.PushBack(item);
+    }
+
+    return array;
+}
+
 JsonValue BuildCallTargetsJsonForAddresses(
     const AnalyzeRequest& request,
     const std::set<uint64_t>& instructionAddresses,
@@ -5208,6 +5298,8 @@ JsonValue BuildChunkFactsJson(
     bool semanticControlFlowTruncated = false;
     bool dataReferencesTruncated = false;
     bool callTargetsTruncated = false;
+    bool typeHintsTruncated = false;
+    bool idiomsTruncated = false;
     bool normalizedConditionsTruncated = false;
     bool pdbTruncated = false;
     bool factsTruncated = false;
@@ -5285,6 +5377,8 @@ JsonValue BuildChunkFactsJson(
     root.Set("semantic_control_flow", BuildSemanticControlFlowJsonForBlocks(request, blockIds, &semanticControlFlowTruncated));
     root.Set("data_references", BuildDataReferencesJsonForAddresses(request, instructionAddresses, &dataReferencesTruncated));
     root.Set("call_targets", BuildCallTargetsJsonForAddresses(request, instructionAddresses, &callTargetsTruncated));
+    root.Set("type_hints", BuildTypeHintsJsonForAddresses(request, instructionAddresses, &typeHintsTruncated));
+    root.Set("idioms", BuildIdiomsJsonForAddresses(request, instructionAddresses, &idiomsTruncated));
     root.Set("normalized_conditions", BuildNormalizedConditionsJsonForBlocks(request, blockIds, &normalizedConditionsTruncated));
     root.Set("pdb", BuildPdbFactsJson(request, &pdbTruncated));
     root.Set("global_facts", BuildChunkGlobalFactsJson(request, blockIds, kChunkPromptFactLimit, &factsTruncated));
@@ -5303,6 +5397,8 @@ JsonValue BuildChunkFactsJson(
     truncation.Set("semantic_control_flow", JsonValue::MakeBoolean(semanticControlFlowTruncated));
     truncation.Set("data_references", JsonValue::MakeBoolean(dataReferencesTruncated));
     truncation.Set("call_targets", JsonValue::MakeBoolean(callTargetsTruncated));
+    truncation.Set("type_hints", JsonValue::MakeBoolean(typeHintsTruncated));
+    truncation.Set("idioms", JsonValue::MakeBoolean(idiomsTruncated));
     truncation.Set("normalized_conditions", JsonValue::MakeBoolean(normalizedConditionsTruncated));
     truncation.Set("pdb", JsonValue::MakeBoolean(pdbTruncated));
     truncation.Set("facts", JsonValue::MakeBoolean(factsTruncated));
@@ -5756,7 +5852,7 @@ std::string BuildChunkSystemPrompt(const AnalyzeRequest& request)
         "Write summary_localized and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_steps, state_updates, observed_calls, observed_memory, identifiers, and API names in English or C-style. "
         "Do not invent external call targets that are not present in the input. "
-        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, obfuscation, semantic_control_flow, data_references, call_targets, and pdb facts as high-signal semantic hints when present. "
+        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, obfuscation, semantic_control_flow, data_references, call_targets, type_hints, idioms, and pdb facts as high-signal semantic hints when present. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
         "Prefer explicit memory reads, writes, compares, branches, and state transitions over vague summaries. "

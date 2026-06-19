@@ -1640,6 +1640,46 @@ void TestObfuscationFactsSnapshot()
     outsideChunkBlock.InstructionAddresses.push_back(0x77770000);
     chunkScopedRequest.Facts.Blocks.push_back(outsideChunkBlock);
 
+    const uint64_t insideChunkSite = entry != nullptr && !entry->InstructionAddresses.empty()
+        ? entry->InstructionAddresses.front()
+        : 0x13000;
+
+    decomp::TypeRecoveryHint insideChunkTypeHint;
+    insideChunkTypeHint.Site = insideChunkSite;
+    insideChunkTypeHint.Expression = "inside_chunk_type_expr";
+    insideChunkTypeHint.Type = "INSIDE_CHUNK_TYPE_HINT_MARKER";
+    insideChunkTypeHint.Source = "test.chunk_scope";
+    insideChunkTypeHint.Kind = "test";
+    insideChunkTypeHint.Confidence = 0.99;
+    chunkScopedRequest.Facts.TypeHints.push_back(insideChunkTypeHint);
+
+    decomp::TypeRecoveryHint outsideChunkTypeHint;
+    outsideChunkTypeHint.Site = 0x77770100;
+    outsideChunkTypeHint.Expression = "outside_chunk_type_expr";
+    outsideChunkTypeHint.Type = "OUTSIDE_CHUNK_TYPE_HINT_MARKER";
+    outsideChunkTypeHint.Source = "test.chunk_scope";
+    outsideChunkTypeHint.Kind = "test";
+    outsideChunkTypeHint.Confidence = 0.99;
+    chunkScopedRequest.Facts.TypeHints.push_back(outsideChunkTypeHint);
+
+    decomp::IdiomPattern insideChunkIdiomPattern;
+    insideChunkIdiomPattern.Site = insideChunkSite;
+    insideChunkIdiomPattern.Kind = "test";
+    insideChunkIdiomPattern.Name = "INSIDE_CHUNK_IDIOM_MARKER";
+    insideChunkIdiomPattern.Summary = "inside chunk idiom";
+    insideChunkIdiomPattern.Replacement = "inside_chunk_replacement";
+    insideChunkIdiomPattern.Confidence = 0.99;
+    chunkScopedRequest.Facts.Idioms.push_back(insideChunkIdiomPattern);
+
+    decomp::IdiomPattern outsideChunkIdiomPattern;
+    outsideChunkIdiomPattern.Site = 0x77770110;
+    outsideChunkIdiomPattern.Kind = "test";
+    outsideChunkIdiomPattern.Name = "OUTSIDE_CHUNK_IDIOM_MARKER";
+    outsideChunkIdiomPattern.Summary = "outside chunk idiom";
+    outsideChunkIdiomPattern.Replacement = "outside_chunk_replacement";
+    outsideChunkIdiomPattern.Confidence = 0.99;
+    chunkScopedRequest.Facts.Idioms.push_back(outsideChunkIdiomPattern);
+
     decomp::LlmClientConfig chunkConfig;
     chunkConfig.ChunkBlockLimit = 4;
     chunkConfig.ChunkCountLimit = 8;
@@ -1653,6 +1693,10 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("GLOBAL_CHUNK_SAFE_UNCERTAINTY_MARKER") != std::string::npos, "chunk prompt should preserve global uncertainties without chunk block references");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_CONDITION_MARKER") == std::string::npos, "chunk graph summary should omit normalized conditions outside the chunk block set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_REGION_MARKER") == std::string::npos, "chunk graph summary should omit control-flow regions outside the chunk block set");
+    Expect(chunkPromptDump.find("INSIDE_CHUNK_TYPE_HINT_MARKER") != std::string::npos, "chunk prompt should include type hints inside the chunk instruction set");
+    Expect(chunkPromptDump.find("OUTSIDE_CHUNK_TYPE_HINT_MARKER") == std::string::npos, "chunk prompt should omit type hints outside the chunk instruction set");
+    Expect(chunkPromptDump.find("INSIDE_CHUNK_IDIOM_MARKER") != std::string::npos, "chunk prompt should include idioms inside the chunk instruction set");
+    Expect(chunkPromptDump.find("OUTSIDE_CHUNK_IDIOM_MARKER") == std::string::npos, "chunk prompt should omit idioms outside the chunk instruction set");
     Expect(chunkPromptDump.find("bb_outside_chunk") == std::string::npos, "chunk graph summary should omit semantic edge blocks outside the chunk block set");
     Expect(chunkPromptDump.find("bb_other_outside_chunk") == std::string::npos, "chunk graph summary should omit semantic edge targets outside the chunk block set");
     Expect(chunkPromptDump.find("bb_outside_important") == std::string::npos, "chunk graph summary should omit important blocks outside the chunk block set");
