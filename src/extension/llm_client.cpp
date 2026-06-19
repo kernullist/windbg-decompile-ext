@@ -3339,18 +3339,32 @@ JsonValue BuildSemanticControlFlowJsonForBlocks(
     return BuildSemanticControlFlowJson(request, &blockIds, truncated);
 }
 
-JsonValue BuildControlFlowJson(const AnalyzeRequest& request, bool* truncated)
+JsonValue BuildControlFlowJson(
+    const AnalyzeRequest& request,
+    const std::set<std::string>* blockIds,
+    bool* truncated)
 {
     JsonValue array = JsonValue::MakeArray();
-    const std::vector<size_t> indices = SelectSpreadIndices(request.Facts.ControlFlow.size(), kPromptControlFlowLimit);
+    std::vector<size_t> filteredIndices;
+
+    for (size_t index = 0; index < request.Facts.ControlFlow.size(); ++index)
+    {
+        if (IsPromptControlFlowRegionSelected(blockIds, request.Facts.ControlFlow[index]))
+        {
+            filteredIndices.push_back(index);
+        }
+    }
+
+    const std::vector<size_t> indices = SelectSpreadIndices(filteredIndices.size(), kPromptControlFlowLimit);
 
     if (truncated != nullptr)
     {
-        *truncated = request.Facts.ControlFlow.size() > indices.size();
+        *truncated = filteredIndices.size() > indices.size();
     }
 
-    for (size_t index : indices)
+    for (size_t relativeIndex : indices)
     {
+        const size_t index = filteredIndices[relativeIndex];
         const ControlFlowRegion& region = request.Facts.ControlFlow[index];
         JsonValue item = JsonValue::MakeObject();
         item.Set("kind", JsonValue::MakeString(region.Kind));
@@ -3370,6 +3384,19 @@ JsonValue BuildControlFlowJson(const AnalyzeRequest& request, bool* truncated)
     }
 
     return array;
+}
+
+JsonValue BuildControlFlowJson(const AnalyzeRequest& request, bool* truncated)
+{
+    return BuildControlFlowJson(request, nullptr, truncated);
+}
+
+JsonValue BuildControlFlowJsonForBlocks(
+    const AnalyzeRequest& request,
+    const std::set<std::string>& blockIds,
+    bool* truncated)
+{
+    return BuildControlFlowJson(request, &blockIds, truncated);
 }
 
 JsonValue BuildAbiJson(const AnalyzeRequest& request, bool* truncated)
@@ -5613,6 +5640,7 @@ JsonValue BuildChunkFactsJson(
     bool blockValueStatesTruncated = false;
     bool obfuscationTruncated = false;
     bool semanticControlFlowTruncated = false;
+    bool controlFlowTruncated = false;
     bool dataReferencesTruncated = false;
     bool callTargetsTruncated = false;
     bool typeHintsTruncated = false;
@@ -5697,6 +5725,7 @@ JsonValue BuildChunkFactsJson(
     root.Set("block_value_states", BuildBlockValueStatesJsonForBlocks(request, blockIds, &blockValueStatesTruncated));
     root.Set("obfuscation", BuildObfuscationJsonForBlocks(request, blockIds, &obfuscationTruncated));
     root.Set("semantic_control_flow", BuildSemanticControlFlowJsonForBlocks(request, blockIds, &semanticControlFlowTruncated));
+    root.Set("control_flow", BuildControlFlowJsonForBlocks(request, blockIds, &controlFlowTruncated));
     root.Set("data_references", BuildDataReferencesJsonForAddresses(request, instructionAddresses, &dataReferencesTruncated));
     root.Set("call_targets", BuildCallTargetsJsonForAddresses(request, instructionAddresses, &callTargetsTruncated));
     root.Set("type_hints", BuildTypeHintsJsonForAddresses(request, instructionAddresses, &typeHintsTruncated));
@@ -5722,6 +5751,7 @@ JsonValue BuildChunkFactsJson(
     truncation.Set("block_value_states", JsonValue::MakeBoolean(blockValueStatesTruncated));
     truncation.Set("obfuscation", JsonValue::MakeBoolean(obfuscationTruncated));
     truncation.Set("semantic_control_flow", JsonValue::MakeBoolean(semanticControlFlowTruncated));
+    truncation.Set("control_flow", JsonValue::MakeBoolean(controlFlowTruncated));
     truncation.Set("data_references", JsonValue::MakeBoolean(dataReferencesTruncated));
     truncation.Set("call_targets", JsonValue::MakeBoolean(callTargetsTruncated));
     truncation.Set("type_hints", JsonValue::MakeBoolean(typeHintsTruncated));
@@ -6181,8 +6211,9 @@ std::string BuildChunkSystemPrompt(const AnalyzeRequest& request)
         "Write summary_localized and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_steps, state_updates, observed_calls, observed_memory, identifiers, and API names in English or C-style. "
         "Do not invent external call targets that are not present in the input. "
-        "Use recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, block_value_states, normalized_conditions, obfuscation, semantic_control_flow, data_references, call_targets, type_hints, idioms, callee_summaries, evidence_graph, and pdb facts as high-signal semantic hints when present. "
+        "Use recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, block_value_states, normalized_conditions, control_flow, obfuscation, semantic_control_flow, data_references, call_targets, type_hints, idioms, callee_summaries, evidence_graph, and pdb facts as high-signal semantic hints when present. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
+        "Use control_flow loop, branch, and switch region metadata as structure evidence without inventing unsupported regions. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
         "Prefer explicit memory reads, writes, compares, branches, and state transitions over vague summaries. "
         "When information is incomplete, preserve only the missing part as uncertain instead of collapsing the whole chunk into a short summary. "
@@ -6208,7 +6239,7 @@ std::string BuildChunkUserPrompt(
     prompt += ".\n";
     prompt += "3. Keep pseudo_steps and state_updates concrete and operation-focused.\n";
     prompt += "4. Preserve visible reads, writes, comparisons, and branches instead of replacing them with generic comments.\n";
-    prompt += "5. Use recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, block_value_states, normalized_conditions, data_references, call_targets, type_hints, idioms, callee_summaries, and pdb facts when they improve naming, stack-frame context, reaching-value state, expression simplification, or type/side-effect hints.\n";
+    prompt += "5. Use recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, block_value_states, normalized_conditions, control_flow, data_references, call_targets, type_hints, idioms, callee_summaries, and pdb facts when they improve naming, stack-frame context, reaching-value state, region structure, expression simplification, or type/side-effect hints.\n";
     prompt += "6. If the chunk is partial, say what is missing, but still describe the concrete work visible in this chunk.\n";
     prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
     prompt += "8. evidence.blocks must reference only block ids present in this chunk.\n";

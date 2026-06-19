@@ -1626,6 +1626,20 @@ void TestObfuscationFactsSnapshot()
     outsideChunkCondition.Confidence = 0.99;
     chunkScopedRequest.Facts.NormalizedConditions.push_back(outsideChunkCondition);
 
+    decomp::ControlFlowRegion insideChunkRegion;
+    insideChunkRegion.Kind = "INSIDE_CHUNK_CONTROL_FLOW_MARKER";
+    insideChunkRegion.HeaderBlock = entry != nullptr ? entry->Id : std::string();
+    insideChunkRegion.BodyBlocks.push_back(insideChunkRegion.HeaderBlock);
+    insideChunkRegion.Condition = "inside_chunk_control_condition";
+    insideChunkRegion.Evidence = "INSIDE_CHUNK_CONTROL_FLOW_EVIDENCE_MARKER";
+    insideChunkRegion.InductionVariable = "inside_i";
+    insideChunkRegion.InitialValue = "0";
+    insideChunkRegion.Step = "+1";
+    insideChunkRegion.Bound = "inside_limit";
+    insideChunkRegion.Direction = "forward";
+    insideChunkRegion.Confidence = 0.99;
+    chunkScopedRequest.Facts.ControlFlow.insert(chunkScopedRequest.Facts.ControlFlow.begin(), insideChunkRegion);
+
     decomp::ControlFlowRegion outsideChunkRegion;
     outsideChunkRegion.Kind = "OUTSIDE_CHUNK_REGION_MARKER";
     outsideChunkRegion.HeaderBlock = "bb_outside_region";
@@ -1898,6 +1912,7 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_UNCERTAINTY_MARKER") == std::string::npos, "chunk prompt should omit obfuscation uncertainties outside the chunk block set");
     Expect(chunkPromptDump.find("GLOBAL_CHUNK_SAFE_UNCERTAINTY_MARKER") != std::string::npos, "chunk prompt should preserve global uncertainties without chunk block references");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_CONDITION_MARKER") == std::string::npos, "chunk graph summary should omit normalized conditions outside the chunk block set");
+    Expect(chunkPromptDump.find("INSIDE_CHUNK_CONTROL_FLOW_MARKER") != std::string::npos, "chunk prompt should include control-flow regions inside the chunk block set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_REGION_MARKER") == std::string::npos, "chunk graph summary should omit control-flow regions outside the chunk block set");
     Expect(chunkPromptDump.find("0x13579B") != std::string::npos, "chunk prompt should include stack pointer facts inside the chunk instruction set");
     Expect(chunkPromptDump.find("0x7ABCDE") == std::string::npos, "chunk prompt should omit stack pointer facts outside the chunk instruction set");
