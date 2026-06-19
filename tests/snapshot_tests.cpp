@@ -1620,6 +1620,20 @@ void TestObfuscationFactsSnapshot()
     outsideChunkCondition.Confidence = 0.99;
     chunkScopedRequest.Facts.NormalizedConditions.push_back(outsideChunkCondition);
 
+    decomp::ControlFlowRegion outsideChunkRegion;
+    outsideChunkRegion.Kind = "OUTSIDE_CHUNK_REGION_MARKER";
+    outsideChunkRegion.HeaderBlock = "bb_outside_region";
+    outsideChunkRegion.BodyBlocks.push_back("bb_outside_region_body");
+    outsideChunkRegion.Confidence = 0.99;
+    chunkScopedRequest.Facts.ControlFlow.insert(chunkScopedRequest.Facts.ControlFlow.begin(), outsideChunkRegion);
+
+    decomp::BasicBlock outsideChunkBlock;
+    outsideChunkBlock.Id = "bb_outside_important";
+    outsideChunkBlock.StartAddress = 0x77770000;
+    outsideChunkBlock.EndAddress = 0x77770010;
+    outsideChunkBlock.InstructionAddresses.push_back(0x77770000);
+    chunkScopedRequest.Facts.Blocks.push_back(outsideChunkBlock);
+
     decomp::LlmClientConfig chunkConfig;
     chunkConfig.ChunkBlockLimit = 4;
     chunkConfig.ChunkCountLimit = 8;
@@ -1630,8 +1644,10 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_SEMANTIC_MARKER") == std::string::npos, "chunk prompt should omit semantic CFG edges outside the chunk block set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_FACT_MARKER") == std::string::npos, "chunk prompt should omit obfuscation detail facts outside the chunk block set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_CONDITION_MARKER") == std::string::npos, "chunk graph summary should omit normalized conditions outside the chunk block set");
+    Expect(chunkPromptDump.find("OUTSIDE_CHUNK_REGION_MARKER") == std::string::npos, "chunk graph summary should omit control-flow regions outside the chunk block set");
     Expect(chunkPromptDump.find("bb_outside_chunk") == std::string::npos, "chunk graph summary should omit semantic edge blocks outside the chunk block set");
     Expect(chunkPromptDump.find("bb_other_outside_chunk") == std::string::npos, "chunk graph summary should omit semantic edge targets outside the chunk block set");
+    Expect(chunkPromptDump.find("bb_outside_important") == std::string::npos, "chunk graph summary should omit important blocks outside the chunk block set");
 
     const decomp::AnalysisFacts stateSwitchFacts = BuildLegitimateStateSwitchFacts();
     Expect(FindHighConfidenceDispatcher(stateSwitchFacts) == nullptr, "ordinary compare-chain state switch should not become a high-confidence flattening dispatcher");

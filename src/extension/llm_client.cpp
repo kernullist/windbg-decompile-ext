@@ -2848,6 +2848,14 @@ bool IsPromptSemanticEdgeSelected(const std::set<std::string>* blockIds, const S
         || IsPromptBlockSelected(blockIds, edge.TargetBlock);
 }
 
+bool IsPromptControlFlowRegionSelected(const std::set<std::string>* blockIds, const ControlFlowRegion& region)
+{
+    return IsPromptBlockSelected(blockIds, region.HeaderBlock)
+        || IsPromptAnyBlockSelected(blockIds, region.BodyBlocks)
+        || IsPromptAnyBlockSelected(blockIds, region.LatchBlocks)
+        || IsPromptAnyBlockSelected(blockIds, region.ExitBlocks);
+}
+
 JsonValue BuildObfuscationJson(
     const AnalyzeRequest& request,
     const std::set<std::string>* blockIds,
@@ -3799,9 +3807,18 @@ JsonValue BuildGraphSummaryJson(
         entry.Set("successors", BuildStringArray(first.Successors, 8, nullptr));
     }
 
-    for (size_t index = 0; index < request.Facts.ControlFlow.size() && index < kPromptControlFlowLimit; ++index)
+    for (size_t index = 0;
+        index < request.Facts.ControlFlow.size()
+        && regions.GetArray().size() < kPromptControlFlowLimit;
+        ++index)
     {
         const ControlFlowRegion& region = request.Facts.ControlFlow[index];
+
+        if (!IsPromptControlFlowRegionSelected(blockIds, region))
+        {
+            continue;
+        }
+
         JsonValue item = JsonValue::MakeObject();
         item.Set("kind", JsonValue::MakeString(region.Kind));
         item.Set("header", JsonValue::MakeString(region.HeaderBlock));
@@ -3865,6 +3882,12 @@ JsonValue BuildGraphSummaryJson(
     for (size_t selectedIndex : blockIndices)
     {
         const BasicBlock& block = request.Facts.Blocks[selectedIndex];
+
+        if (!IsPromptBlockSelected(blockIds, block.Id))
+        {
+            continue;
+        }
+
         JsonValue item = JsonValue::MakeObject();
         item.Set("id", JsonValue::MakeString(block.Id));
         item.Set("succ", BuildStringArray(block.Successors, 8, nullptr));
