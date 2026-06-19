@@ -1644,6 +1644,26 @@ void TestObfuscationFactsSnapshot()
         ? entry->InstructionAddresses.front()
         : 0x13000;
 
+    decomp::StackPointerFact insideChunkStackPointer;
+    insideChunkStackPointer.Site = insideChunkSite;
+    insideChunkStackPointer.DeltaBefore = 0x13579B;
+    insideChunkStackPointer.DeltaAfter = 0x2468AC;
+    insideChunkStackPointer.FramePointerDelta = 0x11;
+    insideChunkStackPointer.Known = true;
+    insideChunkStackPointer.FramePointerKnown = true;
+    insideChunkStackPointer.Confidence = 0.99;
+    chunkScopedRequest.Facts.StackPointer.insert(chunkScopedRequest.Facts.StackPointer.begin(), insideChunkStackPointer);
+
+    decomp::StackPointerFact outsideChunkStackPointer;
+    outsideChunkStackPointer.Site = 0x77770020;
+    outsideChunkStackPointer.DeltaBefore = 0x7ABCDE;
+    outsideChunkStackPointer.DeltaAfter = 0x7ABCDF;
+    outsideChunkStackPointer.FramePointerDelta = 0x22;
+    outsideChunkStackPointer.Known = true;
+    outsideChunkStackPointer.FramePointerKnown = true;
+    outsideChunkStackPointer.Confidence = 0.99;
+    chunkScopedRequest.Facts.StackPointer.push_back(outsideChunkStackPointer);
+
     decomp::TypeRecoveryHint insideChunkTypeHint;
     insideChunkTypeHint.Site = insideChunkSite;
     insideChunkTypeHint.Expression = "inside_chunk_type_expr";
@@ -1829,6 +1849,8 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("GLOBAL_CHUNK_SAFE_UNCERTAINTY_MARKER") != std::string::npos, "chunk prompt should preserve global uncertainties without chunk block references");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_CONDITION_MARKER") == std::string::npos, "chunk graph summary should omit normalized conditions outside the chunk block set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_REGION_MARKER") == std::string::npos, "chunk graph summary should omit control-flow regions outside the chunk block set");
+    Expect(chunkPromptDump.find("0x13579B") != std::string::npos, "chunk prompt should include stack pointer facts inside the chunk instruction set");
+    Expect(chunkPromptDump.find("0x7ABCDE") == std::string::npos, "chunk prompt should omit stack pointer facts outside the chunk instruction set");
     Expect(chunkPromptDump.find("INSIDE_CHUNK_TYPE_HINT_MARKER") != std::string::npos, "chunk prompt should include type hints inside the chunk instruction set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_TYPE_HINT_MARKER") == std::string::npos, "chunk prompt should omit type hints outside the chunk instruction set");
     Expect(chunkPromptDump.find("INSIDE_CHUNK_IDIOM_MARKER") != std::string::npos, "chunk prompt should include idioms inside the chunk instruction set");
