@@ -1664,6 +1664,28 @@ void TestObfuscationFactsSnapshot()
     outsideChunkStackPointer.Confidence = 0.99;
     chunkScopedRequest.Facts.StackPointer.push_back(outsideChunkStackPointer);
 
+    decomp::IrValue insideChunkIrValue;
+    insideChunkIrValue.Id = "test_inside_chunk_ir";
+    insideChunkIrValue.BlockId = entry != nullptr ? entry->Id : std::string();
+    insideChunkIrValue.DefSite = insideChunkSite;
+    insideChunkIrValue.Target = "INSIDE_CHUNK_IR_TARGET_MARKER";
+    insideChunkIrValue.Expression = "inside_chunk_expr";
+    insideChunkIrValue.Canonical = "INSIDE_CHUNK_IR_CANONICAL_MARKER";
+    insideChunkIrValue.Kind = "test";
+    insideChunkIrValue.Confidence = 0.99;
+    chunkScopedRequest.Facts.IrValues.push_back(insideChunkIrValue);
+
+    decomp::IrValue outsideChunkIrValue;
+    outsideChunkIrValue.Id = "test_outside_chunk_ir";
+    outsideChunkIrValue.BlockId = outsideChunkBlock.Id;
+    outsideChunkIrValue.DefSite = 0x77770030;
+    outsideChunkIrValue.Target = "OUTSIDE_CHUNK_IR_TARGET_MARKER";
+    outsideChunkIrValue.Expression = "outside_chunk_expr";
+    outsideChunkIrValue.Canonical = "OUTSIDE_CHUNK_IR_CANONICAL_MARKER";
+    outsideChunkIrValue.Kind = "test";
+    outsideChunkIrValue.Confidence = 0.99;
+    chunkScopedRequest.Facts.IrValues.push_back(outsideChunkIrValue);
+
     decomp::TypeRecoveryHint insideChunkTypeHint;
     insideChunkTypeHint.Site = insideChunkSite;
     insideChunkTypeHint.Expression = "inside_chunk_type_expr";
@@ -1851,6 +1873,8 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_REGION_MARKER") == std::string::npos, "chunk graph summary should omit control-flow regions outside the chunk block set");
     Expect(chunkPromptDump.find("0x13579B") != std::string::npos, "chunk prompt should include stack pointer facts inside the chunk instruction set");
     Expect(chunkPromptDump.find("0x7ABCDE") == std::string::npos, "chunk prompt should omit stack pointer facts outside the chunk instruction set");
+    Expect(chunkPromptDump.find("INSIDE_CHUNK_IR_TARGET_MARKER") != std::string::npos, "chunk prompt should include IR values inside the chunk block set");
+    Expect(chunkPromptDump.find("OUTSIDE_CHUNK_IR_TARGET_MARKER") == std::string::npos, "chunk prompt should omit IR values outside the chunk block set");
     Expect(chunkPromptDump.find("INSIDE_CHUNK_TYPE_HINT_MARKER") != std::string::npos, "chunk prompt should include type hints inside the chunk instruction set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_TYPE_HINT_MARKER") == std::string::npos, "chunk prompt should omit type hints outside the chunk instruction set");
     Expect(chunkPromptDump.find("INSIDE_CHUNK_IDIOM_MARKER") != std::string::npos, "chunk prompt should include idioms inside the chunk instruction set");

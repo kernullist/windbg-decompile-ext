@@ -2739,6 +2739,58 @@ JsonValue BuildIrValuesJson(const AnalyzeRequest& request, bool* truncated)
     return array;
 }
 
+JsonValue BuildIrValuesJsonForBlocks(
+    const AnalyzeRequest& request,
+    const std::set<std::string>& blockIds,
+    bool* truncated)
+{
+    JsonValue array = JsonValue::MakeArray();
+    std::vector<size_t> filteredIndices;
+
+    for (size_t index = 0; index < request.Facts.IrValues.size(); ++index)
+    {
+        if (blockIds.find(request.Facts.IrValues[index].BlockId) != blockIds.end())
+        {
+            filteredIndices.push_back(index);
+        }
+    }
+
+    const std::vector<size_t> indices = SelectRankedSpreadIndices(
+        filteredIndices.size(),
+        kPromptIrValueLimit,
+        [&request, &filteredIndices](size_t relativeIndex)
+        {
+            return ScorePromptIrValue(request.Facts.IrValues[filteredIndices[relativeIndex]]);
+        });
+
+    if (truncated != nullptr)
+    {
+        *truncated = filteredIndices.size() > indices.size();
+    }
+
+    for (size_t relativeIndex : indices)
+    {
+        const size_t index = filteredIndices[relativeIndex];
+        const IrValue& value = request.Facts.IrValues[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("id", JsonValue::MakeString(value.Id));
+        item.Set("block_id", JsonValue::MakeString(value.BlockId));
+        item.Set("def_site", JsonValue::MakeString(HexU64(value.DefSite)));
+        item.Set("target", JsonValue::MakeString(value.Target));
+        item.Set("expression", JsonValue::MakeString(value.Expression));
+        item.Set("canonical", JsonValue::MakeString(value.Canonical));
+        item.Set("kind", JsonValue::MakeString(value.Kind));
+        item.Set("uses", BuildStringArray(value.Uses, 8, nullptr));
+        item.Set("is_constant", JsonValue::MakeBoolean(value.IsConstant));
+        item.Set("is_copy", JsonValue::MakeBoolean(value.IsCopy));
+        item.Set("is_dead", JsonValue::MakeBoolean(value.IsDead));
+        item.Set("confidence", JsonValue::MakeNumber(value.Confidence));
+        array.PushBack(item);
+    }
+
+    return array;
+}
+
 JsonValue BuildReachingValuesJson(const std::vector<ReachingValue>& values, bool* truncated)
 {
     JsonValue array = JsonValue::MakeArray();
@@ -5509,6 +5561,7 @@ JsonValue BuildChunkFactsJson(
     bool recoveredLocalsTruncated = false;
     bool callArgumentsTruncated = false;
     bool valueMergesTruncated = false;
+    bool irValuesTruncated = false;
     bool obfuscationTruncated = false;
     bool semanticControlFlowTruncated = false;
     bool dataReferencesTruncated = false;
@@ -5591,6 +5644,7 @@ JsonValue BuildChunkFactsJson(
     root.Set("recovered_locals", BuildRecoveredLocalsJson(request, &recoveredLocalsTruncated));
     root.Set("call_arguments", BuildCallArgumentsJsonForAddresses(request, instructionAddresses, &callArgumentsTruncated));
     root.Set("value_merges", BuildValueMergesJsonForBlocks(request, blockIds, &valueMergesTruncated));
+    root.Set("ir_values", BuildIrValuesJsonForBlocks(request, blockIds, &irValuesTruncated));
     root.Set("obfuscation", BuildObfuscationJsonForBlocks(request, blockIds, &obfuscationTruncated));
     root.Set("semantic_control_flow", BuildSemanticControlFlowJsonForBlocks(request, blockIds, &semanticControlFlowTruncated));
     root.Set("data_references", BuildDataReferencesJsonForAddresses(request, instructionAddresses, &dataReferencesTruncated));
@@ -5614,6 +5668,7 @@ JsonValue BuildChunkFactsJson(
     truncation.Set("recovered_locals", JsonValue::MakeBoolean(recoveredLocalsTruncated));
     truncation.Set("call_arguments", JsonValue::MakeBoolean(callArgumentsTruncated));
     truncation.Set("value_merges", JsonValue::MakeBoolean(valueMergesTruncated));
+    truncation.Set("ir_values", JsonValue::MakeBoolean(irValuesTruncated));
     truncation.Set("obfuscation", JsonValue::MakeBoolean(obfuscationTruncated));
     truncation.Set("semantic_control_flow", JsonValue::MakeBoolean(semanticControlFlowTruncated));
     truncation.Set("data_references", JsonValue::MakeBoolean(dataReferencesTruncated));
@@ -6075,7 +6130,7 @@ std::string BuildChunkSystemPrompt(const AnalyzeRequest& request)
         "Write summary_localized and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_steps, state_updates, observed_calls, observed_memory, identifiers, and API names in English or C-style. "
         "Do not invent external call targets that are not present in the input. "
-        "Use recovered_arguments, recovered_locals, call_arguments, stack_pointer, normalized_conditions, obfuscation, semantic_control_flow, data_references, call_targets, type_hints, idioms, callee_summaries, evidence_graph, and pdb facts as high-signal semantic hints when present. "
+        "Use recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, normalized_conditions, obfuscation, semantic_control_flow, data_references, call_targets, type_hints, idioms, callee_summaries, evidence_graph, and pdb facts as high-signal semantic hints when present. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
         "Prefer explicit memory reads, writes, compares, branches, and state transitions over vague summaries. "
@@ -6102,7 +6157,7 @@ std::string BuildChunkUserPrompt(
     prompt += ".\n";
     prompt += "3. Keep pseudo_steps and state_updates concrete and operation-focused.\n";
     prompt += "4. Preserve visible reads, writes, comparisons, and branches instead of replacing them with generic comments.\n";
-    prompt += "5. Use recovered_arguments, recovered_locals, call_arguments, stack_pointer, normalized_conditions, data_references, call_targets, type_hints, idioms, callee_summaries, and pdb facts when they improve naming, stack-frame context, or type/side-effect hints.\n";
+    prompt += "5. Use recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, normalized_conditions, data_references, call_targets, type_hints, idioms, callee_summaries, and pdb facts when they improve naming, stack-frame context, expression simplification, or type/side-effect hints.\n";
     prompt += "6. If the chunk is partial, say what is missing, but still describe the concrete work visible in this chunk.\n";
     prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
     prompt += "8. evidence.blocks must reference only block ids present in this chunk.\n";
