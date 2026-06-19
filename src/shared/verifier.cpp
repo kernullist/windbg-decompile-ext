@@ -911,6 +911,86 @@ bool MentionsSubstitutionSimplificationClaim(const AnalyzeResponse& response)
         || ContainsInsensitive(response.PseudoC, "algebraic identity");
 }
 
+bool ContainsMemorySensitiveSubstitutionMarker(const std::string& text)
+{
+    return text.find('[') != std::string::npos
+        || ContainsInsensitive(text, "dereference")
+        || ContainsInsensitive(text, "pointer")
+        || ContainsInsensitive(text, "memory")
+        || ContainsInsensitive(text, "mem")
+        || ContainsInsensitive(text, "load")
+        || ContainsInsensitive(text, "store")
+        || ContainsInsensitive(text, "global")
+        || ContainsInsensitive(text, "volatile")
+        || ContainsInsensitive(text, "alias");
+}
+
+void CollectKeywordContexts(
+    const std::string& text,
+    const std::string& keyword,
+    std::vector<std::string>& contexts)
+{
+    const std::string lowerText = ToLowerAscii(text);
+    const std::string lowerKeyword = ToLowerAscii(keyword);
+    size_t position = 0;
+
+    while (position < lowerText.size())
+    {
+        position = lowerText.find(lowerKeyword, position);
+
+        if (position == std::string::npos)
+        {
+            break;
+        }
+
+        const size_t contextStart = position > 80 ? position - 80 : 0;
+        const size_t contextEnd = (std::min)(text.size(), position + lowerKeyword.size() + 80);
+        contexts.push_back(text.substr(contextStart, contextEnd - contextStart));
+        position += lowerKeyword.size();
+    }
+}
+
+std::vector<std::string> CollectSubstitutionClaimContexts(const AnalyzeResponse& response)
+{
+    std::vector<std::string> contexts;
+    const std::vector<std::string> keywords = {
+        "instruction substitution",
+        "substitution idiom",
+        "algebraic identity",
+        "simplified",
+        "canonicalized",
+        "=>"
+    };
+
+    for (const std::string& keyword : keywords)
+    {
+        CollectKeywordContexts(response.Summary, keyword, contexts);
+        CollectKeywordContexts(response.PseudoC, keyword, contexts);
+    }
+
+    return contexts;
+}
+
+bool MentionsMemorySensitiveSubstitutionClaim(const AnalyzeResponse& response)
+{
+    if (!MentionsSubstitutionSimplificationClaim(response))
+    {
+        return false;
+    }
+
+    const std::vector<std::string> contexts = CollectSubstitutionClaimContexts(response);
+
+    for (const std::string& context : contexts)
+    {
+        if (ContainsMemorySensitiveSubstitutionMarker(context))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void CheckObfuscationClaimSupport(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
 {
     if (response.Confidence <= 0.60)
@@ -946,6 +1026,16 @@ void CheckObfuscationClaimSupport(const AnalyzeRequest& request, const AnalyzeRe
             "obfuscation.substitution_claim_without_evidence",
             "warning",
             "response claims instruction-substitution simplification without substitution facts");
+    }
+
+    if (MentionsMemorySensitiveSubstitutionClaim(response))
+    {
+        ++report.FactConflicts;
+        AddIssue(
+            report,
+            "obfuscation.substitution_memory_semantics_claim",
+            "warning",
+            "response claims substitution simplification over memory-sensitive semantics; analyzer substitution facts only prove local scalar identities");
     }
 }
 

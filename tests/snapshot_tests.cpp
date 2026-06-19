@@ -2175,6 +2175,28 @@ void TestVerifierCoverageSnapshot()
     Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.dead_edge_claim_without_opaque_predicate"), "verifier should reject unsupported opaque dead-edge claims");
     Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.substitution_claim_without_evidence"), "verifier should reject unsupported substitution claims");
 
+    decomp::AnalyzeRequest substitutionRequest;
+    substitutionRequest.RequestId = "verifier_substitution_semantics_snapshot";
+    substitutionRequest.Facts = BuildSubstitutionFacts();
+
+    decomp::AnalyzeResponse scalarSubstitutionResponse;
+    scalarSubstitutionResponse.Status = "ok";
+    scalarSubstitutionResponse.PseudoC = "void f(void) { return; }";
+    scalarSubstitutionResponse.Summary = "applied substitution idiom eax + 0 => eax";
+    scalarSubstitutionResponse.Confidence = 0.91;
+
+    const decomp::VerifyReport scalarSubstitutionReport = decomp::VerifyResponse(substitutionRequest, scalarSubstitutionResponse);
+    Expect(!HasIssueCode(scalarSubstitutionReport, "obfuscation.substitution_memory_semantics_claim"), "verifier should allow scalar substitution claims backed by substitution facts");
+
+    decomp::AnalyzeResponse memorySubstitutionResponse;
+    memorySubstitutionResponse.Status = "ok";
+    memorySubstitutionResponse.PseudoC = "void f(void) { return; }";
+    memorySubstitutionResponse.Summary = "applied substitution idiom [rcx] + 0 => [rcx]";
+    memorySubstitutionResponse.Confidence = 0.91;
+
+    const decomp::VerifyReport memorySubstitutionReport = decomp::VerifyResponse(substitutionRequest, memorySubstitutionResponse);
+    Expect(HasIssueCode(memorySubstitutionReport, "obfuscation.substitution_memory_semantics_claim"), "verifier should flag memory-sensitive substitution claims");
+
     std::string rawSource;
     std::string rawTarget;
 
