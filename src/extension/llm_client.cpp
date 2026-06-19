@@ -2083,20 +2083,20 @@ bool ChunkFactReferencesAnyBlock(const std::string& fact, const std::set<std::st
     return false;
 }
 
-JsonValue BuildChunkGlobalFactsJson(
-    const AnalyzeRequest& request,
+JsonValue BuildChunkScopedStringArrayJson(
+    const std::vector<std::string>& values,
     const std::set<std::string>& blockIds,
     size_t limit,
     bool* truncated)
 {
-    std::vector<std::string> filteredFacts;
+    std::vector<std::string> filteredValues;
     bool filteredOut = false;
 
-    for (const std::string& fact : request.Facts.Facts)
+    for (const std::string& value : values)
     {
-        if (!IsChunkScopedObfuscationFact(fact) || ChunkFactReferencesAnyBlock(fact, blockIds))
+        if (!IsChunkScopedObfuscationFact(value) || ChunkFactReferencesAnyBlock(value, blockIds))
         {
-            filteredFacts.push_back(fact);
+            filteredValues.push_back(value);
         }
         else
         {
@@ -2105,7 +2105,7 @@ JsonValue BuildChunkGlobalFactsJson(
     }
 
     bool arrayTruncated = false;
-    JsonValue array = BuildStringArray(filteredFacts, limit, &arrayTruncated);
+    JsonValue array = BuildStringArray(filteredValues, limit, &arrayTruncated);
 
     if (truncated != nullptr)
     {
@@ -2113,6 +2113,24 @@ JsonValue BuildChunkGlobalFactsJson(
     }
 
     return array;
+}
+
+JsonValue BuildChunkGlobalFactsJson(
+    const AnalyzeRequest& request,
+    const std::set<std::string>& blockIds,
+    size_t limit,
+    bool* truncated)
+{
+    return BuildChunkScopedStringArrayJson(request.Facts.Facts, blockIds, limit, truncated);
+}
+
+JsonValue BuildChunkGlobalUncertaintiesJson(
+    const AnalyzeRequest& request,
+    const std::set<std::string>& blockIds,
+    size_t limit,
+    bool* truncated)
+{
+    return BuildChunkScopedStringArrayJson(request.Facts.UncertainPoints, blockIds, limit, truncated);
 }
 
 JsonValue BuildRegionsJson(const AnalyzeRequest& request, bool* truncated)
@@ -5270,7 +5288,7 @@ JsonValue BuildChunkFactsJson(
     root.Set("normalized_conditions", BuildNormalizedConditionsJsonForBlocks(request, blockIds, &normalizedConditionsTruncated));
     root.Set("pdb", BuildPdbFactsJson(request, &pdbTruncated));
     root.Set("global_facts", BuildChunkGlobalFactsJson(request, blockIds, kChunkPromptFactLimit, &factsTruncated));
-    root.Set("global_uncertainties", BuildStringArray(request.Facts.UncertainPoints, kChunkPromptUncertaintyLimit, &uncertaintiesTruncated));
+    root.Set("global_uncertainties", BuildChunkGlobalUncertaintiesJson(request, blockIds, kChunkPromptUncertaintyLimit, &uncertaintiesTruncated));
     root.Set("pre_llm_confidence", JsonValue::MakeNumber(request.Facts.PreLlmConfidence));
 
     truncation.Set("direct_calls", JsonValue::MakeBoolean(directCallsTruncated));

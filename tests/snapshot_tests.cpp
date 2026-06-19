@@ -1603,6 +1603,12 @@ void TestObfuscationFactsSnapshot()
     chunkScopedRequest.Facts.Facts.insert(
         chunkScopedRequest.Facts.Facts.begin(),
         "obfuscation substitution: block=bb_outside_chunk, original=OUTSIDE_CHUNK_FACT_MARKER => simplified=outside, confidence=0.99");
+    chunkScopedRequest.Facts.UncertainPoints.insert(
+        chunkScopedRequest.Facts.UncertainPoints.begin(),
+        "obfuscation recovered edge: source=bb_outside_uncertainty, target=bb_other_outside_uncertainty, uncertainty=OUTSIDE_CHUNK_UNCERTAINTY_MARKER");
+    chunkScopedRequest.Facts.UncertainPoints.insert(
+        chunkScopedRequest.Facts.UncertainPoints.begin(),
+        "GLOBAL_CHUNK_SAFE_UNCERTAINTY_MARKER");
 
     decomp::SemanticControlFlowEdge outsideChunkEdge;
     outsideChunkEdge.SourceBlock = "bb_outside_chunk";
@@ -1643,6 +1649,8 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_OBF_MARKER") == std::string::npos, "chunk prompt should omit obfuscation facts outside the chunk block set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_SEMANTIC_MARKER") == std::string::npos, "chunk prompt should omit semantic CFG edges outside the chunk block set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_FACT_MARKER") == std::string::npos, "chunk prompt should omit obfuscation detail facts outside the chunk block set");
+    Expect(chunkPromptDump.find("OUTSIDE_CHUNK_UNCERTAINTY_MARKER") == std::string::npos, "chunk prompt should omit obfuscation uncertainties outside the chunk block set");
+    Expect(chunkPromptDump.find("GLOBAL_CHUNK_SAFE_UNCERTAINTY_MARKER") != std::string::npos, "chunk prompt should preserve global uncertainties without chunk block references");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_CONDITION_MARKER") == std::string::npos, "chunk graph summary should omit normalized conditions outside the chunk block set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_REGION_MARKER") == std::string::npos, "chunk graph summary should omit control-flow regions outside the chunk block set");
     Expect(chunkPromptDump.find("bb_outside_chunk") == std::string::npos, "chunk graph summary should omit semantic edge blocks outside the chunk block set");
