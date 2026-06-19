@@ -1683,6 +1683,13 @@ void TestObfuscationFactsSnapshot()
     Expect(HasEvidenceNodeKind(opaqueFacts, "obfuscation.opaque_predicate"), "evidence graph should expose opaque predicate nodes");
     Expect(HasEvidenceNodeKind(opaqueFacts, "semantic_cfg.dead_edge"), "evidence graph should expose semantic CFG dead-edge nodes");
 
+    decomp::AnalyzeRequest opaqueRequest;
+    opaqueRequest.RequestId = "obfuscation_bcf_prompt_snapshot";
+    opaqueRequest.Facts = opaqueFacts;
+    const std::string opaquePromptDump = decomp::BuildDebugPromptDump(opaqueRequest);
+    Expect(opaquePromptDump.find("\"opaque_predicates\"") != std::string::npos, "prompt dump should include opaque predicate facts");
+    Expect(opaquePromptDump.find("opaque predicate:") != std::string::npos, "analyzer skeleton should render opaque predicate proof comments");
+
     const decomp::AnalysisFacts substitutionFacts = BuildSubstitutionFacts();
     bool foundAddZero = false;
     bool foundCanonicalAdd = false;

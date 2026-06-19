@@ -1424,6 +1424,32 @@ std::string BuildAnalyzerSkeletonPseudoC(const AnalyzeRequest& request)
         }
     }
 
+    for (size_t index = 0; index < request.Facts.Obfuscation.OpaquePredicates.size() && index < 6; ++index)
+    {
+        const OpaquePredicateFact& predicate = request.Facts.Obfuscation.OpaquePredicates[index];
+
+        if (predicate.Confidence < 0.75)
+        {
+            continue;
+        }
+
+        text += "    /* opaque predicate: block="
+            + predicate.BlockId;
+
+        if (!predicate.Predicate.empty())
+        {
+            text += " predicate=" + predicate.Predicate;
+        }
+
+        text += " result="
+            + predicate.ConstantResult
+            + " live="
+            + predicate.LiveTargetBlock
+            + " dead="
+            + predicate.DeadTargetBlock
+            + " */\n";
+    }
+
     for (size_t index = 0; index < request.Facts.Obfuscation.SubstitutionIdioms.size() && index < 6; ++index)
     {
         const SubstitutionIdiomFact& idiom = request.Facts.Obfuscation.SubstitutionIdioms[index];
