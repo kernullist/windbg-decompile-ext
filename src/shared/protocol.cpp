@@ -427,6 +427,43 @@ JsonValue ToJson(const ObfuscationFacts& facts)
     return object;
 }
 
+JsonValue ToJson(const SemanticControlFlowEdge& edge)
+{
+    JsonValue object = JsonValue::MakeObject();
+    object.Set("source_block", JsonValue::MakeString(edge.SourceBlock));
+    object.Set("target_block", JsonValue::MakeString(edge.TargetBlock));
+    object.Set("condition", JsonValue::MakeString(edge.Condition));
+    object.Set("state_value", JsonValue::MakeString(edge.StateValue));
+    object.Set("evidence", JsonValue::MakeString(edge.Evidence));
+    object.Set("source", JsonValue::MakeString(edge.Source));
+    object.Set("conditional", JsonValue::MakeBoolean(edge.Conditional));
+    object.Set("dead", JsonValue::MakeBoolean(edge.Dead));
+    object.Set("confidence", JsonValue::MakeNumber(edge.Confidence));
+    return object;
+}
+
+JsonValue ToJson(const SemanticControlFlowOverlay& overlay)
+{
+    JsonValue object = JsonValue::MakeObject();
+    JsonValue edges = JsonValue::MakeArray();
+    JsonValue notes = JsonValue::MakeArray();
+
+    for (const SemanticControlFlowEdge& edge : overlay.Edges)
+    {
+        edges.PushBack(ToJson(edge));
+    }
+
+    for (const std::string& note : overlay.Notes)
+    {
+        notes.PushBack(JsonValue::MakeString(note));
+    }
+
+    object.Set("edges", edges);
+    object.Set("notes", notes);
+    object.Set("confidence", JsonValue::MakeNumber(overlay.Confidence));
+    return object;
+}
+
 JsonValue ToJson(const ControlFlowRegion& region)
 {
     JsonValue object = JsonValue::MakeObject();
@@ -1504,6 +1541,45 @@ bool ParseObfuscationFacts(const JsonValue& object, ObfuscationFacts& facts)
     return true;
 }
 
+bool ParseSemanticControlFlowEdge(const JsonValue& object, SemanticControlFlowEdge& edge)
+{
+    TryGetString(object, "source_block", edge.SourceBlock);
+    TryGetString(object, "target_block", edge.TargetBlock);
+    TryGetString(object, "condition", edge.Condition);
+    TryGetString(object, "state_value", edge.StateValue);
+    TryGetString(object, "evidence", edge.Evidence);
+    TryGetString(object, "source", edge.Source);
+    TryGetBool(object, "conditional", edge.Conditional);
+    TryGetBool(object, "dead", edge.Dead);
+    TryGetDouble(object, "confidence", edge.Confidence);
+    return true;
+}
+
+bool ParseSemanticControlFlowOverlay(const JsonValue& object, SemanticControlFlowOverlay& overlay)
+{
+    TryGetDouble(object, "confidence", overlay.Confidence);
+    ParseStringArrayMember(object, "notes", overlay.Notes);
+
+    const JsonValue* edges = object.Find("edges");
+
+    if (edges != nullptr && edges->IsArray())
+    {
+        for (const auto& item : edges->GetArray())
+        {
+            if (!item.IsObject())
+            {
+                continue;
+            }
+
+            SemanticControlFlowEdge edge;
+            ParseSemanticControlFlowEdge(item, edge);
+            overlay.Edges.push_back(std::move(edge));
+        }
+    }
+
+    return true;
+}
+
 bool ParseControlFlowRegion(const JsonValue& object, ControlFlowRegion& region)
 {
     TryGetString(object, "kind", region.Kind);
@@ -1879,6 +1955,7 @@ JsonValue ToJson(const AnalyzeRequest& request)
     JsonValue valueMerges = JsonValue::MakeArray();
     JsonValue irValues = JsonValue::MakeArray();
     JsonValue blockValueStates = JsonValue::MakeArray();
+    JsonValue semanticControlFlow = JsonValue::MakeObject();
     JsonValue controlFlow = JsonValue::MakeArray();
     JsonValue typeHints = JsonValue::MakeArray();
     JsonValue idioms = JsonValue::MakeArray();
@@ -1959,6 +2036,8 @@ JsonValue ToJson(const AnalyzeRequest& request)
         blockValueStates.PushBack(ToJson(state));
     }
 
+    semanticControlFlow = ToJson(request.Facts.SemanticControlFlow);
+
     for (const auto& region : request.Facts.ControlFlow)
     {
         controlFlow.PushBack(ToJson(region));
@@ -2034,6 +2113,7 @@ JsonValue ToJson(const AnalyzeRequest& request)
     object.Set("ir_values", irValues);
     object.Set("block_value_states", blockValueStates);
     object.Set("obfuscation", ToJson(request.Facts.Obfuscation));
+    object.Set("semantic_control_flow", semanticControlFlow);
     object.Set("control_flow", controlFlow);
     object.Set("abi", ToJson(request.Facts.Abi));
     object.Set("type_hints", typeHints);
@@ -2524,6 +2604,13 @@ bool ParseAnalyzeRequest(const std::string& text, AnalyzeRequest& request, std::
     if (obfuscation != nullptr && obfuscation->IsObject())
     {
         ParseObfuscationFacts(*obfuscation, request.Facts.Obfuscation);
+    }
+
+    const JsonValue* semanticControlFlow = object.Find("semantic_control_flow");
+
+    if (semanticControlFlow != nullptr && semanticControlFlow->IsObject())
+    {
+        ParseSemanticControlFlowOverlay(*semanticControlFlow, request.Facts.SemanticControlFlow);
     }
 
     const JsonValue* controlFlow = object.Find("control_flow");

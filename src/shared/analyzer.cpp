@@ -7428,6 +7428,200 @@ void AppendSubstitutionIdioms(ObfuscationFacts& obfuscation, const std::vector<S
     }
 }
 
+constexpr double kSemanticControlFlowApplyConfidence = 0.75;
+
+bool IsApplicableSemanticControlFlowEdge(const SemanticControlFlowEdge& edge)
+{
+    return edge.Confidence >= kSemanticControlFlowApplyConfidence
+        && !edge.SourceBlock.empty()
+        && !edge.TargetBlock.empty();
+}
+
+std::string BuildSemanticControlFlowEdgeKey(const SemanticControlFlowEdge& edge)
+{
+    return edge.SourceBlock
+        + "\n"
+        + edge.TargetBlock
+        + "\n"
+        + edge.Source
+        + "\n"
+        + edge.StateValue
+        + "\n"
+        + edge.Condition
+        + "\n"
+        + (edge.Dead ? "dead" : "live");
+}
+
+void AppendSemanticControlFlowEdge(
+    SemanticControlFlowOverlay& overlay,
+    std::set<std::string>& seen,
+    SemanticControlFlowEdge edge)
+{
+    if (edge.SourceBlock.empty() || edge.TargetBlock.empty())
+    {
+        return;
+    }
+
+    const std::string key = BuildSemanticControlFlowEdgeKey(edge);
+
+    if (!seen.insert(key).second)
+    {
+        return;
+    }
+
+    edge.Confidence = Clamp01(edge.Confidence);
+    overlay.Confidence = (std::max)(overlay.Confidence, edge.Confidence);
+    overlay.Edges.push_back(std::move(edge));
+}
+
+SemanticControlFlowOverlay BuildSemanticControlFlowOverlay(const ObfuscationFacts& obfuscation)
+{
+    SemanticControlFlowOverlay overlay;
+    std::set<std::string> seen;
+    bool hasApplicableEdge = false;
+
+    for (const ObfuscationDispatcher& dispatcher : obfuscation.Dispatchers)
+    {
+        for (const RecoveredControlFlowEdge& recoveredEdge : dispatcher.RecoveredEdges)
+        {
+            SemanticControlFlowEdge edge;
+            edge.SourceBlock = recoveredEdge.SourceBlock;
+            edge.TargetBlock = recoveredEdge.TargetBlock;
+            edge.Condition = recoveredEdge.Condition;
+            edge.StateValue = recoveredEdge.StateValue;
+            edge.Evidence = recoveredEdge.Evidence;
+            edge.Source = "obfuscation.recovered_edge";
+            edge.Conditional = recoveredEdge.Conditional;
+            edge.Dead = false;
+            edge.Confidence = Clamp01((recoveredEdge.Confidence * 0.70) + (dispatcher.Confidence * 0.30));
+            hasApplicableEdge = hasApplicableEdge || IsApplicableSemanticControlFlowEdge(edge);
+            AppendSemanticControlFlowEdge(overlay, seen, std::move(edge));
+        }
+    }
+
+    for (const OpaquePredicateFact& predicate : obfuscation.OpaquePredicates)
+    {
+        const std::string condition = predicate.Predicate.empty()
+            ? ("constant predicate " + predicate.ConstantResult)
+            : (predicate.Predicate + " == " + predicate.ConstantResult);
+
+        if (!predicate.LiveTargetBlock.empty())
+        {
+            SemanticControlFlowEdge edge;
+            edge.SourceBlock = predicate.BlockId;
+            edge.TargetBlock = predicate.LiveTargetBlock;
+            edge.Condition = condition;
+            edge.Evidence = predicate.Evidence;
+            edge.Source = "obfuscation.opaque_predicate.live";
+            edge.Conditional = true;
+            edge.Dead = false;
+            edge.Confidence = predicate.Confidence;
+            hasApplicableEdge = hasApplicableEdge || IsApplicableSemanticControlFlowEdge(edge);
+            AppendSemanticControlFlowEdge(overlay, seen, std::move(edge));
+        }
+
+        if (!predicate.DeadTargetBlock.empty())
+        {
+            SemanticControlFlowEdge edge;
+            edge.SourceBlock = predicate.BlockId;
+            edge.TargetBlock = predicate.DeadTargetBlock;
+            edge.Condition = condition;
+            edge.Evidence = predicate.Evidence;
+            edge.Source = "obfuscation.opaque_predicate.dead";
+            edge.Conditional = true;
+            edge.Dead = true;
+            edge.Confidence = predicate.Confidence;
+            hasApplicableEdge = hasApplicableEdge || IsApplicableSemanticControlFlowEdge(edge);
+            AppendSemanticControlFlowEdge(overlay, seen, std::move(edge));
+        }
+    }
+
+    if (hasApplicableEdge)
+    {
+        overlay.Notes.push_back("high-confidence semantic edges are used for structural recovery; raw CFG remains authoritative elsewhere");
+    }
+
+    return overlay;
+}
+
+void AppendUniqueString(std::vector<std::string>& values, const std::string& value)
+{
+    if (!value.empty() && std::find(values.begin(), values.end(), value) == values.end())
+    {
+        values.push_back(value);
+    }
+}
+
+std::vector<BasicBlock> BuildBlocksWithSemanticControlFlow(
+    const std::vector<BasicBlock>& blocks,
+    const SemanticControlFlowOverlay& overlay)
+{
+    std::vector<BasicBlock> semanticBlocks = blocks;
+    std::set<std::string> knownBlocks;
+    std::unordered_map<std::string, std::vector<std::string>> liveTargetsBySource;
+    std::unordered_map<std::string, std::set<std::string>> deadTargetsBySource;
+
+    for (const BasicBlock& block : blocks)
+    {
+        knownBlocks.insert(block.Id);
+    }
+
+    for (const SemanticControlFlowEdge& edge : overlay.Edges)
+    {
+        if (!IsApplicableSemanticControlFlowEdge(edge)
+            || knownBlocks.find(edge.SourceBlock) == knownBlocks.end()
+            || knownBlocks.find(edge.TargetBlock) == knownBlocks.end())
+        {
+            continue;
+        }
+
+        if (edge.Dead)
+        {
+            deadTargetsBySource[edge.SourceBlock].insert(edge.TargetBlock);
+        }
+        else
+        {
+            AppendUniqueString(liveTargetsBySource[edge.SourceBlock], edge.TargetBlock);
+        }
+    }
+
+    if (liveTargetsBySource.empty() && deadTargetsBySource.empty())
+    {
+        return semanticBlocks;
+    }
+
+    for (BasicBlock& block : semanticBlocks)
+    {
+        const auto liveIt = liveTargetsBySource.find(block.Id);
+
+        if (liveIt != liveTargetsBySource.end() && !liveIt->second.empty())
+        {
+            block.Successors.clear();
+            AppendUniqueStrings(block.Successors, liveIt->second);
+            continue;
+        }
+
+        const auto deadIt = deadTargetsBySource.find(block.Id);
+
+        if (deadIt == deadTargetsBySource.end() || deadIt->second.empty())
+        {
+            continue;
+        }
+
+        block.Successors.erase(
+            std::remove_if(
+                block.Successors.begin(),
+                block.Successors.end(),
+                [&deadIt](const std::string& successor)
+                {
+                    return deadIt->second.find(successor) != deadIt->second.end();
+                }),
+            block.Successors.end());
+    }
+
+    return semanticBlocks;
+}
+
 bool TryExtractInductionStep(
     const DisassembledInstruction& instruction,
     std::string& variable,
@@ -9590,6 +9784,32 @@ EvidenceGraphFacts BuildEvidenceGraphFacts(const AnalysisFacts& facts)
         }
     }
 
+    for (size_t index = 0; index < facts.SemanticControlFlow.Edges.size(); ++index)
+    {
+        const SemanticControlFlowEdge& edge = facts.SemanticControlFlow.Edges[index];
+        const std::string nodeId = builder.AddSiteFact(
+            BuildEvidenceIndexedNodeId("semantic_cfg", index),
+            edge.Dead ? "semantic_cfg.dead_edge" : "semantic_cfg.edge",
+            edge.SourceBlock + "->" + edge.TargetBlock + " " + edge.Source,
+            0,
+            edge.SourceBlock,
+            edge.Confidence);
+
+        if (!edge.SourceBlock.empty())
+        {
+            builder.AddEdge(nodeId, BuildEvidenceBlockNodeId(edge.SourceBlock), "from_block", edge.Confidence);
+        }
+
+        if (!edge.TargetBlock.empty())
+        {
+            builder.AddEdge(
+                nodeId,
+                BuildEvidenceBlockNodeId(edge.TargetBlock),
+                edge.Dead ? "prunes_edge" : "semantic_successor",
+                edge.Confidence);
+        }
+    }
+
     for (size_t index = 0; index < facts.ControlFlow.size(); ++index)
     {
         const ControlFlowRegion& region = facts.ControlFlow[index];
@@ -9923,7 +10143,9 @@ void RefreshDerivedAnalysisFacts(AnalysisFacts& facts)
         facts.NormalizedConditions,
         facts.Switches);
     AppendSubstitutionIdioms(facts.Obfuscation, substitutionIdioms);
-    facts.ControlFlow = AnalyzeControlFlow(facts.Instructions, facts.Blocks, facts.NormalizedConditions, facts.Switches);
+    facts.SemanticControlFlow = BuildSemanticControlFlowOverlay(facts.Obfuscation);
+    const std::vector<BasicBlock> semanticBlocks = BuildBlocksWithSemanticControlFlow(facts.Blocks, facts.SemanticControlFlow);
+    facts.ControlFlow = AnalyzeControlFlow(facts.Instructions, semanticBlocks, facts.NormalizedConditions, facts.Switches);
     RefreshEvidenceGraph(facts);
 }
 
@@ -10018,7 +10240,9 @@ AnalysisFacts BuildAnalysisFacts(
         facts.NormalizedConditions,
         facts.Switches);
     AppendSubstitutionIdioms(facts.Obfuscation, substitutionIdioms);
-    facts.ControlFlow = AnalyzeControlFlow(facts.Instructions, facts.Blocks, facts.NormalizedConditions, facts.Switches);
+    facts.SemanticControlFlow = BuildSemanticControlFlowOverlay(facts.Obfuscation);
+    const std::vector<BasicBlock> semanticBlocks = BuildBlocksWithSemanticControlFlow(facts.Blocks, facts.SemanticControlFlow);
+    facts.ControlFlow = AnalyzeControlFlow(facts.Instructions, semanticBlocks, facts.NormalizedConditions, facts.Switches);
     facts.Abi = AnalyzeAbiFacts(instructions, facts.MemoryAccesses, facts.StackFrame, entryAddress);
     facts.TypeHints = CollectTypeRecoveryHints(instructions, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
     facts.Idioms = CollectIdiomPatterns(instructions, facts.Calls, facts.MemoryAccesses, facts.Abi);
@@ -10246,6 +10470,30 @@ AnalysisFacts BuildAnalysisFacts(
             + std::to_string(facts.Obfuscation.OpaquePredicates.size())
             + ", substitution_idioms="
             + std::to_string(facts.Obfuscation.SubstitutionIdioms.size()));
+    }
+
+    if (!facts.SemanticControlFlow.Edges.empty())
+    {
+        size_t liveEdges = 0;
+        size_t deadEdges = 0;
+
+        for (const SemanticControlFlowEdge& edge : facts.SemanticControlFlow.Edges)
+        {
+            if (edge.Dead)
+            {
+                ++deadEdges;
+            }
+            else
+            {
+                ++liveEdges;
+            }
+        }
+
+        facts.Facts.push_back(
+            "semantic control-flow overlay: live_edges="
+            + std::to_string(liveEdges)
+            + ", dead_edges="
+            + std::to_string(deadEdges));
     }
 
     if (!facts.NormalizedConditions.empty())

@@ -1517,6 +1517,7 @@ void TestObfuscationFactsSnapshot()
     const decomp::BasicBlock* entry = FindBlockStartingAt(facts, 0x13000);
     const decomp::BasicBlock* firstBody = FindBlockStartingAt(facts, 0x13010);
     bool foundRecoveredEntryEdge = false;
+    bool foundSemanticEntryEdge = false;
 
     if (dispatcher != nullptr && entry != nullptr && firstBody != nullptr)
     {
@@ -1527,12 +1528,26 @@ void TestObfuscationFactsSnapshot()
                 foundRecoveredEntryEdge = true;
             }
         }
+
+        for (const decomp::SemanticControlFlowEdge& edge : facts.SemanticControlFlow.Edges)
+        {
+            if (edge.SourceBlock == entry->Id
+                && edge.TargetBlock == firstBody->Id
+                && edge.StateValue == "0x0"
+                && !edge.Dead
+                && edge.Source == "obfuscation.recovered_edge")
+            {
+                foundSemanticEntryEdge = true;
+            }
+        }
     }
 
     Expect(foundRecoveredEntryEdge, "recovered edges should map state constants back to original body blocks");
+    Expect(foundSemanticEntryEdge, "semantic CFG overlay should expose recovered dispatcher edges");
     Expect(HasEvidenceNodeKind(facts, "obfuscation.dispatcher"), "evidence graph should expose obfuscation dispatcher nodes");
     Expect(HasEvidenceNodeKind(facts, "obfuscation.state_variable"), "evidence graph should expose obfuscation state-variable nodes");
     Expect(HasEvidenceNodeKind(facts, "obfuscation.recovered_edge"), "evidence graph should expose recovered obfuscation edges");
+    Expect(HasEvidenceNodeKind(facts, "semantic_cfg.edge"), "evidence graph should expose semantic CFG edge nodes");
 
     decomp::AnalyzeRequest request;
     request.RequestId = "obfuscation_snapshot";
@@ -1541,15 +1556,19 @@ void TestObfuscationFactsSnapshot()
     const std::string serialized = decomp::SerializeAnalyzeRequest(request, true);
     Expect(serialized.find("\"obfuscation\"") != std::string::npos, "request snapshot should serialize obfuscation facts");
     Expect(serialized.find("\"recovered_edges\"") != std::string::npos, "request snapshot should serialize recovered obfuscation edges");
+    Expect(serialized.find("\"semantic_control_flow\"") != std::string::npos, "request snapshot should serialize semantic CFG overlay");
 
     decomp::AnalyzeRequest parsed;
     std::string error;
     Expect(decomp::ParseAnalyzeRequest(serialized, parsed, error), "obfuscation request should parse after serialization");
     Expect(!parsed.Facts.Obfuscation.Dispatchers.empty(), "obfuscation dispatchers should round-trip through protocol JSON");
     Expect(!parsed.Facts.Obfuscation.Dispatchers.empty() && parsed.Facts.Obfuscation.Dispatchers.front().RecoveredEdges.size() >= 2, "recovered obfuscation edges should round-trip through protocol JSON");
+    Expect(parsed.Facts.SemanticControlFlow.Edges.size() >= 2, "semantic CFG overlay should round-trip through protocol JSON");
 
     const std::string promptDump = decomp::BuildDebugPromptDump(request);
     Expect(promptDump.find("\"obfuscation\"") != std::string::npos, "prompt dump should include obfuscation facts");
+    Expect(promptDump.find("\"semantic_control_flow\"") != std::string::npos, "prompt dump should include semantic CFG overlay");
+    Expect(promptDump.find("semantic edge:") != std::string::npos, "analyzer skeleton should render semantic CFG comments");
     Expect(promptDump.find("\"usage_guidance\"") != std::string::npos, "prompt dump should include obfuscation usage guidance");
 
     const decomp::AnalysisFacts stateSwitchFacts = BuildLegitimateStateSwitchFacts();
@@ -1614,6 +1633,7 @@ void TestObfuscationFactsSnapshot()
     const decomp::AnalysisFacts opaqueFacts = BuildOpaquePredicateFacts();
     const decomp::BasicBlock* opaqueDeadBlock = FindBlockStartingAt(opaqueFacts, 0x18005);
     bool foundOpaquePredicate = false;
+    bool foundOpaqueDeadOverlayEdge = false;
 
     for (const decomp::OpaquePredicateFact& predicate : opaqueFacts.Obfuscation.OpaquePredicates)
     {
@@ -1625,8 +1645,23 @@ void TestObfuscationFactsSnapshot()
         }
     }
 
+    if (opaqueDeadBlock != nullptr)
+    {
+        for (const decomp::SemanticControlFlowEdge& edge : opaqueFacts.SemanticControlFlow.Edges)
+        {
+            if (edge.TargetBlock == opaqueDeadBlock->Id
+                && edge.Dead
+                && edge.Source == "obfuscation.opaque_predicate.dead")
+            {
+                foundOpaqueDeadOverlayEdge = true;
+            }
+        }
+    }
+
     Expect(foundOpaquePredicate, "opaque predicate fixture should prove the dead branch target");
+    Expect(foundOpaqueDeadOverlayEdge, "semantic CFG overlay should expose opaque-predicate dead edges");
     Expect(HasEvidenceNodeKind(opaqueFacts, "obfuscation.opaque_predicate"), "evidence graph should expose opaque predicate nodes");
+    Expect(HasEvidenceNodeKind(opaqueFacts, "semantic_cfg.dead_edge"), "evidence graph should expose semantic CFG dead-edge nodes");
 
     const decomp::AnalysisFacts substitutionFacts = BuildSubstitutionFacts();
     bool foundAddZero = false;
@@ -1658,6 +1693,7 @@ void TestObfuscationFactsSnapshot()
     obfuscationRequest.Facts = substitutionFacts;
     const std::string phase3PromptDump = decomp::BuildDebugPromptDump(obfuscationRequest);
     Expect(phase3PromptDump.find("\"substitution_idioms\"") != std::string::npos, "prompt dump should include substitution idioms");
+    Expect(phase3PromptDump.find("substitution:") != std::string::npos, "analyzer skeleton should render substitution comments");
 }
 
 void TestSimdAbiSnapshot()

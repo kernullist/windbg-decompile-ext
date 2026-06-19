@@ -312,6 +312,26 @@ struct ObfuscationFacts
     double Confidence = 0.0;
 };
 
+struct SemanticControlFlowEdge
+{
+    std::string SourceBlock;
+    std::string TargetBlock;
+    std::string Condition;
+    std::string StateValue;
+    std::string Evidence;
+    std::string Source;
+    bool Conditional = false;
+    bool Dead = false;
+    double Confidence = 0.0;
+};
+
+struct SemanticControlFlowOverlay
+{
+    std::vector<SemanticControlFlowEdge> Edges;
+    std::vector<std::string> Notes;
+    double Confidence = 0.0;
+};
+
 struct ControlFlowRegion
 {
     std::string Kind;
@@ -592,6 +612,7 @@ struct AnalysisFacts
     std::vector<IrValue> IrValues;
     std::vector<BlockValueState> BlockValueStates;
     ObfuscationFacts Obfuscation;
+    SemanticControlFlowOverlay SemanticControlFlow;
     std::vector<ControlFlowRegion> ControlFlow;
     AbiFacts Abi;
     std::vector<TypeRecoveryHint> TypeHints;
