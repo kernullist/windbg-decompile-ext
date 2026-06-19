@@ -299,6 +299,134 @@ JsonValue ToJson(const BlockValueState& state)
     return object;
 }
 
+JsonValue ToJson(const ObfuscationStateVariable& variable)
+{
+    JsonValue object = JsonValue::MakeObject();
+    object.Set("name", JsonValue::MakeString(variable.Name));
+    object.Set("storage", JsonValue::MakeString(variable.Storage));
+    object.Set("first_site", JsonValue::MakeString(HexU64(variable.FirstSite)));
+    object.Set("read_count", JsonValue::MakeNumber(static_cast<double>(variable.ReadCount)));
+    object.Set("write_count", JsonValue::MakeNumber(static_cast<double>(variable.WriteCount)));
+    object.Set("confidence", JsonValue::MakeNumber(variable.Confidence));
+    return object;
+}
+
+JsonValue ToJson(const RecoveredControlFlowEdge& edge)
+{
+    JsonValue object = JsonValue::MakeObject();
+    object.Set("source_block", JsonValue::MakeString(edge.SourceBlock));
+    object.Set("target_block", JsonValue::MakeString(edge.TargetBlock));
+    object.Set("condition", JsonValue::MakeString(edge.Condition));
+    object.Set("state_value", JsonValue::MakeString(edge.StateValue));
+    object.Set("evidence", JsonValue::MakeString(edge.Evidence));
+    object.Set("conditional", JsonValue::MakeBoolean(edge.Conditional));
+    object.Set("confidence", JsonValue::MakeNumber(edge.Confidence));
+    return object;
+}
+
+JsonValue ToJson(const ObfuscationDispatcher& dispatcher)
+{
+    JsonValue object = JsonValue::MakeObject();
+    JsonValue dispatcherBlocks = JsonValue::MakeArray();
+    JsonValue originalBlockCandidates = JsonValue::MakeArray();
+    JsonValue recoveredEdges = JsonValue::MakeArray();
+
+    for (const std::string& block : dispatcher.DispatcherBlocks)
+    {
+        dispatcherBlocks.PushBack(JsonValue::MakeString(block));
+    }
+
+    for (const std::string& block : dispatcher.OriginalBlockCandidates)
+    {
+        originalBlockCandidates.PushBack(JsonValue::MakeString(block));
+    }
+
+    for (const RecoveredControlFlowEdge& edge : dispatcher.RecoveredEdges)
+    {
+        recoveredEdges.PushBack(ToJson(edge));
+    }
+
+    object.Set("header_block", JsonValue::MakeString(dispatcher.HeaderBlock));
+    object.Set("kind", JsonValue::MakeString(dispatcher.Kind));
+    object.Set("state_variable", JsonValue::MakeString(dispatcher.StateVariable));
+    object.Set("dispatcher_blocks", dispatcherBlocks);
+    object.Set("original_block_candidates", originalBlockCandidates);
+    object.Set("recovered_edges", recoveredEdges);
+    object.Set("evidence", JsonValue::MakeString(dispatcher.Evidence));
+    object.Set("confidence", JsonValue::MakeNumber(dispatcher.Confidence));
+    return object;
+}
+
+JsonValue ToJson(const OpaquePredicateFact& predicate)
+{
+    JsonValue object = JsonValue::MakeObject();
+    object.Set("site", JsonValue::MakeString(HexU64(predicate.Site)));
+    object.Set("block_id", JsonValue::MakeString(predicate.BlockId));
+    object.Set("predicate", JsonValue::MakeString(predicate.Predicate));
+    object.Set("constant_result", JsonValue::MakeString(predicate.ConstantResult));
+    object.Set("dead_target_block", JsonValue::MakeString(predicate.DeadTargetBlock));
+    object.Set("live_target_block", JsonValue::MakeString(predicate.LiveTargetBlock));
+    object.Set("evidence", JsonValue::MakeString(predicate.Evidence));
+    object.Set("confidence", JsonValue::MakeNumber(predicate.Confidence));
+    return object;
+}
+
+JsonValue ToJson(const SubstitutionIdiomFact& idiom)
+{
+    JsonValue object = JsonValue::MakeObject();
+    object.Set("site", JsonValue::MakeString(HexU64(idiom.Site)));
+    object.Set("block_id", JsonValue::MakeString(idiom.BlockId));
+    object.Set("original_expression", JsonValue::MakeString(idiom.OriginalExpression));
+    object.Set("simplified_expression", JsonValue::MakeString(idiom.SimplifiedExpression));
+    object.Set("pattern", JsonValue::MakeString(idiom.Pattern));
+    object.Set("evidence", JsonValue::MakeString(idiom.Evidence));
+    object.Set("confidence", JsonValue::MakeNumber(idiom.Confidence));
+    return object;
+}
+
+JsonValue ToJson(const ObfuscationFacts& facts)
+{
+    JsonValue object = JsonValue::MakeObject();
+    JsonValue stateVariables = JsonValue::MakeArray();
+    JsonValue dispatchers = JsonValue::MakeArray();
+    JsonValue opaquePredicates = JsonValue::MakeArray();
+    JsonValue substitutionIdioms = JsonValue::MakeArray();
+    JsonValue notes = JsonValue::MakeArray();
+
+    for (const ObfuscationStateVariable& variable : facts.StateVariables)
+    {
+        stateVariables.PushBack(ToJson(variable));
+    }
+
+    for (const ObfuscationDispatcher& dispatcher : facts.Dispatchers)
+    {
+        dispatchers.PushBack(ToJson(dispatcher));
+    }
+
+    for (const OpaquePredicateFact& predicate : facts.OpaquePredicates)
+    {
+        opaquePredicates.PushBack(ToJson(predicate));
+    }
+
+    for (const SubstitutionIdiomFact& idiom : facts.SubstitutionIdioms)
+    {
+        substitutionIdioms.PushBack(ToJson(idiom));
+    }
+
+    for (const std::string& note : facts.Notes)
+    {
+        notes.PushBack(JsonValue::MakeString(note));
+    }
+
+    object.Set("state_variables", stateVariables);
+    object.Set("dispatchers", dispatchers);
+    object.Set("opaque_predicates", opaquePredicates);
+    object.Set("substitution_idioms", substitutionIdioms);
+    object.Set("notes", notes);
+    object.Set("confidence", JsonValue::MakeNumber(facts.Confidence));
+    return object;
+}
+
 JsonValue ToJson(const ControlFlowRegion& region)
 {
     JsonValue object = JsonValue::MakeObject();
@@ -1217,6 +1345,165 @@ bool ParseBlockValueState(const JsonValue& object, BlockValueState& state)
     return true;
 }
 
+bool ParseObfuscationStateVariable(const JsonValue& object, ObfuscationStateVariable& variable)
+{
+    TryGetString(object, "name", variable.Name);
+    TryGetString(object, "storage", variable.Storage);
+    TryGetU64(object, "first_site", variable.FirstSite);
+    TryGetU32(object, "read_count", variable.ReadCount);
+    TryGetU32(object, "write_count", variable.WriteCount);
+    TryGetDouble(object, "confidence", variable.Confidence);
+    return true;
+}
+
+bool ParseRecoveredControlFlowEdge(const JsonValue& object, RecoveredControlFlowEdge& edge)
+{
+    TryGetString(object, "source_block", edge.SourceBlock);
+    TryGetString(object, "target_block", edge.TargetBlock);
+    TryGetString(object, "condition", edge.Condition);
+    TryGetString(object, "state_value", edge.StateValue);
+    TryGetString(object, "evidence", edge.Evidence);
+    TryGetBool(object, "conditional", edge.Conditional);
+    TryGetDouble(object, "confidence", edge.Confidence);
+    return true;
+}
+
+void ParseRecoveredControlFlowEdgeArrayMember(const JsonValue& object, const std::string& key, std::vector<RecoveredControlFlowEdge>& values)
+{
+    const JsonValue* array = object.Find(key);
+
+    if (array == nullptr || !array->IsArray())
+    {
+        return;
+    }
+
+    for (const auto& item : array->GetArray())
+    {
+        if (!item.IsObject())
+        {
+            continue;
+        }
+
+        RecoveredControlFlowEdge edge;
+        ParseRecoveredControlFlowEdge(item, edge);
+        values.push_back(std::move(edge));
+    }
+}
+
+bool ParseObfuscationDispatcher(const JsonValue& object, ObfuscationDispatcher& dispatcher)
+{
+    TryGetString(object, "header_block", dispatcher.HeaderBlock);
+    TryGetString(object, "kind", dispatcher.Kind);
+    TryGetString(object, "state_variable", dispatcher.StateVariable);
+    TryGetString(object, "evidence", dispatcher.Evidence);
+    TryGetDouble(object, "confidence", dispatcher.Confidence);
+    ParseStringArrayMember(object, "dispatcher_blocks", dispatcher.DispatcherBlocks);
+    ParseStringArrayMember(object, "original_block_candidates", dispatcher.OriginalBlockCandidates);
+    ParseRecoveredControlFlowEdgeArrayMember(object, "recovered_edges", dispatcher.RecoveredEdges);
+    return true;
+}
+
+bool ParseOpaquePredicateFact(const JsonValue& object, OpaquePredicateFact& predicate)
+{
+    TryGetU64(object, "site", predicate.Site);
+    TryGetString(object, "block_id", predicate.BlockId);
+    TryGetString(object, "predicate", predicate.Predicate);
+    TryGetString(object, "constant_result", predicate.ConstantResult);
+    TryGetString(object, "dead_target_block", predicate.DeadTargetBlock);
+    TryGetString(object, "live_target_block", predicate.LiveTargetBlock);
+    TryGetString(object, "evidence", predicate.Evidence);
+    TryGetDouble(object, "confidence", predicate.Confidence);
+    return true;
+}
+
+bool ParseSubstitutionIdiomFact(const JsonValue& object, SubstitutionIdiomFact& idiom)
+{
+    TryGetU64(object, "site", idiom.Site);
+    TryGetString(object, "block_id", idiom.BlockId);
+    TryGetString(object, "original_expression", idiom.OriginalExpression);
+    TryGetString(object, "simplified_expression", idiom.SimplifiedExpression);
+    TryGetString(object, "pattern", idiom.Pattern);
+    TryGetString(object, "evidence", idiom.Evidence);
+    TryGetDouble(object, "confidence", idiom.Confidence);
+    return true;
+}
+
+bool ParseObfuscationFacts(const JsonValue& object, ObfuscationFacts& facts)
+{
+    TryGetDouble(object, "confidence", facts.Confidence);
+    ParseStringArrayMember(object, "notes", facts.Notes);
+
+    const JsonValue* stateVariables = object.Find("state_variables");
+
+    if (stateVariables != nullptr && stateVariables->IsArray())
+    {
+        for (const auto& item : stateVariables->GetArray())
+        {
+            if (!item.IsObject())
+            {
+                continue;
+            }
+
+            ObfuscationStateVariable variable;
+            ParseObfuscationStateVariable(item, variable);
+            facts.StateVariables.push_back(std::move(variable));
+        }
+    }
+
+    const JsonValue* dispatchers = object.Find("dispatchers");
+
+    if (dispatchers != nullptr && dispatchers->IsArray())
+    {
+        for (const auto& item : dispatchers->GetArray())
+        {
+            if (!item.IsObject())
+            {
+                continue;
+            }
+
+            ObfuscationDispatcher dispatcher;
+            ParseObfuscationDispatcher(item, dispatcher);
+            facts.Dispatchers.push_back(std::move(dispatcher));
+        }
+    }
+
+    const JsonValue* opaquePredicates = object.Find("opaque_predicates");
+
+    if (opaquePredicates != nullptr && opaquePredicates->IsArray())
+    {
+        for (const auto& item : opaquePredicates->GetArray())
+        {
+            if (!item.IsObject())
+            {
+                continue;
+            }
+
+            OpaquePredicateFact predicate;
+            ParseOpaquePredicateFact(item, predicate);
+            facts.OpaquePredicates.push_back(std::move(predicate));
+        }
+    }
+
+    const JsonValue* substitutionIdioms = object.Find("substitution_idioms");
+
+    if (substitutionIdioms != nullptr && substitutionIdioms->IsArray())
+    {
+        for (const auto& item : substitutionIdioms->GetArray())
+        {
+            if (!item.IsObject())
+            {
+                continue;
+            }
+
+            SubstitutionIdiomFact idiom;
+            ParseSubstitutionIdiomFact(item, idiom);
+            facts.SubstitutionIdioms.push_back(std::move(idiom));
+        }
+    }
+
+    return true;
+}
+
 bool ParseControlFlowRegion(const JsonValue& object, ControlFlowRegion& region)
 {
     TryGetString(object, "kind", region.Kind);
@@ -1746,6 +2033,7 @@ JsonValue ToJson(const AnalyzeRequest& request)
     object.Set("value_merges", valueMerges);
     object.Set("ir_values", irValues);
     object.Set("block_value_states", blockValueStates);
+    object.Set("obfuscation", ToJson(request.Facts.Obfuscation));
     object.Set("control_flow", controlFlow);
     object.Set("abi", ToJson(request.Facts.Abi));
     object.Set("type_hints", typeHints);
@@ -2229,6 +2517,13 @@ bool ParseAnalyzeRequest(const std::string& text, AnalyzeRequest& request, std::
             ParseBlockValueState(item, state);
             request.Facts.BlockValueStates.push_back(state);
         }
+    }
+
+    const JsonValue* obfuscation = object.Find("obfuscation");
+
+    if (obfuscation != nullptr && obfuscation->IsObject())
+    {
+        ParseObfuscationFacts(*obfuscation, request.Facts.Obfuscation);
     }
 
     const JsonValue* controlFlow = object.Find("control_flow");

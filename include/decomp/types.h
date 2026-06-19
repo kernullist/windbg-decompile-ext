@@ -246,6 +246,72 @@ struct BlockValueState
     double Confidence = 0.0;
 };
 
+struct ObfuscationStateVariable
+{
+    std::string Name;
+    std::string Storage;
+    uint64_t FirstSite = 0;
+    uint32_t ReadCount = 0;
+    uint32_t WriteCount = 0;
+    double Confidence = 0.0;
+};
+
+struct RecoveredControlFlowEdge
+{
+    std::string SourceBlock;
+    std::string TargetBlock;
+    std::string Condition;
+    std::string StateValue;
+    std::string Evidence;
+    bool Conditional = false;
+    double Confidence = 0.0;
+};
+
+struct ObfuscationDispatcher
+{
+    std::string HeaderBlock;
+    std::string Kind;
+    std::string StateVariable;
+    std::vector<std::string> DispatcherBlocks;
+    std::vector<std::string> OriginalBlockCandidates;
+    std::vector<RecoveredControlFlowEdge> RecoveredEdges;
+    std::string Evidence;
+    double Confidence = 0.0;
+};
+
+struct OpaquePredicateFact
+{
+    uint64_t Site = 0;
+    std::string BlockId;
+    std::string Predicate;
+    std::string ConstantResult;
+    std::string DeadTargetBlock;
+    std::string LiveTargetBlock;
+    std::string Evidence;
+    double Confidence = 0.0;
+};
+
+struct SubstitutionIdiomFact
+{
+    uint64_t Site = 0;
+    std::string BlockId;
+    std::string OriginalExpression;
+    std::string SimplifiedExpression;
+    std::string Pattern;
+    std::string Evidence;
+    double Confidence = 0.0;
+};
+
+struct ObfuscationFacts
+{
+    std::vector<ObfuscationStateVariable> StateVariables;
+    std::vector<ObfuscationDispatcher> Dispatchers;
+    std::vector<OpaquePredicateFact> OpaquePredicates;
+    std::vector<SubstitutionIdiomFact> SubstitutionIdioms;
+    std::vector<std::string> Notes;
+    double Confidence = 0.0;
+};
+
 struct ControlFlowRegion
 {
     std::string Kind;
@@ -525,6 +591,7 @@ struct AnalysisFacts
     std::vector<ValueMerge> ValueMerges;
     std::vector<IrValue> IrValues;
     std::vector<BlockValueState> BlockValueStates;
+    ObfuscationFacts Obfuscation;
     std::vector<ControlFlowRegion> ControlFlow;
     AbiFacts Abi;
     std::vector<TypeRecoveryHint> TypeHints;

@@ -5716,6 +5716,1185 @@ const NormalizedCondition* FindConditionForBlock(const std::vector<NormalizedCon
     return nullptr;
 }
 
+const BasicBlock* FindBlockById(const std::vector<BasicBlock>& blocks, const std::string& blockId)
+{
+    for (const BasicBlock& block : blocks)
+    {
+        if (block.Id == blockId)
+        {
+            return &block;
+        }
+    }
+
+    return nullptr;
+}
+
+const DisassembledInstruction* FindInstructionByAddress(const std::vector<DisassembledInstruction>& instructions, uint64_t address)
+{
+    for (const DisassembledInstruction& instruction : instructions)
+    {
+        if (instruction.Address == address)
+        {
+            return &instruction;
+        }
+    }
+
+    return nullptr;
+}
+
+bool OperandMatchesObfuscationVariable(const std::string& operand, const std::string& variable)
+{
+    const std::string strippedOperand = StripPointerDecorators(operand);
+    const std::string strippedVariable = StripPointerDecorators(variable);
+    const std::string operandRegister = NormalizeRegisterAlias(strippedOperand);
+    const std::string variableRegister = NormalizeRegisterAlias(strippedVariable);
+
+    if (!operandRegister.empty() && !variableRegister.empty())
+    {
+        return operandRegister == variableRegister;
+    }
+
+    if (strippedOperand == strippedVariable)
+    {
+        return true;
+    }
+
+    if (IsRegisterName(strippedVariable))
+    {
+        const std::vector<std::string> registers = ExtractOperandRegisterTokens(strippedOperand);
+        return registers.size() == 1 && registers.front() == strippedVariable;
+    }
+
+    return false;
+}
+
+bool TryNormalizeStateValue(const std::string& expression, std::string& normalized)
+{
+    int64_t signedValue = 0;
+
+    if (!TryParseSignedValue(StripPointerDecorators(expression), signedValue))
+    {
+        return false;
+    }
+
+    normalized = signedValue < 0
+        ? HexS64(signedValue)
+        : HexU64(static_cast<uint64_t>(signedValue));
+    return true;
+}
+
+std::string FormatStateValue(uint64_t value)
+{
+    return HexU64(value);
+}
+
+std::string FormatStateValue(int64_t value)
+{
+    return value < 0
+        ? HexS64(value)
+        : HexU64(static_cast<uint64_t>(value));
+}
+
+bool IsEqualityBranchMnemonic(const std::string& mnemonic)
+{
+    const std::string lower = ToLowerAscii(TrimCopy(mnemonic));
+    return lower == "je" || lower == "jz";
+}
+
+bool IsInequalityBranchMnemonic(const std::string& mnemonic)
+{
+    const std::string lower = ToLowerAscii(TrimCopy(mnemonic));
+    return lower == "jne" || lower == "jnz";
+}
+
+std::string NormalizeStateVariableExpression(const std::string& expression)
+{
+    const std::vector<std::string> registers = ExtractOperandRegisterTokens(expression);
+
+    if (registers.size() == 1)
+    {
+        return registers.front();
+    }
+
+    const std::string stripped = StripPointerDecorators(expression);
+    const std::string canonical = NormalizeRegisterAlias(stripped);
+    return canonical.empty() ? stripped : canonical;
+}
+
+std::string FormatConditionOperand(const std::string& operand)
+{
+    const std::string stripped = StripPointerDecorators(operand);
+    const std::string canonical = NormalizeRegisterAlias(stripped);
+    return canonical.empty() ? stripped : canonical;
+}
+
+std::vector<const DisassembledInstruction*> GetBlockInstructions(
+    const BasicBlock& block,
+    const std::vector<DisassembledInstruction>& instructions)
+{
+    std::vector<const DisassembledInstruction*> blockInstructions;
+
+    for (const uint64_t address : block.InstructionAddresses)
+    {
+        const DisassembledInstruction* instruction = FindInstructionByAddress(instructions, address);
+
+        if (instruction != nullptr)
+        {
+            blockInstructions.push_back(instruction);
+        }
+    }
+
+    return blockInstructions;
+}
+
+std::vector<std::string> CollectStateCompareVariables(
+    const BasicBlock& block,
+    const std::vector<DisassembledInstruction>& instructions)
+{
+    std::vector<std::string> variables;
+
+    for (const DisassembledInstruction* instruction : GetBlockInstructions(block, instructions))
+    {
+        if (instruction == nullptr || instruction->Mnemonic != "cmp")
+        {
+            continue;
+        }
+
+        const std::vector<std::string> operands = SplitOperands(instruction->OperandText);
+
+        if (operands.size() < 2)
+        {
+            continue;
+        }
+
+        std::string ignored;
+
+        if (TryNormalizeStateValue(operands[1], ignored))
+        {
+            const std::string operand = StripPointerDecorators(operands[0]);
+            const std::string canonical = NormalizeRegisterAlias(operand);
+            variables.push_back(canonical.empty() ? operand : canonical);
+        }
+        else if (TryNormalizeStateValue(operands[0], ignored))
+        {
+            const std::string operand = StripPointerDecorators(operands[1]);
+            const std::string canonical = NormalizeRegisterAlias(operand);
+            variables.push_back(canonical.empty() ? operand : canonical);
+        }
+    }
+
+    std::sort(variables.begin(), variables.end());
+    variables.erase(std::unique(variables.begin(), variables.end()), variables.end());
+    return variables;
+}
+
+bool SwitchInfoBelongsToBlock(const SwitchInfo& switchInfo, const BasicBlock& block)
+{
+    return switchInfo.Site >= block.StartAddress && switchInfo.Site < block.EndAddress;
+}
+
+std::vector<const SwitchInfo*> CollectSwitchesForDispatcherHeader(
+    const std::vector<BasicBlock>& blocks,
+    const std::vector<SwitchInfo>& switches,
+    const BasicBlock& header)
+{
+    std::vector<const SwitchInfo*> results;
+
+    for (const SwitchInfo& switchInfo : switches)
+    {
+        if (SwitchInfoBelongsToBlock(switchInfo, header))
+        {
+            results.push_back(&switchInfo);
+            continue;
+        }
+
+        for (const std::string& successor : header.Successors)
+        {
+            const BasicBlock* successorBlock = FindBlockById(blocks, successor);
+
+            if (successorBlock != nullptr && SwitchInfoBelongsToBlock(switchInfo, *successorBlock))
+            {
+                results.push_back(&switchInfo);
+                break;
+            }
+        }
+    }
+
+    return results;
+}
+
+std::vector<std::string> CollectStateSwitchVariables(
+    const std::vector<BasicBlock>& blocks,
+    const std::vector<SwitchInfo>& switches,
+    const BasicBlock& header)
+{
+    std::vector<std::string> variables;
+    const std::vector<const SwitchInfo*> headerSwitches = CollectSwitchesForDispatcherHeader(blocks, switches, header);
+
+    for (const SwitchInfo* switchInfo : headerSwitches)
+    {
+        if (switchInfo == nullptr || switchInfo->IndexExpression.empty())
+        {
+            continue;
+        }
+
+        const std::string variable = NormalizeStateVariableExpression(switchInfo->IndexExpression);
+
+        if (!variable.empty())
+        {
+            variables.push_back(variable);
+        }
+    }
+
+    std::sort(variables.begin(), variables.end());
+    variables.erase(std::unique(variables.begin(), variables.end()), variables.end());
+    return variables;
+}
+
+void AppendUniqueStrings(std::vector<std::string>& destination, const std::vector<std::string>& source)
+{
+    for (const std::string& value : source)
+    {
+        if (!value.empty() && std::find(destination.begin(), destination.end(), value) == destination.end())
+        {
+            destination.push_back(value);
+        }
+    }
+}
+
+bool TryExtractStateCompareConstant(
+    const BasicBlock& block,
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::string& stateVariable,
+    std::string& stateValue)
+{
+    for (const DisassembledInstruction* instruction : GetBlockInstructions(block, instructions))
+    {
+        if (instruction == nullptr || instruction->Mnemonic != "cmp")
+        {
+            continue;
+        }
+
+        const std::vector<std::string> operands = SplitOperands(instruction->OperandText);
+
+        if (operands.size() < 2)
+        {
+            continue;
+        }
+
+        if (OperandMatchesObfuscationVariable(operands[0], stateVariable)
+            && TryNormalizeStateValue(operands[1], stateValue))
+        {
+            return true;
+        }
+
+        if (OperandMatchesObfuscationVariable(operands[1], stateVariable)
+            && TryNormalizeStateValue(operands[0], stateValue))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool BlockContainsStateCompare(
+    const std::vector<BasicBlock>& blocks,
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::string& blockId,
+    const std::string& stateVariable)
+{
+    const BasicBlock* block = FindBlockById(blocks, blockId);
+    std::string ignored;
+    return block != nullptr && TryExtractStateCompareConstant(*block, instructions, stateVariable, ignored);
+}
+
+uint64_t FindFirstAssignmentSite(
+    const std::vector<IrValue>& values,
+    const std::string& target)
+{
+    uint64_t firstSite = 0;
+
+    for (const IrValue& value : values)
+    {
+        if (!OperandMatchesObfuscationVariable(value.Target, target))
+        {
+            continue;
+        }
+
+        if (firstSite == 0 || value.DefSite < firstSite)
+        {
+            firstSite = value.DefSite;
+        }
+    }
+
+    return firstSite;
+}
+
+uint32_t CountAssignmentsToTargetInDistinctBlocks(
+    const std::vector<IrValue>& values,
+    const std::string& target)
+{
+    std::set<std::string> blockIds;
+
+    for (const IrValue& value : values)
+    {
+        if (OperandMatchesObfuscationVariable(value.Target, target) && !value.BlockId.empty())
+        {
+            blockIds.insert(value.BlockId);
+        }
+    }
+
+    return static_cast<uint32_t>(blockIds.size());
+}
+
+uint32_t CountReadsOfTargetInBlocks(
+    const std::vector<BasicBlock>& blocks,
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::set<std::string>& blockIds,
+    const std::string& target)
+{
+    uint32_t reads = 0;
+
+    for (const std::string& blockId : blockIds)
+    {
+        const BasicBlock* block = FindBlockById(blocks, blockId);
+
+        if (block == nullptr)
+        {
+            continue;
+        }
+
+        for (const DisassembledInstruction* instruction : GetBlockInstructions(*block, instructions))
+        {
+            if (instruction == nullptr)
+            {
+                continue;
+            }
+
+            const std::vector<std::string> operands = SplitOperands(instruction->OperandText);
+
+            for (const std::string& operand : operands)
+            {
+                if (OperandMatchesObfuscationVariable(operand, target))
+                {
+                    ++reads;
+                    break;
+                }
+            }
+        }
+    }
+
+    return reads;
+}
+
+struct ObfuscationStateTarget
+{
+    std::string TargetBlock;
+    std::string Condition;
+    std::string Evidence;
+    double Confidence = 0.0;
+};
+
+std::unordered_map<std::string, ObfuscationStateTarget> BuildStateTargetMapForDispatcher(
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::vector<BasicBlock>& blocks,
+    const std::vector<NormalizedCondition>& conditions,
+    const std::string& headerBlockId,
+    const std::string& stateVariable,
+    std::set<std::string>& dispatcherBlocks)
+{
+    std::unordered_map<std::string, ObfuscationStateTarget> targets;
+    std::string currentBlockId = headerBlockId;
+
+    for (size_t depth = 0; depth < 12 && !currentBlockId.empty(); ++depth)
+    {
+        if (!dispatcherBlocks.insert(currentBlockId).second)
+        {
+            break;
+        }
+
+        const BasicBlock* block = FindBlockById(blocks, currentBlockId);
+
+        if (block == nullptr)
+        {
+            break;
+        }
+
+        std::string stateValue;
+
+        if (!TryExtractStateCompareConstant(*block, instructions, stateVariable, stateValue))
+        {
+            break;
+        }
+
+        const NormalizedCondition* condition = FindConditionForBlock(conditions, currentBlockId);
+
+        if (condition == nullptr)
+        {
+            break;
+        }
+
+        std::string caseTarget;
+        std::string nextDispatcher;
+
+        if (IsEqualityBranchMnemonic(condition->BranchMnemonic))
+        {
+            caseTarget = condition->TrueTargetBlock;
+            nextDispatcher = condition->FalseTargetBlock;
+        }
+        else if (IsInequalityBranchMnemonic(condition->BranchMnemonic))
+        {
+            caseTarget = condition->FalseTargetBlock;
+            nextDispatcher = condition->TrueTargetBlock;
+        }
+        else
+        {
+            break;
+        }
+
+        if (!caseTarget.empty())
+        {
+            ObfuscationStateTarget target;
+            target.TargetBlock = caseTarget;
+            target.Condition = condition->Expression;
+            target.Evidence = currentBlockId + " compares " + stateVariable + " with " + stateValue;
+            target.Confidence = 0.78;
+            targets[stateValue] = target;
+        }
+
+        if (nextDispatcher.empty()
+            || dispatcherBlocks.find(nextDispatcher) != dispatcherBlocks.end()
+            || !BlockContainsStateCompare(blocks, instructions, nextDispatcher, stateVariable))
+        {
+            break;
+        }
+
+        currentBlockId = nextDispatcher;
+    }
+
+    return targets;
+}
+
+bool MergeSwitchStateTargetMapForDispatcher(
+    const std::vector<BasicBlock>& blocks,
+    const std::vector<SwitchInfo>& switches,
+    const BasicBlock& header,
+    const std::string& stateVariable,
+    std::set<std::string>& dispatcherBlocks,
+    std::unordered_map<std::string, ObfuscationStateTarget>& targets)
+{
+    bool matched = false;
+    const std::vector<const SwitchInfo*> headerSwitches = CollectSwitchesForDispatcherHeader(blocks, switches, header);
+
+    for (const SwitchInfo* switchInfo : headerSwitches)
+    {
+        if (switchInfo == nullptr || switchInfo->CaseTargets.empty())
+        {
+            continue;
+        }
+
+        const std::string switchStateVariable = NormalizeStateVariableExpression(switchInfo->IndexExpression);
+
+        if (!OperandMatchesObfuscationVariable(switchStateVariable, stateVariable))
+        {
+            continue;
+        }
+
+        const std::string switchBlockId = FindBlockContainingAddress(blocks, switchInfo->Site);
+
+        if (!switchBlockId.empty())
+        {
+            dispatcherBlocks.insert(switchBlockId);
+        }
+
+        matched = true;
+
+        for (size_t index = 0; index < switchInfo->CaseTargets.size(); ++index)
+        {
+            const std::string targetBlock = FindBlockContainingAddress(blocks, switchInfo->CaseTargets[index]);
+
+            if (targetBlock.empty())
+            {
+                continue;
+            }
+
+            const int64_t stateValueInt = switchInfo->RangeKnown
+                ? switchInfo->RangeMin + static_cast<int64_t>(index)
+                : static_cast<int64_t>(index);
+            const std::string stateValue = FormatStateValue(stateValueInt);
+
+            if (targets.find(stateValue) != targets.end())
+            {
+                continue;
+            }
+
+            ObfuscationStateTarget target;
+            target.TargetBlock = targetBlock;
+            target.Condition = stateVariable + " == " + stateValue;
+            target.Evidence = switchBlockId + " switches " + stateVariable + " case " + stateValue;
+            target.Confidence = 0.82;
+            targets[stateValue] = target;
+        }
+    }
+
+    return matched;
+}
+
+double ComputeDominatorCoverage(
+    const std::unordered_map<std::string, std::set<std::string>>& dominators,
+    const std::vector<BasicBlock>& blocks,
+    const std::string& dominatorBlock)
+{
+    if (blocks.empty() || dominatorBlock.empty())
+    {
+        return 0.0;
+    }
+
+    size_t dominated = 0;
+
+    for (const BasicBlock& block : blocks)
+    {
+        const auto domIt = dominators.find(block.Id);
+
+        if (domIt != dominators.end() && domIt->second.find(dominatorBlock) != domIt->second.end())
+        {
+            ++dominated;
+        }
+    }
+
+    return static_cast<double>(dominated) / static_cast<double>(blocks.size());
+}
+
+bool HasBackEdgeToBlock(
+    const std::vector<BasicBlock>& blocks,
+    const std::unordered_map<std::string, size_t>& blockOrder,
+    const std::vector<std::string>& predecessors,
+    const std::string& targetBlock)
+{
+    const auto targetOrderIt = blockOrder.find(targetBlock);
+
+    if (targetOrderIt == blockOrder.end())
+    {
+        return false;
+    }
+
+    for (const std::string& predecessor : predecessors)
+    {
+        const auto predecessorOrderIt = blockOrder.find(predecessor);
+
+        if (predecessorOrderIt == blockOrder.end() || predecessorOrderIt->second <= targetOrderIt->second)
+        {
+            continue;
+        }
+
+        const BasicBlock* block = FindBlockById(blocks, predecessor);
+
+        if (block != nullptr && std::find(block->Successors.begin(), block->Successors.end(), targetBlock) != block->Successors.end())
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+struct StateEvalValue
+{
+    bool Known = false;
+    uint64_t Value = 0;
+};
+
+struct EvaluatedStateTransition
+{
+    std::string StateValue;
+    std::string Condition;
+    std::string Evidence;
+    bool Conditional = false;
+    double Confidence = 0.0;
+};
+
+std::string BuildStateEvalTargetName(const std::string& operand)
+{
+    if (operand.find('[') != std::string::npos)
+    {
+        return StripPointerDecorators(operand);
+    }
+
+    return NormalizeStateVariableExpression(operand);
+}
+
+bool TryGetStateEvalValue(
+    const std::string& operand,
+    const std::unordered_map<std::string, uint64_t>& values,
+    uint64_t& value)
+{
+    int64_t immediate = 0;
+
+    if (TryParseSignedValue(StripPointerDecorators(operand), immediate))
+    {
+        value = static_cast<uint64_t>(immediate);
+        return true;
+    }
+
+    const std::string key = BuildStateEvalTargetName(operand);
+    const auto it = values.find(key);
+
+    if (it == values.end())
+    {
+        return false;
+    }
+
+    value = it->second;
+    return true;
+}
+
+bool TryEvaluateLeaStateValue(
+    const std::string& operand,
+    const std::unordered_map<std::string, uint64_t>& values,
+    uint64_t& value)
+{
+    std::string expression;
+
+    if (!TryExtractBracketExpression(operand, expression))
+    {
+        return false;
+    }
+
+    MemoryAccess access;
+    ParseMemoryExpression(expression, access);
+
+    uint64_t result = 0;
+
+    if (!access.BaseRegister.empty())
+    {
+        const auto baseIt = values.find(access.BaseRegister);
+
+        if (baseIt == values.end())
+        {
+            return false;
+        }
+
+        result += baseIt->second;
+    }
+
+    if (!access.IndexRegister.empty())
+    {
+        const auto indexIt = values.find(access.IndexRegister);
+
+        if (indexIt == values.end())
+        {
+            return false;
+        }
+
+        result += indexIt->second * static_cast<uint64_t>((std::max)(access.Scale, 1U));
+    }
+
+    if (!access.Displacement.empty())
+    {
+        int64_t displacement = 0;
+
+        if (!TryParseSignedValue(access.Displacement, displacement))
+        {
+            return false;
+        }
+
+        result += static_cast<uint64_t>(displacement);
+    }
+
+    value = result;
+    return true;
+}
+
+StateEvalValue EvaluateStateAssignment(
+    const DisassembledInstruction& instruction,
+    const std::vector<std::string>& operands,
+    const std::unordered_map<std::string, uint64_t>& values)
+{
+    StateEvalValue result;
+    const std::string mnemonic = ToLowerAscii(TrimCopy(instruction.Mnemonic));
+
+    if (operands.empty())
+    {
+        return result;
+    }
+
+    uint64_t left = 0;
+    uint64_t right = 0;
+
+    if (mnemonic == "mov" || mnemonic == "movzx" || mnemonic == "movsx" || mnemonic == "movsxd")
+    {
+        if (operands.size() >= 2 && TryGetStateEvalValue(operands[1], values, result.Value))
+        {
+            result.Known = true;
+        }
+
+        return result;
+    }
+
+    if (mnemonic == "lea")
+    {
+        if (operands.size() >= 2 && TryEvaluateLeaStateValue(operands[1], values, result.Value))
+        {
+            result.Known = true;
+        }
+
+        return result;
+    }
+
+    if (mnemonic == "xor" && operands.size() >= 2)
+    {
+        const std::string leftOperand = StripPointerDecorators(operands[0]);
+        const std::string rightOperand = StripPointerDecorators(operands[1]);
+
+        if (!leftOperand.empty() && leftOperand == rightOperand && IsWholeRegisterZeroIdiomOperand(operands[0]))
+        {
+            result.Known = true;
+            result.Value = 0;
+            return result;
+        }
+    }
+
+    if (operands.size() >= 2
+        && TryGetStateEvalValue(operands[0], values, left)
+        && TryGetStateEvalValue(operands[1], values, right))
+    {
+        if (mnemonic == "add")
+        {
+            result.Value = left + right;
+            result.Known = true;
+        }
+        else if (mnemonic == "sub")
+        {
+            result.Value = left - right;
+            result.Known = true;
+        }
+        else if (mnemonic == "xor")
+        {
+            result.Value = left ^ right;
+            result.Known = true;
+        }
+        else if (mnemonic == "or")
+        {
+            result.Value = left | right;
+            result.Known = true;
+        }
+        else if (mnemonic == "and")
+        {
+            result.Value = left & right;
+            result.Known = true;
+        }
+        else if (mnemonic == "shl" && right < 64)
+        {
+            result.Value = left << right;
+            result.Known = true;
+        }
+        else if (mnemonic == "shr" && right < 64)
+        {
+            result.Value = left >> right;
+            result.Known = true;
+        }
+        else if (mnemonic == "sar" && right < 64)
+        {
+            result.Value = static_cast<uint64_t>(static_cast<int64_t>(left) >> right);
+            result.Known = true;
+        }
+    }
+
+    if (operands.size() == 1 && TryGetStateEvalValue(operands[0], values, left))
+    {
+        if (mnemonic == "inc")
+        {
+            result.Value = left + 1ULL;
+            result.Known = true;
+        }
+        else if (mnemonic == "dec")
+        {
+            result.Value = left - 1ULL;
+            result.Known = true;
+        }
+        else if (mnemonic == "not")
+        {
+            result.Value = ~left;
+            result.Known = true;
+        }
+        else if (mnemonic == "neg")
+        {
+            result.Value = static_cast<uint64_t>(-static_cast<int64_t>(left));
+            result.Known = true;
+        }
+    }
+
+    return result;
+}
+
+std::vector<EvaluatedStateTransition> EvaluateStateTransitionsInBlock(
+    const BasicBlock& block,
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::string& stateVariable)
+{
+    std::unordered_map<std::string, uint64_t> values;
+    std::vector<EvaluatedStateTransition> pendingConditionalTransitions;
+    ConditionalOperandPattern lastCondition;
+    bool finalStateKnown = false;
+    uint64_t finalStateValue = 0;
+
+    for (const DisassembledInstruction* instruction : GetBlockInstructions(block, instructions))
+    {
+        if (instruction == nullptr)
+        {
+            continue;
+        }
+
+        const std::vector<std::string> operands = SplitOperands(instruction->OperandText);
+        const std::string mnemonic = ToLowerAscii(TrimCopy(instruction->Mnemonic));
+
+        if ((mnemonic == "cmp" || mnemonic == "test") && operands.size() >= 2)
+        {
+            lastCondition.Kind = mnemonic;
+            lastCondition.Left = FormatConditionOperand(operands[0]);
+            lastCondition.Right = FormatConditionOperand(operands[1]);
+            lastCondition.RawLeftKey = StripPointerDecorators(operands[0]);
+            lastCondition.RawRightKey = StripPointerDecorators(operands[1]);
+            lastCondition.Valid = true;
+        }
+        else if (InstructionWritesFlags(*instruction) && !IsConditionalMoveMnemonic(mnemonic))
+        {
+            lastCondition.Valid = false;
+        }
+
+        if (instruction->IsCall)
+        {
+            values.clear();
+            pendingConditionalTransitions.clear();
+            finalStateKnown = false;
+            lastCondition.Valid = false;
+            continue;
+        }
+
+        if (!InstructionWritesDestinationOperand(*instruction, operands))
+        {
+            continue;
+        }
+
+        const std::string destination = BuildStateEvalTargetName(operands[0]);
+        const bool writesState = OperandMatchesObfuscationVariable(destination, stateVariable);
+
+        if (destination.empty())
+        {
+            continue;
+        }
+
+        if (IsConditionalMoveMnemonic(mnemonic))
+        {
+            uint64_t selectedValue = 0;
+            const auto currentIt = values.find(destination);
+            const std::string condition = BuildConditionExpressionForSelect(lastCondition, CmovConditionSuffixToBranch(mnemonic));
+
+            if (writesState
+                && operands.size() >= 2
+                && currentIt != values.end()
+                && TryGetStateEvalValue(operands[1], values, selectedValue)
+                && !condition.empty())
+            {
+                EvaluatedStateTransition selected;
+                selected.StateValue = FormatStateValue(selectedValue);
+                selected.Condition = condition;
+                selected.Evidence = HexU64(instruction->Address) + " selects state " + selected.StateValue;
+                selected.Conditional = true;
+                selected.Confidence = 0.82;
+
+                EvaluatedStateTransition retained;
+                retained.StateValue = FormatStateValue(currentIt->second);
+                retained.Condition = "!(" + condition + ")";
+                retained.Evidence = HexU64(instruction->Address) + " retains state " + retained.StateValue;
+                retained.Conditional = true;
+                retained.Confidence = 0.78;
+
+                pendingConditionalTransitions.clear();
+                pendingConditionalTransitions.push_back(std::move(selected));
+                pendingConditionalTransitions.push_back(std::move(retained));
+                finalStateKnown = false;
+                values.erase(destination);
+                continue;
+            }
+
+            values.erase(destination);
+
+            if (writesState)
+            {
+                pendingConditionalTransitions.clear();
+                finalStateKnown = false;
+            }
+
+            continue;
+        }
+
+        const StateEvalValue value = EvaluateStateAssignment(*instruction, operands, values);
+
+        if (value.Known)
+        {
+            values[destination] = value.Value;
+        }
+        else
+        {
+            values.erase(destination);
+        }
+
+        if (writesState)
+        {
+            pendingConditionalTransitions.clear();
+            finalStateKnown = value.Known;
+            finalStateValue = value.Value;
+        }
+    }
+
+    if (!pendingConditionalTransitions.empty())
+    {
+        return pendingConditionalTransitions;
+    }
+
+    if (finalStateKnown)
+    {
+        EvaluatedStateTransition transition;
+        transition.StateValue = FormatStateValue(finalStateValue);
+        transition.Evidence = block.Id + " evaluates state " + transition.StateValue;
+        transition.Conditional = false;
+        transition.Confidence = 0.82;
+        return { transition };
+    }
+
+    return {};
+}
+
+std::vector<RecoveredControlFlowEdge> RecoverObfuscationEdges(
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::vector<BasicBlock>& blocks,
+    const std::vector<std::string>& predecessors,
+    const std::set<std::string>& dispatcherBlocks,
+    const std::string& stateVariable,
+    const std::unordered_map<std::string, ObfuscationStateTarget>& stateTargets)
+{
+    std::vector<RecoveredControlFlowEdge> edges;
+    std::set<std::string> seen;
+
+    for (const std::string& predecessor : predecessors)
+    {
+        if (dispatcherBlocks.find(predecessor) != dispatcherBlocks.end())
+        {
+            continue;
+        }
+
+        const BasicBlock* predecessorBlock = FindBlockById(blocks, predecessor);
+
+        if (predecessorBlock == nullptr)
+        {
+            continue;
+        }
+
+        const std::vector<EvaluatedStateTransition> transitions = EvaluateStateTransitionsInBlock(*predecessorBlock, instructions, stateVariable);
+
+        for (const EvaluatedStateTransition& transition : transitions)
+        {
+            if (transition.StateValue.empty())
+            {
+                continue;
+            }
+
+            const auto targetIt = stateTargets.find(transition.StateValue);
+
+            if (targetIt == stateTargets.end() || targetIt->second.TargetBlock.empty())
+            {
+                continue;
+            }
+
+            const std::string seenKey = predecessor
+                + "\n"
+                + targetIt->second.TargetBlock
+                + "\n"
+                + transition.StateValue
+                + "\n"
+                + transition.Condition;
+
+            if (!seen.insert(seenKey).second)
+            {
+                continue;
+            }
+
+            RecoveredControlFlowEdge edge;
+            edge.SourceBlock = predecessor;
+            edge.TargetBlock = targetIt->second.TargetBlock;
+            edge.Condition = transition.Condition.empty() ? targetIt->second.Condition : transition.Condition;
+            edge.StateValue = transition.StateValue;
+            edge.Evidence = "state "
+                + stateVariable
+                + "="
+                + transition.StateValue
+                + "; "
+                + transition.Evidence
+                + "; "
+                + targetIt->second.Evidence;
+            edge.Conditional = transition.Conditional;
+            edge.Confidence = Clamp01(0.64 + (transition.Confidence * 0.18) + (targetIt->second.Confidence * 0.18));
+            edges.push_back(std::move(edge));
+        }
+    }
+
+    return edges;
+}
+
+ObfuscationFacts AnalyzeObfuscationFacts(
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::vector<BasicBlock>& blocks,
+    const std::vector<IrValue>& irValues,
+    const std::vector<BlockValueState>& blockValueStates,
+    const std::vector<NormalizedCondition>& conditions,
+    const std::vector<SwitchInfo>& switches)
+{
+    (void)blockValueStates;
+    ObfuscationFacts facts;
+
+    if (blocks.size() < 5)
+    {
+        return facts;
+    }
+
+    const std::unordered_map<std::string, std::vector<std::string>> predecessors = BuildBlockPredecessors(blocks);
+    const std::unordered_map<std::string, std::set<std::string>> dominators = BuildDominatorSets(blocks);
+    const std::unordered_map<std::string, size_t> blockOrder = BuildBlockOrder(blocks);
+    double bestConfidence = 0.0;
+
+    for (const BasicBlock& header : blocks)
+    {
+        const auto predecessorIt = predecessors.find(header.Id);
+
+        if (predecessorIt == predecessors.end() || predecessorIt->second.size() < 3)
+        {
+            continue;
+        }
+
+        std::vector<std::string> stateVariables = CollectStateCompareVariables(header, instructions);
+        AppendUniqueStrings(stateVariables, CollectStateSwitchVariables(blocks, switches, header));
+
+        if (stateVariables.empty())
+        {
+            continue;
+        }
+
+        for (const std::string& stateVariable : stateVariables)
+        {
+            std::set<std::string> dispatcherBlockSet;
+            std::unordered_map<std::string, ObfuscationStateTarget> stateTargets = BuildStateTargetMapForDispatcher(
+                instructions,
+                blocks,
+                conditions,
+                header.Id,
+                stateVariable,
+                dispatcherBlockSet);
+            const bool hasSwitchDispatcher = MergeSwitchStateTargetMapForDispatcher(
+                blocks,
+                switches,
+                header,
+                stateVariable,
+                dispatcherBlockSet,
+                stateTargets);
+
+            if (stateTargets.size() < 2)
+            {
+                facts.Notes.push_back("possible dispatcher " + header.Id + " did not expose enough state targets");
+                continue;
+            }
+
+            const uint32_t writeBlocks = CountAssignmentsToTargetInDistinctBlocks(irValues, stateVariable);
+            const bool hasBackEdge = HasBackEdgeToBlock(blocks, blockOrder, predecessorIt->second, header.Id);
+            const double dominatorCoverage = ComputeDominatorCoverage(dominators, blocks, header.Id);
+            std::vector<RecoveredControlFlowEdge> recoveredEdges = RecoverObfuscationEdges(
+                instructions,
+                blocks,
+                predecessorIt->second,
+                dispatcherBlockSet,
+                stateVariable,
+                stateTargets);
+
+            if (writeBlocks < 3 || recoveredEdges.size() < 2)
+            {
+                facts.Notes.push_back("possible dispatcher " + header.Id + " lacked enough state writes or recovered edges");
+                continue;
+            }
+
+            double confidence = 0.0;
+            confidence += predecessorIt->second.size() >= 3 ? 0.20 : 0.0;
+            confidence += !stateTargets.empty() ? 0.20 : 0.0;
+            confidence += dominatorCoverage >= 0.50 ? 0.15 : 0.0;
+            confidence += writeBlocks >= 3 ? 0.15 : 0.0;
+            confidence += hasBackEdge ? 0.10 : 0.0;
+            confidence += recoveredEdges.size() >= 2 ? 0.10 : 0.0;
+            confidence += dispatcherBlockSet.size() >= 2 ? 0.05 : 0.0;
+            confidence += hasSwitchDispatcher ? 0.10 : 0.0;
+            confidence = Clamp01(confidence);
+
+            if (confidence < 0.55)
+            {
+                facts.Notes.push_back("low-confidence flattening candidate at " + header.Id);
+                continue;
+            }
+
+            ObfuscationDispatcher dispatcher;
+            dispatcher.HeaderBlock = header.Id;
+            dispatcher.Kind = hasSwitchDispatcher
+                ? "control_flow_flattening_switch_dispatcher"
+                : "control_flow_flattening_dispatcher";
+            dispatcher.StateVariable = stateVariable;
+            dispatcher.DispatcherBlocks.assign(dispatcherBlockSet.begin(), dispatcherBlockSet.end());
+            dispatcher.OriginalBlockCandidates = predecessorIt->second;
+            dispatcher.RecoveredEdges = std::move(recoveredEdges);
+            dispatcher.Evidence =
+                "fan_in="
+                + std::to_string(predecessorIt->second.size())
+                + "; state_targets="
+                + std::to_string(stateTargets.size())
+                + "; write_blocks="
+                + std::to_string(writeBlocks)
+                + "; dominated_ratio="
+                + std::to_string(dominatorCoverage)
+                + (hasSwitchDispatcher ? "; switch_dispatcher" : "")
+                + (hasBackEdge ? "; back_edge" : "");
+            dispatcher.Confidence = confidence;
+
+            ObfuscationStateVariable variable;
+            variable.Name = stateVariable;
+            variable.Storage = IsRegisterName(stateVariable) ? "register" : "local_or_memory";
+            variable.FirstSite = FindFirstAssignmentSite(irValues, stateVariable);
+            variable.ReadCount = CountReadsOfTargetInBlocks(blocks, instructions, dispatcherBlockSet, stateVariable);
+            variable.WriteCount = writeBlocks;
+            variable.Confidence = Clamp01(confidence - 0.05);
+
+            if (std::find_if(
+                    facts.StateVariables.begin(),
+                    facts.StateVariables.end(),
+                    [&variable](const ObfuscationStateVariable& existing)
+                    {
+                        return existing.Name == variable.Name;
+                    })
+                == facts.StateVariables.end())
+            {
+                facts.StateVariables.push_back(std::move(variable));
+            }
+
+            bestConfidence = (std::max)(bestConfidence, dispatcher.Confidence);
+            facts.Dispatchers.push_back(std::move(dispatcher));
+        }
+    }
+
+    if (!switches.empty() && facts.Dispatchers.empty())
+    {
+        facts.Notes.push_back("switch-like control flow exists but no conservative flattening dispatcher was proven");
+    }
+
+    facts.Confidence = bestConfidence;
+    return facts;
+}
+
 bool TryExtractInductionStep(
     const DisassembledInstruction& instruction,
     std::string& variable,
@@ -7762,6 +8941,113 @@ EvidenceGraphFacts BuildEvidenceGraphFacts(const AnalysisFacts& facts)
         }
     }
 
+    for (size_t index = 0; index < facts.Obfuscation.StateVariables.size(); ++index)
+    {
+        const ObfuscationStateVariable& variable = facts.Obfuscation.StateVariables[index];
+        builder.AddSiteFact(
+            BuildEvidenceIndexedNodeId("obf_state", index),
+            "obfuscation.state_variable",
+            variable.Name + " " + variable.Storage,
+            variable.FirstSite,
+            std::string(),
+            variable.Confidence);
+    }
+
+    for (size_t index = 0; index < facts.Obfuscation.Dispatchers.size(); ++index)
+    {
+        const ObfuscationDispatcher& dispatcher = facts.Obfuscation.Dispatchers[index];
+        const std::string dispatcherNodeId = builder.AddSiteFact(
+            BuildEvidenceIndexedNodeId("obf_dispatcher", index),
+            "obfuscation.dispatcher",
+            dispatcher.Kind + " state=" + dispatcher.StateVariable,
+            0,
+            dispatcher.HeaderBlock,
+            dispatcher.Confidence);
+
+        for (size_t stateIndex = 0; stateIndex < facts.Obfuscation.StateVariables.size(); ++stateIndex)
+        {
+            if (facts.Obfuscation.StateVariables[stateIndex].Name == dispatcher.StateVariable)
+            {
+                builder.AddEdge(BuildEvidenceIndexedNodeId("obf_state", stateIndex), dispatcherNodeId, "read_by", dispatcher.Confidence);
+                break;
+            }
+        }
+
+        for (const std::string& block : dispatcher.DispatcherBlocks)
+        {
+            if (!block.empty())
+            {
+                builder.AddEdge(dispatcherNodeId, BuildEvidenceBlockNodeId(block), "dispatcher_block", dispatcher.Confidence);
+            }
+        }
+
+        for (const std::string& block : dispatcher.OriginalBlockCandidates)
+        {
+            if (!block.empty())
+            {
+                builder.AddEdge(dispatcherNodeId, BuildEvidenceBlockNodeId(block), "original_block_candidate", dispatcher.Confidence);
+            }
+        }
+
+        for (size_t edgeIndex = 0; edgeIndex < dispatcher.RecoveredEdges.size(); ++edgeIndex)
+        {
+            const RecoveredControlFlowEdge& recoveredEdge = dispatcher.RecoveredEdges[edgeIndex];
+            const std::string edgeNodeId = builder.AddSiteFact(
+                BuildEvidenceIndexedNodeId("obf_edge_" + std::to_string(index), edgeIndex),
+                "obfuscation.recovered_edge",
+                recoveredEdge.SourceBlock + "->" + recoveredEdge.TargetBlock + " state=" + recoveredEdge.StateValue,
+                0,
+                recoveredEdge.SourceBlock,
+                recoveredEdge.Confidence);
+
+            builder.AddEdge(dispatcherNodeId, edgeNodeId, "recovers_edge", recoveredEdge.Confidence);
+
+            if (!recoveredEdge.SourceBlock.empty())
+            {
+                builder.AddEdge(edgeNodeId, BuildEvidenceBlockNodeId(recoveredEdge.SourceBlock), "from_block", recoveredEdge.Confidence);
+            }
+
+            if (!recoveredEdge.TargetBlock.empty())
+            {
+                builder.AddEdge(edgeNodeId, BuildEvidenceBlockNodeId(recoveredEdge.TargetBlock), "to_block", recoveredEdge.Confidence);
+            }
+        }
+    }
+
+    for (size_t index = 0; index < facts.Obfuscation.OpaquePredicates.size(); ++index)
+    {
+        const OpaquePredicateFact& predicate = facts.Obfuscation.OpaquePredicates[index];
+        const std::string nodeId = builder.AddSiteFact(
+            BuildEvidenceIndexedNodeId("obf_opaque", index),
+            "obfuscation.opaque_predicate",
+            predicate.Predicate + "=" + predicate.ConstantResult,
+            predicate.Site,
+            predicate.BlockId,
+            predicate.Confidence);
+
+        if (!predicate.DeadTargetBlock.empty())
+        {
+            builder.AddEdge(nodeId, BuildEvidenceBlockNodeId(predicate.DeadTargetBlock), "prunes", predicate.Confidence);
+        }
+
+        if (!predicate.LiveTargetBlock.empty())
+        {
+            builder.AddEdge(nodeId, BuildEvidenceBlockNodeId(predicate.LiveTargetBlock), "keeps", predicate.Confidence);
+        }
+    }
+
+    for (size_t index = 0; index < facts.Obfuscation.SubstitutionIdioms.size(); ++index)
+    {
+        const SubstitutionIdiomFact& idiom = facts.Obfuscation.SubstitutionIdioms[index];
+        builder.AddSiteFact(
+            BuildEvidenceIndexedNodeId("obf_substitution", index),
+            "obfuscation.substitution_idiom",
+            idiom.Pattern + " " + idiom.SimplifiedExpression,
+            idiom.Site,
+            idiom.BlockId,
+            idiom.Confidence);
+    }
+
     for (size_t index = 0; index < facts.ControlFlow.size(); ++index)
     {
         const ControlFlowRegion& region = facts.ControlFlow[index];
@@ -8086,6 +9372,13 @@ void RefreshDerivedAnalysisFacts(AnalysisFacts& facts)
         facts.MemoryAccesses,
         facts.RecoveredArguments,
         facts.RecoveredLocals);
+    facts.Obfuscation = AnalyzeObfuscationFacts(
+        facts.Instructions,
+        facts.Blocks,
+        facts.IrValues,
+        facts.BlockValueStates,
+        facts.NormalizedConditions,
+        facts.Switches);
     facts.ControlFlow = AnalyzeControlFlow(facts.Instructions, facts.Blocks, facts.NormalizedConditions, facts.Switches);
     RefreshEvidenceGraph(facts);
 }
@@ -8172,6 +9465,13 @@ AnalysisFacts BuildAnalysisFacts(
     facts.IrValues = CollectIrValues(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
     facts.BlockValueStates = CollectBlockValueStates(facts.Blocks, facts.IrValues);
     facts.NormalizedConditions = CollectNormalizedConditions(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
+    facts.Obfuscation = AnalyzeObfuscationFacts(
+        facts.Instructions,
+        facts.Blocks,
+        facts.IrValues,
+        facts.BlockValueStates,
+        facts.NormalizedConditions,
+        facts.Switches);
     facts.ControlFlow = AnalyzeControlFlow(facts.Instructions, facts.Blocks, facts.NormalizedConditions, facts.Switches);
     facts.Abi = AnalyzeAbiFacts(instructions, facts.MemoryAccesses, facts.StackFrame, entryAddress);
     facts.TypeHints = CollectTypeRecoveryHints(instructions, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
@@ -8375,6 +9675,31 @@ AnalysisFacts BuildAnalysisFacts(
             + ", unconverged="
             + std::to_string(unconvergedBlocks)
             + ")");
+    }
+
+    if (!facts.Obfuscation.Dispatchers.empty()
+        || !facts.Obfuscation.StateVariables.empty()
+        || !facts.Obfuscation.OpaquePredicates.empty()
+        || !facts.Obfuscation.SubstitutionIdioms.empty())
+    {
+        size_t recoveredEdges = 0;
+
+        for (const ObfuscationDispatcher& dispatcher : facts.Obfuscation.Dispatchers)
+        {
+            recoveredEdges += dispatcher.RecoveredEdges.size();
+        }
+
+        facts.Facts.push_back(
+            "obfuscation facts: dispatchers="
+            + std::to_string(facts.Obfuscation.Dispatchers.size())
+            + ", state_variables="
+            + std::to_string(facts.Obfuscation.StateVariables.size())
+            + ", recovered_edges="
+            + std::to_string(recoveredEdges)
+            + ", opaque_predicates="
+            + std::to_string(facts.Obfuscation.OpaquePredicates.size())
+            + ", substitution_idioms="
+            + std::to_string(facts.Obfuscation.SubstitutionIdioms.size()));
     }
 
     if (!facts.NormalizedConditions.empty())

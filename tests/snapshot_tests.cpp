@@ -112,6 +112,32 @@ const decomp::BasicBlock* FindBlockContaining(const decomp::AnalysisFacts& facts
     return nullptr;
 }
 
+bool HasEvidenceNodeKind(const decomp::AnalysisFacts& facts, const std::string& kind)
+{
+    for (const decomp::EvidenceNode& node : facts.EvidenceGraph.Nodes)
+    {
+        if (node.Kind == kind)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+const decomp::ObfuscationDispatcher* FindHighConfidenceDispatcher(const decomp::AnalysisFacts& facts)
+{
+    for (const decomp::ObfuscationDispatcher& dispatcher : facts.Obfuscation.Dispatchers)
+    {
+        if (dispatcher.Confidence >= 0.75)
+        {
+            return &dispatcher;
+        }
+    }
+
+    return nullptr;
+}
+
 bool HasIssueCode(const decomp::VerifyReport& report, const std::string& code)
 {
     for (const decomp::VerificationIssue& issue : report.Issues)
@@ -718,6 +744,222 @@ decomp::AnalysisFacts BuildKnownApiCallFacts()
         instructions);
 }
 
+decomp::AnalysisFacts BuildFlattenedDispatcherFacts()
+{
+    decomp::ModuleInfo module;
+    module.ModuleName = "snapshot";
+    module.ImageName = "snapshot.exe";
+    module.Base = 0x13000;
+    module.Size = 0x1000;
+
+    std::vector<decomp::FunctionRegion> regions = { { 0x13000, 0x13060 } };
+    std::vector<uint8_t> bytes(0x60, 0x90);
+    std::vector<decomp::DisassembledInstruction> instructions;
+    instructions.push_back(MakeInstruction(0x13000, 0x13005, "mov", "eax, 0"));
+    instructions.push_back(MakeBranch(0x13005, 0x13007, "jmp", 0x13040));
+    instructions.push_back(MakeInstruction(0x13010, 0x13013, "add", "edx, 1"));
+    instructions.push_back(MakeInstruction(0x13013, 0x13018, "mov", "eax, 1"));
+    instructions.push_back(MakeBranch(0x13018, 0x1301A, "jmp", 0x13040));
+    instructions.push_back(MakeInstruction(0x13020, 0x13023, "add", "edx, 2"));
+    instructions.push_back(MakeInstruction(0x13023, 0x13028, "mov", "eax, 2"));
+    instructions.push_back(MakeBranch(0x13028, 0x1302A, "jmp", 0x13040));
+    instructions.push_back(MakeInstruction(0x13030, 0x13031, "ret"));
+    instructions.push_back(MakeInstruction(0x13040, 0x13043, "cmp", "eax, 0"));
+    instructions.push_back(MakeBranch(0x13043, 0x13045, "je", 0x13010));
+    instructions.push_back(MakeInstruction(0x13045, 0x13048, "cmp", "eax, 1"));
+    instructions.push_back(MakeBranch(0x13048, 0x1304A, "je", 0x13020));
+    instructions.push_back(MakeInstruction(0x1304A, 0x1304D, "cmp", "eax, 2"));
+    instructions.push_back(MakeBranch(0x1304D, 0x1304F, "je", 0x13030));
+    instructions.push_back(MakeInstruction(0x1304F, 0x13050, "ret"));
+
+    decomp::DecompOptions options;
+    return decomp::BuildAnalysisFacts(
+        "snapshot!FlattenedDispatcher",
+        module,
+        decomp::DebugSessionKind::User,
+        options,
+        0x13000,
+        0x13000,
+        regions,
+        bytes,
+        instructions);
+}
+
+decomp::AnalysisFacts BuildLegitimateStateSwitchFacts()
+{
+    decomp::ModuleInfo module;
+    module.ModuleName = "snapshot";
+    module.ImageName = "snapshot.exe";
+    module.Base = 0x14000;
+    module.Size = 0x1000;
+
+    std::vector<decomp::FunctionRegion> regions = { { 0x14000, 0x14050 } };
+    std::vector<uint8_t> bytes(0x50, 0x90);
+    std::vector<decomp::DisassembledInstruction> instructions;
+    instructions.push_back(MakeInstruction(0x14000, 0x14003, "cmp", "ecx, 0"));
+    instructions.push_back(MakeBranch(0x14003, 0x14005, "je", 0x14020));
+    instructions.push_back(MakeInstruction(0x14005, 0x14008, "cmp", "ecx, 1"));
+    instructions.push_back(MakeBranch(0x14008, 0x1400A, "je", 0x14030));
+    instructions.push_back(MakeInstruction(0x1400A, 0x1400D, "cmp", "ecx, 2"));
+    instructions.push_back(MakeBranch(0x1400D, 0x1400F, "je", 0x14040));
+    instructions.push_back(MakeInstruction(0x1400F, 0x14010, "ret"));
+    instructions.push_back(MakeInstruction(0x14020, 0x14025, "mov", "eax, 1"));
+    instructions.push_back(MakeInstruction(0x14025, 0x14026, "ret"));
+    instructions.push_back(MakeInstruction(0x14030, 0x14035, "mov", "eax, 2"));
+    instructions.push_back(MakeInstruction(0x14035, 0x14036, "ret"));
+    instructions.push_back(MakeInstruction(0x14040, 0x14045, "mov", "eax, 3"));
+    instructions.push_back(MakeInstruction(0x14045, 0x14046, "ret"));
+
+    decomp::DecompOptions options;
+    return decomp::BuildAnalysisFacts(
+        "snapshot!LegitimateStateSwitch",
+        module,
+        decomp::DebugSessionKind::User,
+        options,
+        0x14000,
+        0x14000,
+        regions,
+        bytes,
+        instructions);
+}
+
+decomp::AnalysisFacts BuildFanInCompareLoopFacts()
+{
+    decomp::ModuleInfo module;
+    module.ModuleName = "snapshot";
+    module.ImageName = "snapshot.exe";
+    module.Base = 0x15000;
+    module.Size = 0x1000;
+
+    std::vector<decomp::FunctionRegion> regions = { { 0x15000, 0x15060 } };
+    std::vector<uint8_t> bytes(0x60, 0x90);
+    std::vector<decomp::DisassembledInstruction> instructions;
+    instructions.push_back(MakeBranch(0x15000, 0x15002, "jmp", 0x15040));
+    instructions.push_back(MakeInstruction(0x15010, 0x15013, "add", "edx, 1"));
+    instructions.push_back(MakeBranch(0x15013, 0x15015, "jmp", 0x15040));
+    instructions.push_back(MakeInstruction(0x15020, 0x15023, "add", "edx, 2"));
+    instructions.push_back(MakeBranch(0x15023, 0x15025, "jmp", 0x15040));
+    instructions.push_back(MakeInstruction(0x15030, 0x15031, "ret"));
+    instructions.push_back(MakeInstruction(0x15040, 0x15043, "cmp", "ecx, 0"));
+    instructions.push_back(MakeBranch(0x15043, 0x15045, "je", 0x15010));
+    instructions.push_back(MakeInstruction(0x15045, 0x15048, "cmp", "ecx, 1"));
+    instructions.push_back(MakeBranch(0x15048, 0x1504A, "je", 0x15020));
+    instructions.push_back(MakeInstruction(0x1504A, 0x1504D, "cmp", "ecx, 2"));
+    instructions.push_back(MakeBranch(0x1504D, 0x1504F, "je", 0x15030));
+    instructions.push_back(MakeInstruction(0x1504F, 0x15050, "ret"));
+
+    decomp::DecompOptions options;
+    return decomp::BuildAnalysisFacts(
+        "snapshot!FanInCompareLoop",
+        module,
+        decomp::DebugSessionKind::User,
+        options,
+        0x15000,
+        0x15000,
+        regions,
+        bytes,
+        instructions);
+}
+
+decomp::AnalysisFacts BuildSwitchFlattenedDispatcherFacts()
+{
+    decomp::ModuleInfo module;
+    module.ModuleName = "snapshot";
+    module.ImageName = "snapshot.exe";
+    module.Base = 0x16000;
+    module.Size = 0x1000;
+
+    std::vector<decomp::FunctionRegion> regions = { { 0x16000, 0x16070 } };
+    std::vector<uint8_t> bytes(0x70, 0x90);
+    std::vector<decomp::DisassembledInstruction> instructions;
+    instructions.push_back(MakeInstruction(0x16000, 0x16005, "mov", "eax, 0"));
+    instructions.push_back(MakeBranch(0x16005, 0x16007, "jmp", 0x16040));
+    instructions.push_back(MakeInstruction(0x16010, 0x16013, "add", "edx, 1"));
+    instructions.push_back(MakeInstruction(0x16013, 0x16018, "mov", "eax, 1"));
+    instructions.push_back(MakeBranch(0x16018, 0x1601A, "jmp", 0x16040));
+    instructions.push_back(MakeInstruction(0x16020, 0x16023, "add", "edx, 2"));
+    instructions.push_back(MakeInstruction(0x16023, 0x16028, "mov", "eax, 4"));
+    instructions.push_back(MakeInstruction(0x16028, 0x1602B, "sub", "eax, 2"));
+    instructions.push_back(MakeBranch(0x1602B, 0x1602D, "jmp", 0x16040));
+    instructions.push_back(MakeInstruction(0x16030, 0x16031, "ret"));
+    instructions.push_back(MakeInstruction(0x16040, 0x16043, "cmp", "eax, 2"));
+    instructions.push_back(MakeBranch(0x16043, 0x16045, "ja", 0x16050));
+    instructions.push_back(MakeInstruction(0x16045, 0x1604D, "jmp", "qword ptr [rip+rax*8+0x80]"));
+    instructions.push_back(MakeInstruction(0x16050, 0x16051, "ret"));
+
+    decomp::DecompOptions options;
+    decomp::AnalysisFacts facts = decomp::BuildAnalysisFacts(
+        "snapshot!SwitchFlattenedDispatcher",
+        module,
+        decomp::DebugSessionKind::User,
+        options,
+        0x16000,
+        0x16000,
+        regions,
+        bytes,
+        instructions);
+
+    if (!facts.Switches.empty())
+    {
+        facts.Switches[0].IndexExpression = "rax*8";
+        facts.Switches[0].RangeKnown = true;
+        facts.Switches[0].RangeMin = 0;
+        facts.Switches[0].RangeMax = 2;
+        facts.Switches[0].CaseCount = 3;
+        facts.Switches[0].CaseTargets = { 0x16010, 0x16020, 0x16030 };
+        facts.Switches[0].DefaultTarget = 0x16050;
+        decomp::ApplyRecoveredSwitchTargets(facts);
+    }
+
+    return facts;
+}
+
+decomp::AnalysisFacts BuildConditionalFlattenedDispatcherFacts()
+{
+    decomp::ModuleInfo module;
+    module.ModuleName = "snapshot";
+    module.ImageName = "snapshot.exe";
+    module.Base = 0x17000;
+    module.Size = 0x1000;
+
+    std::vector<decomp::FunctionRegion> regions = { { 0x17000, 0x17090 } };
+    std::vector<uint8_t> bytes(0x90, 0x90);
+    std::vector<decomp::DisassembledInstruction> instructions;
+    instructions.push_back(MakeInstruction(0x17000, 0x17005, "mov", "eax, 0"));
+    instructions.push_back(MakeBranch(0x17005, 0x17007, "jmp", 0x17060));
+    instructions.push_back(MakeInstruction(0x17010, 0x17013, "cmp", "edx, 0"));
+    instructions.push_back(MakeInstruction(0x17013, 0x17018, "mov", "eax, 1"));
+    instructions.push_back(MakeInstruction(0x17018, 0x1701D, "mov", "r8d, 2"));
+    instructions.push_back(MakeInstruction(0x1701D, 0x17022, "cmovne", "eax, r8d"));
+    instructions.push_back(MakeBranch(0x17022, 0x17024, "jmp", 0x17060));
+    instructions.push_back(MakeInstruction(0x17030, 0x17033, "add", "edx, 4"));
+    instructions.push_back(MakeInstruction(0x17033, 0x17038, "mov", "eax, 3"));
+    instructions.push_back(MakeBranch(0x17038, 0x1703A, "jmp", 0x17060));
+    instructions.push_back(MakeInstruction(0x17040, 0x17041, "ret"));
+    instructions.push_back(MakeInstruction(0x17050, 0x17051, "ret"));
+    instructions.push_back(MakeInstruction(0x17060, 0x17063, "cmp", "eax, 0"));
+    instructions.push_back(MakeBranch(0x17063, 0x17065, "je", 0x17010));
+    instructions.push_back(MakeInstruction(0x17065, 0x17068, "cmp", "eax, 1"));
+    instructions.push_back(MakeBranch(0x17068, 0x1706A, "je", 0x17030));
+    instructions.push_back(MakeInstruction(0x1706A, 0x1706D, "cmp", "eax, 2"));
+    instructions.push_back(MakeBranch(0x1706D, 0x1706F, "je", 0x17040));
+    instructions.push_back(MakeInstruction(0x1706F, 0x17072, "cmp", "eax, 3"));
+    instructions.push_back(MakeBranch(0x17072, 0x17074, "je", 0x17050));
+    instructions.push_back(MakeInstruction(0x17074, 0x17075, "ret"));
+
+    decomp::DecompOptions options;
+    return decomp::BuildAnalysisFacts(
+        "snapshot!ConditionalFlattenedDispatcher",
+        module,
+        decomp::DebugSessionKind::User,
+        options,
+        0x17000,
+        0x17000,
+        regions,
+        bytes,
+        instructions);
+}
+
 void TestAnalyzerSnapshot()
 {
     decomp::AnalysisFacts facts = BuildDiamondFacts();
@@ -1160,6 +1402,139 @@ void TestConditionalMoveSnapshot()
     Expect(cmovValue != nullptr && cmovValue->Expression.find("<") != std::string::npos, "cmov select expression should preserve the compare condition");
     Expect(cmovAliasValue != nullptr && cmovAliasValue->Kind == "conditional_select", "cmov negative aliases should also become conditional selects");
     Expect(cmovAliasValue != nullptr && cmovAliasValue->Expression.find(">=") != std::string::npos, "cmovnl should normalize to a signed >= condition");
+}
+
+void TestObfuscationFactsSnapshot()
+{
+    const decomp::AnalysisFacts facts = BuildFlattenedDispatcherFacts();
+    const decomp::ObfuscationDispatcher* dispatcher = FindHighConfidenceDispatcher(facts);
+    Expect(dispatcher != nullptr, "flattened dispatcher fixture should recover a high-confidence dispatcher");
+    Expect(dispatcher != nullptr && dispatcher->Kind == "control_flow_flattening_dispatcher", "dispatcher kind should describe control-flow flattening");
+    Expect(dispatcher != nullptr && dispatcher->StateVariable == "rax", "state variable should use canonical register spelling");
+    Expect(dispatcher != nullptr && dispatcher->RecoveredEdges.size() >= 2, "flattened dispatcher should recover semantic state edges");
+
+    bool foundStateVariable = false;
+    std::string observedStateVariable;
+    uint32_t observedWriteCount = 0;
+    uint32_t observedReadCount = 0;
+
+    for (const decomp::ObfuscationStateVariable& variable : facts.Obfuscation.StateVariables)
+    {
+        observedStateVariable = variable.Name;
+        observedWriteCount = variable.WriteCount;
+        observedReadCount = variable.ReadCount;
+
+        if (variable.Name == "rax" && variable.WriteCount >= 3 && variable.ReadCount >= 3)
+        {
+            foundStateVariable = true;
+        }
+    }
+
+    Expect(
+        foundStateVariable,
+        "obfuscation facts should expose the dispatcher state variable, observed="
+            + observedStateVariable
+            + " writes="
+            + std::to_string(observedWriteCount)
+            + " reads="
+            + std::to_string(observedReadCount));
+
+    const decomp::BasicBlock* entry = FindBlockStartingAt(facts, 0x13000);
+    const decomp::BasicBlock* firstBody = FindBlockStartingAt(facts, 0x13010);
+    bool foundRecoveredEntryEdge = false;
+
+    if (dispatcher != nullptr && entry != nullptr && firstBody != nullptr)
+    {
+        for (const decomp::RecoveredControlFlowEdge& edge : dispatcher->RecoveredEdges)
+        {
+            if (edge.SourceBlock == entry->Id && edge.TargetBlock == firstBody->Id && edge.StateValue == "0x0")
+            {
+                foundRecoveredEntryEdge = true;
+            }
+        }
+    }
+
+    Expect(foundRecoveredEntryEdge, "recovered edges should map state constants back to original body blocks");
+    Expect(HasEvidenceNodeKind(facts, "obfuscation.dispatcher"), "evidence graph should expose obfuscation dispatcher nodes");
+    Expect(HasEvidenceNodeKind(facts, "obfuscation.state_variable"), "evidence graph should expose obfuscation state-variable nodes");
+    Expect(HasEvidenceNodeKind(facts, "obfuscation.recovered_edge"), "evidence graph should expose recovered obfuscation edges");
+
+    decomp::AnalyzeRequest request;
+    request.RequestId = "obfuscation_snapshot";
+    request.Facts = facts;
+
+    const std::string serialized = decomp::SerializeAnalyzeRequest(request, true);
+    Expect(serialized.find("\"obfuscation\"") != std::string::npos, "request snapshot should serialize obfuscation facts");
+    Expect(serialized.find("\"recovered_edges\"") != std::string::npos, "request snapshot should serialize recovered obfuscation edges");
+
+    decomp::AnalyzeRequest parsed;
+    std::string error;
+    Expect(decomp::ParseAnalyzeRequest(serialized, parsed, error), "obfuscation request should parse after serialization");
+    Expect(!parsed.Facts.Obfuscation.Dispatchers.empty(), "obfuscation dispatchers should round-trip through protocol JSON");
+    Expect(!parsed.Facts.Obfuscation.Dispatchers.empty() && parsed.Facts.Obfuscation.Dispatchers.front().RecoveredEdges.size() >= 2, "recovered obfuscation edges should round-trip through protocol JSON");
+
+    const std::string promptDump = decomp::BuildDebugPromptDump(request);
+    Expect(promptDump.find("\"obfuscation\"") != std::string::npos, "prompt dump should include obfuscation facts");
+    Expect(promptDump.find("\"usage_guidance\"") != std::string::npos, "prompt dump should include obfuscation usage guidance");
+
+    const decomp::AnalysisFacts stateSwitchFacts = BuildLegitimateStateSwitchFacts();
+    Expect(FindHighConfidenceDispatcher(stateSwitchFacts) == nullptr, "ordinary compare-chain state switch should not become a high-confidence flattening dispatcher");
+
+    const decomp::AnalysisFacts fanInCompareLoopFacts = BuildFanInCompareLoopFacts();
+    Expect(FindHighConfidenceDispatcher(fanInCompareLoopFacts) == nullptr, "fan-in compare loop without state writes should not become a flattening dispatcher");
+
+    const decomp::AnalysisFacts switchFacts = BuildSwitchFlattenedDispatcherFacts();
+    const decomp::ObfuscationDispatcher* switchDispatcher = FindHighConfidenceDispatcher(switchFacts);
+    const decomp::BasicBlock* arithmeticBody = FindBlockStartingAt(switchFacts, 0x16020);
+    const decomp::BasicBlock* switchExit = FindBlockStartingAt(switchFacts, 0x16030);
+    bool foundSwitchArithmeticEdge = false;
+
+    Expect(switchDispatcher != nullptr, "switch flattened fixture should recover a high-confidence dispatcher");
+    Expect(switchDispatcher != nullptr && switchDispatcher->Kind == "control_flow_flattening_switch_dispatcher", "switch dispatcher should be classified separately");
+
+    if (switchDispatcher != nullptr && arithmeticBody != nullptr && switchExit != nullptr)
+    {
+        for (const decomp::RecoveredControlFlowEdge& edge : switchDispatcher->RecoveredEdges)
+        {
+            if (edge.SourceBlock == arithmeticBody->Id && edge.TargetBlock == switchExit->Id && edge.StateValue == "0x2")
+            {
+                foundSwitchArithmeticEdge = true;
+            }
+        }
+    }
+
+    Expect(foundSwitchArithmeticEdge, "bounded evaluator should recover arithmetic state updates for switch dispatchers");
+
+    const decomp::AnalysisFacts conditionalFacts = BuildConditionalFlattenedDispatcherFacts();
+    const decomp::ObfuscationDispatcher* conditionalDispatcher = FindHighConfidenceDispatcher(conditionalFacts);
+    const decomp::BasicBlock* conditionalBody = FindBlockStartingAt(conditionalFacts, 0x17010);
+    bool foundConditionalState1 = false;
+    bool foundConditionalState2 = false;
+
+    Expect(conditionalDispatcher != nullptr, "conditional flattened fixture should recover a high-confidence dispatcher");
+
+    if (conditionalDispatcher != nullptr && conditionalBody != nullptr)
+    {
+        for (const decomp::RecoveredControlFlowEdge& edge : conditionalDispatcher->RecoveredEdges)
+        {
+            if (edge.SourceBlock != conditionalBody->Id || !edge.Conditional || edge.Condition.empty())
+            {
+                continue;
+            }
+
+            if (edge.StateValue == "0x1")
+            {
+                foundConditionalState1 = true;
+            }
+            else if (edge.StateValue == "0x2")
+            {
+                foundConditionalState2 = true;
+            }
+        }
+    }
+
+    Expect(foundConditionalState1, "conditional state recovery should keep the retained cmov state edge");
+    Expect(foundConditionalState2, "conditional state recovery should recover the selected cmov state edge");
 }
 
 void TestSimdAbiSnapshot()
@@ -1752,6 +2127,7 @@ int main()
     TestStackAliasSnapshot();
     TestTailCallSnapshot();
     TestConditionalMoveSnapshot();
+    TestObfuscationFactsSnapshot();
     TestSimdAbiSnapshot();
     TestIndirectVirtualCallSnapshot();
     TestLoopInductionSnapshot();

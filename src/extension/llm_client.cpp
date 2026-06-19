@@ -1438,6 +1438,12 @@ constexpr size_t kPromptValueMergeLimit = 16;
 constexpr size_t kPromptIrValueLimit = 32;
 constexpr size_t kPromptBlockValueStateLimit = 24;
 constexpr size_t kPromptBlockValueEntryLimit = 12;
+constexpr size_t kPromptObfuscationStateVariableLimit = 8;
+constexpr size_t kPromptObfuscationDispatcherLimit = 8;
+constexpr size_t kPromptObfuscationEdgeLimit = 24;
+constexpr size_t kPromptObfuscationPredicateLimit = 12;
+constexpr size_t kPromptObfuscationSubstitutionLimit = 12;
+constexpr size_t kPromptObfuscationNoteLimit = 8;
 constexpr size_t kPromptControlFlowLimit = 24;
 constexpr size_t kPromptTypeHintLimit = 32;
 constexpr size_t kPromptIdiomLimit = 24;
@@ -2551,6 +2557,166 @@ JsonValue BuildBlockValueStatesJson(const AnalyzeRequest& request, bool* truncat
     return array;
 }
 
+JsonValue BuildObfuscationJson(const AnalyzeRequest& request, bool* truncated)
+{
+    JsonValue object = JsonValue::MakeObject();
+    JsonValue stateVariables = JsonValue::MakeArray();
+    JsonValue dispatchers = JsonValue::MakeArray();
+    JsonValue opaquePredicates = JsonValue::MakeArray();
+    JsonValue substitutionIdioms = JsonValue::MakeArray();
+    bool anyTruncated = false;
+
+    const std::vector<size_t> stateVariableIndices = SelectSpreadIndices(
+        request.Facts.Obfuscation.StateVariables.size(),
+        kPromptObfuscationStateVariableLimit);
+
+    if (request.Facts.Obfuscation.StateVariables.size() > stateVariableIndices.size())
+    {
+        anyTruncated = true;
+    }
+
+    for (size_t index : stateVariableIndices)
+    {
+        const ObfuscationStateVariable& variable = request.Facts.Obfuscation.StateVariables[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("name", JsonValue::MakeString(variable.Name));
+        item.Set("storage", JsonValue::MakeString(variable.Storage));
+        item.Set("first_site", JsonValue::MakeString(HexU64(variable.FirstSite)));
+        item.Set("read_count", JsonValue::MakeNumber(static_cast<double>(variable.ReadCount)));
+        item.Set("write_count", JsonValue::MakeNumber(static_cast<double>(variable.WriteCount)));
+        item.Set("confidence", JsonValue::MakeNumber(variable.Confidence));
+        stateVariables.PushBack(item);
+    }
+
+    const std::vector<size_t> dispatcherIndices = SelectRankedSpreadIndices(
+        request.Facts.Obfuscation.Dispatchers.size(),
+        kPromptObfuscationDispatcherLimit,
+        [&request](size_t index)
+        {
+            return request.Facts.Obfuscation.Dispatchers[index].Confidence;
+        });
+
+    if (request.Facts.Obfuscation.Dispatchers.size() > dispatcherIndices.size())
+    {
+        anyTruncated = true;
+    }
+
+    for (size_t index : dispatcherIndices)
+    {
+        const ObfuscationDispatcher& dispatcher = request.Facts.Obfuscation.Dispatchers[index];
+        JsonValue item = JsonValue::MakeObject();
+        JsonValue recoveredEdges = JsonValue::MakeArray();
+        bool edgesTruncated = false;
+        const std::vector<size_t> edgeIndices = SelectSpreadIndices(
+            dispatcher.RecoveredEdges.size(),
+            kPromptObfuscationEdgeLimit);
+
+        if (dispatcher.RecoveredEdges.size() > edgeIndices.size())
+        {
+            edgesTruncated = true;
+            anyTruncated = true;
+        }
+
+        for (size_t edgeIndex : edgeIndices)
+        {
+            const RecoveredControlFlowEdge& edge = dispatcher.RecoveredEdges[edgeIndex];
+            JsonValue edgeItem = JsonValue::MakeObject();
+            edgeItem.Set("source_block", JsonValue::MakeString(edge.SourceBlock));
+            edgeItem.Set("target_block", JsonValue::MakeString(edge.TargetBlock));
+            edgeItem.Set("condition", JsonValue::MakeString(edge.Condition));
+            edgeItem.Set("state_value", JsonValue::MakeString(edge.StateValue));
+            edgeItem.Set("evidence", JsonValue::MakeString(edge.Evidence));
+            edgeItem.Set("conditional", JsonValue::MakeBoolean(edge.Conditional));
+            edgeItem.Set("confidence", JsonValue::MakeNumber(edge.Confidence));
+            recoveredEdges.PushBack(edgeItem);
+        }
+
+        item.Set("header_block", JsonValue::MakeString(dispatcher.HeaderBlock));
+        item.Set("kind", JsonValue::MakeString(dispatcher.Kind));
+        item.Set("state_variable", JsonValue::MakeString(dispatcher.StateVariable));
+        item.Set("dispatcher_blocks", BuildStringArray(dispatcher.DispatcherBlocks, 12, nullptr));
+        item.Set("original_block_candidates", BuildStringArray(dispatcher.OriginalBlockCandidates, 24, nullptr));
+        item.Set("recovered_edges", recoveredEdges);
+        item.Set("recovered_edges_truncated", JsonValue::MakeBoolean(edgesTruncated));
+        item.Set("evidence", JsonValue::MakeString(dispatcher.Evidence));
+        item.Set("confidence", JsonValue::MakeNumber(dispatcher.Confidence));
+        dispatchers.PushBack(item);
+    }
+
+    const std::vector<size_t> predicateIndices = SelectRankedSpreadIndices(
+        request.Facts.Obfuscation.OpaquePredicates.size(),
+        kPromptObfuscationPredicateLimit,
+        [&request](size_t index)
+        {
+            return request.Facts.Obfuscation.OpaquePredicates[index].Confidence;
+        });
+
+    if (request.Facts.Obfuscation.OpaquePredicates.size() > predicateIndices.size())
+    {
+        anyTruncated = true;
+    }
+
+    for (size_t index : predicateIndices)
+    {
+        const OpaquePredicateFact& predicate = request.Facts.Obfuscation.OpaquePredicates[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("site", JsonValue::MakeString(HexU64(predicate.Site)));
+        item.Set("block_id", JsonValue::MakeString(predicate.BlockId));
+        item.Set("predicate", JsonValue::MakeString(predicate.Predicate));
+        item.Set("constant_result", JsonValue::MakeString(predicate.ConstantResult));
+        item.Set("dead_target_block", JsonValue::MakeString(predicate.DeadTargetBlock));
+        item.Set("live_target_block", JsonValue::MakeString(predicate.LiveTargetBlock));
+        item.Set("evidence", JsonValue::MakeString(predicate.Evidence));
+        item.Set("confidence", JsonValue::MakeNumber(predicate.Confidence));
+        opaquePredicates.PushBack(item);
+    }
+
+    const std::vector<size_t> substitutionIndices = SelectRankedSpreadIndices(
+        request.Facts.Obfuscation.SubstitutionIdioms.size(),
+        kPromptObfuscationSubstitutionLimit,
+        [&request](size_t index)
+        {
+            return request.Facts.Obfuscation.SubstitutionIdioms[index].Confidence;
+        });
+
+    if (request.Facts.Obfuscation.SubstitutionIdioms.size() > substitutionIndices.size())
+    {
+        anyTruncated = true;
+    }
+
+    for (size_t index : substitutionIndices)
+    {
+        const SubstitutionIdiomFact& idiom = request.Facts.Obfuscation.SubstitutionIdioms[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("site", JsonValue::MakeString(HexU64(idiom.Site)));
+        item.Set("block_id", JsonValue::MakeString(idiom.BlockId));
+        item.Set("original_expression", JsonValue::MakeString(idiom.OriginalExpression));
+        item.Set("simplified_expression", JsonValue::MakeString(idiom.SimplifiedExpression));
+        item.Set("pattern", JsonValue::MakeString(idiom.Pattern));
+        item.Set("evidence", JsonValue::MakeString(idiom.Evidence));
+        item.Set("confidence", JsonValue::MakeNumber(idiom.Confidence));
+        substitutionIdioms.PushBack(item);
+    }
+
+    bool notesTruncated = false;
+    object.Set("state_variables", stateVariables);
+    object.Set("dispatchers", dispatchers);
+    object.Set("opaque_predicates", opaquePredicates);
+    object.Set("substitution_idioms", substitutionIdioms);
+    object.Set("notes", BuildStringArray(request.Facts.Obfuscation.Notes, kPromptObfuscationNoteLimit, &notesTruncated));
+    object.Set("confidence", JsonValue::MakeNumber(request.Facts.Obfuscation.Confidence));
+    object.Set(
+        "usage_guidance",
+        JsonValue::MakeString("Prefer high-confidence recovered_edges over raw dispatcher loop edges; preserve uncertainty for unresolved state transitions."));
+
+    if (truncated != nullptr)
+    {
+        *truncated = anyTruncated || notesTruncated;
+    }
+
+    return object;
+}
+
 JsonValue BuildControlFlowJson(const AnalyzeRequest& request, bool* truncated)
 {
     JsonValue array = JsonValue::MakeArray();
@@ -3134,6 +3300,10 @@ JsonValue BuildCountsJson(const AnalyzeRequest& request)
     counts.Set("value_merges_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.ValueMerges.size())));
     counts.Set("ir_values_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.IrValues.size())));
     counts.Set("block_value_states_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.BlockValueStates.size())));
+    counts.Set("obfuscation_state_variables_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.Obfuscation.StateVariables.size())));
+    counts.Set("obfuscation_dispatchers_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.Obfuscation.Dispatchers.size())));
+    counts.Set("obfuscation_opaque_predicates_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.Obfuscation.OpaquePredicates.size())));
+    counts.Set("obfuscation_substitution_idioms_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.Obfuscation.SubstitutionIdioms.size())));
     counts.Set("control_flow_regions_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.ControlFlow.size())));
     counts.Set("type_hints_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.TypeHints.size())));
     counts.Set("idioms_total", JsonValue::MakeNumber(static_cast<double>(request.Facts.Idioms.size())));
@@ -3242,6 +3412,7 @@ JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
     bool valueMergesTruncated = false;
     bool irValuesTruncated = false;
     bool blockValueStatesTruncated = false;
+    bool obfuscationTruncated = false;
     bool controlFlowTruncated = false;
     bool abiTruncated = false;
     bool typeHintsTruncated = false;
@@ -3306,6 +3477,7 @@ JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
     root.Set("value_merges", BuildValueMergesJson(request, &valueMergesTruncated));
     root.Set("ir_values", BuildIrValuesJson(request, &irValuesTruncated));
     root.Set("block_value_states", BuildBlockValueStatesJson(request, &blockValueStatesTruncated));
+    root.Set("obfuscation", BuildObfuscationJson(request, &obfuscationTruncated));
     root.Set("control_flow", BuildControlFlowJson(request, &controlFlowTruncated));
     root.Set("abi", BuildAbiJson(request, &abiTruncated));
     root.Set("type_hints", BuildTypeHintsJson(request, &typeHintsTruncated));
@@ -3336,6 +3508,7 @@ JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
     truncation.Set("value_merges", JsonValue::MakeBoolean(valueMergesTruncated));
     truncation.Set("ir_values", JsonValue::MakeBoolean(irValuesTruncated));
     truncation.Set("block_value_states", JsonValue::MakeBoolean(blockValueStatesTruncated));
+    truncation.Set("obfuscation", JsonValue::MakeBoolean(obfuscationTruncated));
     truncation.Set("control_flow", JsonValue::MakeBoolean(controlFlowTruncated));
     truncation.Set("abi", JsonValue::MakeBoolean(abiTruncated));
     truncation.Set("type_hints", JsonValue::MakeBoolean(typeHintsTruncated));
@@ -4480,6 +4653,7 @@ JsonValue BuildChunkFactsJson(
     bool recoveredLocalsTruncated = false;
     bool callArgumentsTruncated = false;
     bool valueMergesTruncated = false;
+    bool obfuscationTruncated = false;
     bool dataReferencesTruncated = false;
     bool callTargetsTruncated = false;
     bool normalizedConditionsTruncated = false;
@@ -4555,6 +4729,7 @@ JsonValue BuildChunkFactsJson(
     root.Set("recovered_locals", BuildRecoveredLocalsJson(request, &recoveredLocalsTruncated));
     root.Set("call_arguments", BuildCallArgumentsJsonForAddresses(request, instructionAddresses, &callArgumentsTruncated));
     root.Set("value_merges", BuildValueMergesJsonForBlocks(request, blockIds, &valueMergesTruncated));
+    root.Set("obfuscation", BuildObfuscationJson(request, &obfuscationTruncated));
     root.Set("data_references", BuildDataReferencesJsonForAddresses(request, instructionAddresses, &dataReferencesTruncated));
     root.Set("call_targets", BuildCallTargetsJsonForAddresses(request, instructionAddresses, &callTargetsTruncated));
     root.Set("normalized_conditions", BuildNormalizedConditionsJsonForBlocks(request, blockIds, &normalizedConditionsTruncated));
@@ -4571,6 +4746,7 @@ JsonValue BuildChunkFactsJson(
     truncation.Set("recovered_locals", JsonValue::MakeBoolean(recoveredLocalsTruncated));
     truncation.Set("call_arguments", JsonValue::MakeBoolean(callArgumentsTruncated));
     truncation.Set("value_merges", JsonValue::MakeBoolean(valueMergesTruncated));
+    truncation.Set("obfuscation", JsonValue::MakeBoolean(obfuscationTruncated));
     truncation.Set("data_references", JsonValue::MakeBoolean(dataReferencesTruncated));
     truncation.Set("call_targets", JsonValue::MakeBoolean(callTargetsTruncated));
     truncation.Set("normalized_conditions", JsonValue::MakeBoolean(normalizedConditionsTruncated));
@@ -4926,6 +5102,7 @@ JsonValue BuildMergeFactsJson(
     bool callArgumentsTruncated = false;
     bool valueMergesTruncated = false;
     bool blockValueStatesTruncated = false;
+    bool obfuscationTruncated = false;
     bool dataReferencesTruncated = false;
     bool callTargetsTruncated = false;
     bool normalizedConditionsTruncated = false;
@@ -4982,6 +5159,7 @@ JsonValue BuildMergeFactsJson(
     root.Set("call_arguments", BuildCallArgumentsJson(request, &callArgumentsTruncated));
     root.Set("value_merges", BuildValueMergesJson(request, &valueMergesTruncated));
     root.Set("block_value_states", BuildBlockValueStatesJson(request, &blockValueStatesTruncated));
+    root.Set("obfuscation", BuildObfuscationJson(request, &obfuscationTruncated));
     root.Set("data_references", BuildDataReferencesJson(request, &dataReferencesTruncated));
     root.Set("call_targets", BuildCallTargetsJson(request, &callTargetsTruncated));
     root.Set("normalized_conditions", BuildNormalizedConditionsJson(request, &normalizedConditionsTruncated));
@@ -5001,6 +5179,7 @@ JsonValue BuildMergeFactsJson(
     truncation.Set("call_arguments", JsonValue::MakeBoolean(callArgumentsTruncated));
     truncation.Set("value_merges", JsonValue::MakeBoolean(valueMergesTruncated));
     truncation.Set("block_value_states", JsonValue::MakeBoolean(blockValueStatesTruncated));
+    truncation.Set("obfuscation", JsonValue::MakeBoolean(obfuscationTruncated));
     truncation.Set("data_references", JsonValue::MakeBoolean(dataReferencesTruncated));
     truncation.Set("call_targets", JsonValue::MakeBoolean(callTargetsTruncated));
     truncation.Set("normalized_conditions", JsonValue::MakeBoolean(normalizedConditionsTruncated));
@@ -5020,7 +5199,8 @@ std::string BuildChunkSystemPrompt(const AnalyzeRequest& request)
         "Write summary_localized and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_steps, state_updates, observed_calls, observed_memory, identifiers, and API names in English or C-style. "
         "Do not invent external call targets that are not present in the input. "
-        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, and pdb facts as high-signal semantic hints when present. "
+        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, obfuscation, data_references, call_targets, and pdb facts as high-signal semantic hints when present. "
+        "When obfuscation exposes high-confidence recovered_edges, prefer those semantic edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Prefer explicit memory reads, writes, compares, branches, and state transitions over vague summaries. "
         "When information is incomplete, preserve only the missing part as uncertain instead of collapsing the whole chunk into a short summary. "
         "The evidence field must be an array of objects shaped like {\"claim\": string, \"blocks\": [string, ...]}. Use evidence.blocks values that reference only valid basic block ids from the input chunk.";
@@ -5062,7 +5242,8 @@ std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
         "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style. "
         "Use the chunk summaries to produce a fuller function-level pseudocode than a single-pass summary. "
-        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, and pdb facts to preserve semantic names and control-flow intent. "
+        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, obfuscation, and pdb facts to preserve semantic names and control-flow intent. "
+        "When obfuscation exposes high-confidence recovered_edges, prefer those semantic edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Prefer reconstructing concrete reads, writes, branches, and helper interactions when the chunk evidence supports them. "
         "Do not invent calls or fields that are not grounded by the chunk summaries or global facts. "
         "Use UNKNOWN_TYPE for uncertain types and preserve only the truly unresolved parts in uncertainties. The evidence field must be an array of objects shaped like {\"claim\": string, \"blocks\": [string, ...]}.";
@@ -5104,7 +5285,8 @@ std::string BuildSystemPrompt(const AnalyzeRequest& request)
         "Use UNKNOWN_TYPE for uncertain types. "
         "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style as appropriate. "
-        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, type_hints, idioms, callee_summaries, graph_summary, session_policy, observed_behavior, and pdb facts as high-confidence semantic hints when available. "
+        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, obfuscation, type_hints, idioms, callee_summaries, graph_summary, session_policy, observed_behavior, and pdb facts as high-confidence semantic hints when available. "
+        "When obfuscation exposes high-confidence recovered_edges, prefer those semantic edges over raw dispatcher loop edges and do not render the dispatcher as business logic unless recovery confidence is low. "
         "Use evidence.blocks values that reference only valid basic block ids from the input. "
         "Blocks are a representative selection, not necessarily the first contiguous blocks in the function. "
         "Treat analyzer_skeleton as the draft to refine and graph_summary as the authoritative graph outline. "
@@ -5130,12 +5312,13 @@ std::string BuildUserPrompt(const AnalyzeRequest& request)
     prompt += "5. evidence.blocks must reference existing basic block ids.\n";
     prompt += "6. Treat blocks as representative high-signal samples, not as the only reachable blocks in order.\n";
     prompt += "7. Use instruction_window_head, instruction_window_middle, and instruction_window_tail to infer prologue, body, and late-path behavior.\n";
-    prompt += "8. Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, type_hints, idioms, callee_summaries, session_policy, observed_behavior, and pdb facts when they improve variable names, helper summaries, branch expressions, or observed behavior notes.\n";
+    prompt += "8. Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, obfuscation, type_hints, idioms, callee_summaries, session_policy, observed_behavior, and pdb facts when they improve variable names, helper summaries, branch expressions, or observed behavior notes.\n";
     prompt += "9. Prefer concrete pseudocode statements over summary comments when a memory read, write, compare, or branch is explicitly visible in the facts.\n";
     prompt += "10. If control flow is incomplete, keep visible operations explicit and mark only the missing pieces as uncertain.\n";
     prompt += "11. If truncation flags are true, preserve that uncertainty instead of over-claiming.\n";
     prompt += "12. Refine analyzer_skeleton instead of writing from scratch; preserve its evidence-backed regions, calls, idioms, and uncertainties unless contradicted by stronger facts.\n";
     prompt += "13. Use graph_summary as the authoritative CFG/region outline; do not invent loops, switches, or branches that graph_summary and control_flow do not support.\n";
+    prompt += "14. If obfuscation.dispatchers contains high-confidence recovered_edges, reconstruct control flow from those semantic edges before describing raw dispatcher blocks; keep missing state transitions uncertain.\n";
     return prompt;
 }
 
