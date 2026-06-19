@@ -7651,6 +7651,166 @@ void PrintActionLinks(
     sink.WriteText("\n");
 }
 
+void OutputBlockAnchoredLine(
+    ResponseOutputSink& sink,
+    const decomp::AnalysisFacts& facts,
+    const std::string& blockId,
+    const std::string& label)
+{
+    const std::string command = BuildBlockNavigationCommand(facts, blockId);
+
+    if (command.empty())
+    {
+        SinkOutputLine(sink, "%s\n", label.c_str());
+        return;
+    }
+
+    OutputLinkLine(sink, label, command);
+}
+
+void PrintObfuscationExplainOutput(
+    const decomp::AnalyzeRequest& request,
+    ResponseOutputSink& sink)
+{
+    const decomp::ObfuscationFacts& obfuscation = request.Facts.Obfuscation;
+    const decomp::SemanticControlFlowOverlay& semanticControlFlow = request.Facts.SemanticControlFlow;
+
+    if (obfuscation.Dispatchers.empty()
+        && obfuscation.OpaquePredicates.empty()
+        && obfuscation.SubstitutionIdioms.empty()
+        && semanticControlFlow.Edges.empty())
+    {
+        return;
+    }
+
+    constexpr size_t kExplainDispatcherLimit = 8;
+    constexpr size_t kExplainEdgeLimit = 16;
+    constexpr size_t kExplainPredicateLimit = 12;
+    constexpr size_t kExplainSubstitutionLimit = 12;
+    SinkOutputLine(sink, "\nobfuscation:\n");
+
+    for (size_t index = 0; index < obfuscation.Dispatchers.size() && index < kExplainDispatcherLimit; ++index)
+    {
+        const decomp::ObfuscationDispatcher& dispatcher = obfuscation.Dispatchers[index];
+        const std::string label = "- dispatcher "
+            + dispatcher.Kind
+            + " header="
+            + dispatcher.HeaderBlock
+            + " state="
+            + dispatcher.StateVariable
+            + " confidence="
+            + std::to_string(dispatcher.Confidence);
+        OutputBlockAnchoredLine(sink, request.Facts, dispatcher.HeaderBlock, label);
+
+        if (!dispatcher.Evidence.empty())
+        {
+            SinkOutputLine(sink, "  evidence: %s\n", dispatcher.Evidence.c_str());
+        }
+
+        for (size_t edgeIndex = 0; edgeIndex < dispatcher.RecoveredEdges.size() && edgeIndex < kExplainEdgeLimit; ++edgeIndex)
+        {
+            const decomp::RecoveredControlFlowEdge& edge = dispatcher.RecoveredEdges[edgeIndex];
+            std::string edgeLabel = "  - recovered edge "
+                + edge.SourceBlock
+                + " -> "
+                + edge.TargetBlock;
+
+            if (!edge.StateValue.empty())
+            {
+                edgeLabel += " state=" + edge.StateValue;
+            }
+
+            if (!edge.Condition.empty())
+            {
+                edgeLabel += " condition=" + edge.Condition;
+            }
+
+            edgeLabel += " confidence=" + std::to_string(edge.Confidence);
+            OutputBlockAnchoredLine(sink, request.Facts, edge.SourceBlock, edgeLabel);
+        }
+
+        if (dispatcher.RecoveredEdges.size() > kExplainEdgeLimit)
+        {
+            SinkOutputLine(sink, "  - recovered edges truncated: %llu omitted\n", static_cast<unsigned long long>(dispatcher.RecoveredEdges.size() - kExplainEdgeLimit));
+        }
+    }
+
+    for (size_t index = 0; index < obfuscation.OpaquePredicates.size() && index < kExplainPredicateLimit; ++index)
+    {
+        const decomp::OpaquePredicateFact& predicate = obfuscation.OpaquePredicates[index];
+        const std::string label = "- opaque predicate block="
+            + predicate.BlockId
+            + " predicate="
+            + predicate.Predicate
+            + " result="
+            + predicate.ConstantResult
+            + " live="
+            + predicate.LiveTargetBlock
+            + " dead="
+            + predicate.DeadTargetBlock
+            + " confidence="
+            + std::to_string(predicate.Confidence);
+
+        if (predicate.Site != 0)
+        {
+            OutputLinkLine(sink, label, BuildDisassembleAddressCommand(predicate.Site));
+        }
+        else
+        {
+            OutputBlockAnchoredLine(sink, request.Facts, predicate.BlockId, label);
+        }
+    }
+
+    for (size_t index = 0; index < obfuscation.SubstitutionIdioms.size() && index < kExplainSubstitutionLimit; ++index)
+    {
+        const decomp::SubstitutionIdiomFact& idiom = obfuscation.SubstitutionIdioms[index];
+        const std::string label = "- substitution "
+            + idiom.Pattern
+            + " block="
+            + idiom.BlockId
+            + " "
+            + idiom.OriginalExpression
+            + " => "
+            + idiom.SimplifiedExpression
+            + " confidence="
+            + std::to_string(idiom.Confidence);
+
+        if (idiom.Site != 0)
+        {
+            OutputLinkLine(sink, label, BuildDisassembleAddressCommand(idiom.Site));
+        }
+        else
+        {
+            OutputBlockAnchoredLine(sink, request.Facts, idiom.BlockId, label);
+        }
+    }
+
+    if (!semanticControlFlow.Edges.empty())
+    {
+        size_t liveEdges = 0;
+        size_t deadEdges = 0;
+
+        for (const decomp::SemanticControlFlowEdge& edge : semanticControlFlow.Edges)
+        {
+            if (edge.Dead)
+            {
+                ++deadEdges;
+            }
+            else
+            {
+                ++liveEdges;
+            }
+        }
+
+        SinkOutputLine(
+            sink,
+            "- semantic CFG overlay: live_edges=%llu dead_edges=%llu confidence=%.2f\n",
+            static_cast<unsigned long long>(liveEdges),
+            static_cast<unsigned long long>(deadEdges),
+            semanticControlFlow.Confidence);
+    }
+}
+
 void PrintExplainOutput(
     const decomp::AnalyzeRequest& request,
     const decomp::AnalyzeResponse& response,
@@ -7678,6 +7838,8 @@ void PrintExplainOutput(
                 BuildDisassembleCommand(block->StartAddress, block->EndAddress));
         }
     }
+
+    PrintObfuscationExplainOutput(request, sink);
 
     if (!request.Facts.ControlFlow.empty())
     {
