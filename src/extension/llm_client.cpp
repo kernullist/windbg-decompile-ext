@@ -2648,7 +2648,119 @@ JsonValue BuildBlockValueStatesJson(const AnalyzeRequest& request, bool* truncat
     return array;
 }
 
-JsonValue BuildObfuscationJson(const AnalyzeRequest& request, bool* truncated)
+bool IsPromptBlockSelected(const std::set<std::string>* blockIds, const std::string& blockId)
+{
+    return blockIds == nullptr
+        || (!blockId.empty() && blockIds->find(blockId) != blockIds->end());
+}
+
+bool IsPromptAnyBlockSelected(const std::set<std::string>* blockIds, const std::vector<std::string>& values)
+{
+    if (blockIds == nullptr)
+    {
+        return true;
+    }
+
+    for (const std::string& blockId : values)
+    {
+        if (IsPromptBlockSelected(blockIds, blockId))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::string FindPromptBlockIdContainingAddress(const AnalyzeRequest& request, uint64_t address)
+{
+    for (const BasicBlock& block : request.Facts.Blocks)
+    {
+        if (address >= block.StartAddress && address < block.EndAddress)
+        {
+            return block.Id;
+        }
+    }
+
+    return std::string();
+}
+
+bool IsPromptSiteSelected(const AnalyzeRequest& request, const std::set<std::string>* blockIds, uint64_t site)
+{
+    if (blockIds == nullptr)
+    {
+        return true;
+    }
+
+    if (site == 0)
+    {
+        return false;
+    }
+
+    return IsPromptBlockSelected(blockIds, FindPromptBlockIdContainingAddress(request, site));
+}
+
+bool IsPromptRecoveredEdgeSelected(const std::set<std::string>* blockIds, const RecoveredControlFlowEdge& edge)
+{
+    return IsPromptBlockSelected(blockIds, edge.SourceBlock)
+        || IsPromptBlockSelected(blockIds, edge.TargetBlock);
+}
+
+bool IsPromptDispatcherSelected(const std::set<std::string>* blockIds, const ObfuscationDispatcher& dispatcher)
+{
+    if (blockIds == nullptr)
+    {
+        return true;
+    }
+
+    if (IsPromptBlockSelected(blockIds, dispatcher.HeaderBlock)
+        || IsPromptAnyBlockSelected(blockIds, dispatcher.DispatcherBlocks)
+        || IsPromptAnyBlockSelected(blockIds, dispatcher.OriginalBlockCandidates))
+    {
+        return true;
+    }
+
+    for (const RecoveredControlFlowEdge& edge : dispatcher.RecoveredEdges)
+    {
+        if (IsPromptRecoveredEdgeSelected(blockIds, edge))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool IsPromptOpaquePredicateSelected(
+    const AnalyzeRequest& request,
+    const std::set<std::string>* blockIds,
+    const OpaquePredicateFact& predicate)
+{
+    return IsPromptBlockSelected(blockIds, predicate.BlockId)
+        || IsPromptBlockSelected(blockIds, predicate.LiveTargetBlock)
+        || IsPromptBlockSelected(blockIds, predicate.DeadTargetBlock)
+        || IsPromptSiteSelected(request, blockIds, predicate.Site);
+}
+
+bool IsPromptSubstitutionIdiomSelected(
+    const AnalyzeRequest& request,
+    const std::set<std::string>* blockIds,
+    const SubstitutionIdiomFact& idiom)
+{
+    return IsPromptBlockSelected(blockIds, idiom.BlockId)
+        || IsPromptSiteSelected(request, blockIds, idiom.Site);
+}
+
+bool IsPromptSemanticEdgeSelected(const std::set<std::string>* blockIds, const SemanticControlFlowEdge& edge)
+{
+    return IsPromptBlockSelected(blockIds, edge.SourceBlock)
+        || IsPromptBlockSelected(blockIds, edge.TargetBlock);
+}
+
+JsonValue BuildObfuscationJson(
+    const AnalyzeRequest& request,
+    const std::set<std::string>* blockIds,
+    bool* truncated)
 {
     JsonValue object = JsonValue::MakeObject();
     JsonValue stateVariables = JsonValue::MakeArray();
@@ -2656,18 +2768,50 @@ JsonValue BuildObfuscationJson(const AnalyzeRequest& request, bool* truncated)
     JsonValue opaquePredicates = JsonValue::MakeArray();
     JsonValue substitutionIdioms = JsonValue::MakeArray();
     bool anyTruncated = false;
+    std::vector<size_t> filteredDispatcherIndices;
+    std::set<std::string> selectedStateVariables;
+
+    for (size_t index = 0; index < request.Facts.Obfuscation.Dispatchers.size(); ++index)
+    {
+        const ObfuscationDispatcher& dispatcher = request.Facts.Obfuscation.Dispatchers[index];
+
+        if (IsPromptDispatcherSelected(blockIds, dispatcher))
+        {
+            filteredDispatcherIndices.push_back(index);
+
+            if (!dispatcher.StateVariable.empty())
+            {
+                selectedStateVariables.insert(dispatcher.StateVariable);
+            }
+        }
+    }
+
+    std::vector<size_t> filteredStateVariableIndices;
+
+    for (size_t index = 0; index < request.Facts.Obfuscation.StateVariables.size(); ++index)
+    {
+        const ObfuscationStateVariable& variable = request.Facts.Obfuscation.StateVariables[index];
+
+        if (blockIds == nullptr
+            || selectedStateVariables.find(variable.Name) != selectedStateVariables.end()
+            || IsPromptSiteSelected(request, blockIds, variable.FirstSite))
+        {
+            filteredStateVariableIndices.push_back(index);
+        }
+    }
 
     const std::vector<size_t> stateVariableIndices = SelectSpreadIndices(
-        request.Facts.Obfuscation.StateVariables.size(),
+        filteredStateVariableIndices.size(),
         kPromptObfuscationStateVariableLimit);
 
-    if (request.Facts.Obfuscation.StateVariables.size() > stateVariableIndices.size())
+    if (filteredStateVariableIndices.size() > stateVariableIndices.size())
     {
         anyTruncated = true;
     }
 
-    for (size_t index : stateVariableIndices)
+    for (size_t relativeIndex : stateVariableIndices)
     {
+        const size_t index = filteredStateVariableIndices[relativeIndex];
         const ObfuscationStateVariable& variable = request.Facts.Obfuscation.StateVariables[index];
         JsonValue item = JsonValue::MakeObject();
         item.Set("name", JsonValue::MakeString(variable.Name));
@@ -2680,36 +2824,49 @@ JsonValue BuildObfuscationJson(const AnalyzeRequest& request, bool* truncated)
     }
 
     const std::vector<size_t> dispatcherIndices = SelectRankedSpreadIndices(
-        request.Facts.Obfuscation.Dispatchers.size(),
+        filteredDispatcherIndices.size(),
         kPromptObfuscationDispatcherLimit,
-        [&request](size_t index)
+        [&request, &filteredDispatcherIndices](size_t relativeIndex)
         {
+            const size_t index = filteredDispatcherIndices[relativeIndex];
             return request.Facts.Obfuscation.Dispatchers[index].Confidence;
         });
 
-    if (request.Facts.Obfuscation.Dispatchers.size() > dispatcherIndices.size())
+    if (filteredDispatcherIndices.size() > dispatcherIndices.size())
     {
         anyTruncated = true;
     }
 
-    for (size_t index : dispatcherIndices)
+    for (size_t relativeIndex : dispatcherIndices)
     {
+        const size_t index = filteredDispatcherIndices[relativeIndex];
         const ObfuscationDispatcher& dispatcher = request.Facts.Obfuscation.Dispatchers[index];
         JsonValue item = JsonValue::MakeObject();
         JsonValue recoveredEdges = JsonValue::MakeArray();
         bool edgesTruncated = false;
+        std::vector<size_t> filteredEdgeIndices;
+
+        for (size_t edgeIndex = 0; edgeIndex < dispatcher.RecoveredEdges.size(); ++edgeIndex)
+        {
+            if (IsPromptRecoveredEdgeSelected(blockIds, dispatcher.RecoveredEdges[edgeIndex]))
+            {
+                filteredEdgeIndices.push_back(edgeIndex);
+            }
+        }
+
         const std::vector<size_t> edgeIndices = SelectSpreadIndices(
-            dispatcher.RecoveredEdges.size(),
+            filteredEdgeIndices.size(),
             kPromptObfuscationEdgeLimit);
 
-        if (dispatcher.RecoveredEdges.size() > edgeIndices.size())
+        if (filteredEdgeIndices.size() > edgeIndices.size())
         {
             edgesTruncated = true;
             anyTruncated = true;
         }
 
-        for (size_t edgeIndex : edgeIndices)
+        for (size_t relativeEdgeIndex : edgeIndices)
         {
+            const size_t edgeIndex = filteredEdgeIndices[relativeEdgeIndex];
             const RecoveredControlFlowEdge& edge = dispatcher.RecoveredEdges[edgeIndex];
             JsonValue edgeItem = JsonValue::MakeObject();
             edgeItem.Set("source_block", JsonValue::MakeString(edge.SourceBlock));
@@ -2734,21 +2891,33 @@ JsonValue BuildObfuscationJson(const AnalyzeRequest& request, bool* truncated)
         dispatchers.PushBack(item);
     }
 
-    const std::vector<size_t> predicateIndices = SelectRankedSpreadIndices(
-        request.Facts.Obfuscation.OpaquePredicates.size(),
-        kPromptObfuscationPredicateLimit,
-        [&request](size_t index)
+    std::vector<size_t> filteredPredicateIndices;
+
+    for (size_t index = 0; index < request.Facts.Obfuscation.OpaquePredicates.size(); ++index)
+    {
+        if (IsPromptOpaquePredicateSelected(request, blockIds, request.Facts.Obfuscation.OpaquePredicates[index]))
         {
+            filteredPredicateIndices.push_back(index);
+        }
+    }
+
+    const std::vector<size_t> predicateIndices = SelectRankedSpreadIndices(
+        filteredPredicateIndices.size(),
+        kPromptObfuscationPredicateLimit,
+        [&request, &filteredPredicateIndices](size_t relativeIndex)
+        {
+            const size_t index = filteredPredicateIndices[relativeIndex];
             return request.Facts.Obfuscation.OpaquePredicates[index].Confidence;
         });
 
-    if (request.Facts.Obfuscation.OpaquePredicates.size() > predicateIndices.size())
+    if (filteredPredicateIndices.size() > predicateIndices.size())
     {
         anyTruncated = true;
     }
 
-    for (size_t index : predicateIndices)
+    for (size_t relativeIndex : predicateIndices)
     {
+        const size_t index = filteredPredicateIndices[relativeIndex];
         const OpaquePredicateFact& predicate = request.Facts.Obfuscation.OpaquePredicates[index];
         JsonValue item = JsonValue::MakeObject();
         item.Set("site", JsonValue::MakeString(HexU64(predicate.Site)));
@@ -2762,21 +2931,33 @@ JsonValue BuildObfuscationJson(const AnalyzeRequest& request, bool* truncated)
         opaquePredicates.PushBack(item);
     }
 
-    const std::vector<size_t> substitutionIndices = SelectRankedSpreadIndices(
-        request.Facts.Obfuscation.SubstitutionIdioms.size(),
-        kPromptObfuscationSubstitutionLimit,
-        [&request](size_t index)
+    std::vector<size_t> filteredSubstitutionIndices;
+
+    for (size_t index = 0; index < request.Facts.Obfuscation.SubstitutionIdioms.size(); ++index)
+    {
+        if (IsPromptSubstitutionIdiomSelected(request, blockIds, request.Facts.Obfuscation.SubstitutionIdioms[index]))
         {
+            filteredSubstitutionIndices.push_back(index);
+        }
+    }
+
+    const std::vector<size_t> substitutionIndices = SelectRankedSpreadIndices(
+        filteredSubstitutionIndices.size(),
+        kPromptObfuscationSubstitutionLimit,
+        [&request, &filteredSubstitutionIndices](size_t relativeIndex)
+        {
+            const size_t index = filteredSubstitutionIndices[relativeIndex];
             return request.Facts.Obfuscation.SubstitutionIdioms[index].Confidence;
         });
 
-    if (request.Facts.Obfuscation.SubstitutionIdioms.size() > substitutionIndices.size())
+    if (filteredSubstitutionIndices.size() > substitutionIndices.size())
     {
         anyTruncated = true;
     }
 
-    for (size_t index : substitutionIndices)
+    for (size_t relativeIndex : substitutionIndices)
     {
+        const size_t index = filteredSubstitutionIndices[relativeIndex];
         const SubstitutionIdiomFact& idiom = request.Facts.Obfuscation.SubstitutionIdioms[index];
         JsonValue item = JsonValue::MakeObject();
         item.Set("site", JsonValue::MakeString(HexU64(idiom.Site)));
@@ -2796,6 +2977,7 @@ JsonValue BuildObfuscationJson(const AnalyzeRequest& request, bool* truncated)
     object.Set("substitution_idioms", substitutionIdioms);
     object.Set("notes", BuildStringArray(request.Facts.Obfuscation.Notes, kPromptObfuscationNoteLimit, &notesTruncated));
     object.Set("confidence", JsonValue::MakeNumber(request.Facts.Obfuscation.Confidence));
+    object.Set("scope", JsonValue::MakeString(blockIds == nullptr ? "function" : "chunk"));
     object.Set(
         "usage_guidance",
         JsonValue::MakeString("Prefer high-confidence recovered_edges over raw dispatcher loop edges; use opaque_predicates only for proven dead edges; use substitution_idioms only as local simplification evidence; preserve uncertainty for unresolved state transitions."));
@@ -2808,26 +2990,54 @@ JsonValue BuildObfuscationJson(const AnalyzeRequest& request, bool* truncated)
     return object;
 }
 
-JsonValue BuildSemanticControlFlowJson(const AnalyzeRequest& request, bool* truncated)
+JsonValue BuildObfuscationJson(const AnalyzeRequest& request, bool* truncated)
+{
+    return BuildObfuscationJson(request, nullptr, truncated);
+}
+
+JsonValue BuildObfuscationJsonForBlocks(
+    const AnalyzeRequest& request,
+    const std::set<std::string>& blockIds,
+    bool* truncated)
+{
+    return BuildObfuscationJson(request, &blockIds, truncated);
+}
+
+JsonValue BuildSemanticControlFlowJson(
+    const AnalyzeRequest& request,
+    const std::set<std::string>* blockIds,
+    bool* truncated)
 {
     JsonValue object = JsonValue::MakeObject();
     JsonValue edges = JsonValue::MakeArray();
     bool notesTruncated = false;
-    const std::vector<size_t> indices = SelectRankedSpreadIndices(
-        request.Facts.SemanticControlFlow.Edges.size(),
-        kPromptSemanticControlFlowEdgeLimit,
-        [&request](size_t index)
+    std::vector<size_t> filteredEdgeIndices;
+
+    for (size_t index = 0; index < request.Facts.SemanticControlFlow.Edges.size(); ++index)
+    {
+        if (IsPromptSemanticEdgeSelected(blockIds, request.Facts.SemanticControlFlow.Edges[index]))
         {
+            filteredEdgeIndices.push_back(index);
+        }
+    }
+
+    const std::vector<size_t> indices = SelectRankedSpreadIndices(
+        filteredEdgeIndices.size(),
+        kPromptSemanticControlFlowEdgeLimit,
+        [&request, &filteredEdgeIndices](size_t relativeIndex)
+        {
+            const size_t index = filteredEdgeIndices[relativeIndex];
             return request.Facts.SemanticControlFlow.Edges[index].Confidence;
         });
 
     if (truncated != nullptr)
     {
-        *truncated = request.Facts.SemanticControlFlow.Edges.size() > indices.size();
+        *truncated = filteredEdgeIndices.size() > indices.size();
     }
 
-    for (size_t index : indices)
+    for (size_t relativeIndex : indices)
     {
+        const size_t index = filteredEdgeIndices[relativeIndex];
         const SemanticControlFlowEdge& edge = request.Facts.SemanticControlFlow.Edges[index];
         JsonValue item = JsonValue::MakeObject();
         item.Set("source_block", JsonValue::MakeString(edge.SourceBlock));
@@ -2845,6 +3055,7 @@ JsonValue BuildSemanticControlFlowJson(const AnalyzeRequest& request, bool* trun
     object.Set("edges", edges);
     object.Set("notes", BuildStringArray(request.Facts.SemanticControlFlow.Notes, kPromptSemanticControlFlowNoteLimit, &notesTruncated));
     object.Set("confidence", JsonValue::MakeNumber(request.Facts.SemanticControlFlow.Confidence));
+    object.Set("scope", JsonValue::MakeString(blockIds == nullptr ? "function" : "chunk"));
     object.Set(
         "usage_guidance",
         JsonValue::MakeString("Use high-confidence non-dead edges as the semantic CFG overlay for recovered structure; use dead edges only to prune proven opaque-predicate targets; fall back to raw blocks where this overlay has no edge."));
@@ -2855,6 +3066,19 @@ JsonValue BuildSemanticControlFlowJson(const AnalyzeRequest& request, bool* trun
     }
 
     return object;
+}
+
+JsonValue BuildSemanticControlFlowJson(const AnalyzeRequest& request, bool* truncated)
+{
+    return BuildSemanticControlFlowJson(request, nullptr, truncated);
+}
+
+JsonValue BuildSemanticControlFlowJsonForBlocks(
+    const AnalyzeRequest& request,
+    const std::set<std::string>& blockIds,
+    bool* truncated)
+{
+    return BuildSemanticControlFlowJson(request, &blockIds, truncated);
 }
 
 JsonValue BuildControlFlowJson(const AnalyzeRequest& request, bool* truncated)
@@ -4889,8 +5113,8 @@ JsonValue BuildChunkFactsJson(
     root.Set("recovered_locals", BuildRecoveredLocalsJson(request, &recoveredLocalsTruncated));
     root.Set("call_arguments", BuildCallArgumentsJsonForAddresses(request, instructionAddresses, &callArgumentsTruncated));
     root.Set("value_merges", BuildValueMergesJsonForBlocks(request, blockIds, &valueMergesTruncated));
-    root.Set("obfuscation", BuildObfuscationJson(request, &obfuscationTruncated));
-    root.Set("semantic_control_flow", BuildSemanticControlFlowJson(request, &semanticControlFlowTruncated));
+    root.Set("obfuscation", BuildObfuscationJsonForBlocks(request, blockIds, &obfuscationTruncated));
+    root.Set("semantic_control_flow", BuildSemanticControlFlowJsonForBlocks(request, blockIds, &semanticControlFlowTruncated));
     root.Set("data_references", BuildDataReferencesJsonForAddresses(request, instructionAddresses, &dataReferencesTruncated));
     root.Set("call_targets", BuildCallTargetsJsonForAddresses(request, instructionAddresses, &callTargetsTruncated));
     root.Set("normalized_conditions", BuildNormalizedConditionsJsonForBlocks(request, blockIds, &normalizedConditionsTruncated));
@@ -7609,6 +7833,26 @@ std::string BuildDebugPromptDump(const AnalyzeRequest& request)
     dump += BuildUserPrompt(request);
     dump += "\n\nprompt_facts_json:\n";
     dump += SerializeJson(BuildPromptFactsJson(request), true);
+    dump += "\n";
+    return dump;
+}
+
+std::string BuildDebugFirstChunkPromptDump(
+    const AnalyzeRequest& request,
+    const LlmClientConfig& config)
+{
+    const std::vector<ChunkPlan> chunkPlans = BuildChunkPlans(request, config);
+
+    if (chunkPlans.empty())
+    {
+        return std::string();
+    }
+
+    std::string dump;
+    dump += "chunk_system_prompt:\n";
+    dump += BuildChunkSystemPrompt(request);
+    dump += "\n\nchunk_user_prompt:\n";
+    dump += BuildChunkUserPrompt(request, chunkPlans.front());
     dump += "\n";
     return dump;
 }

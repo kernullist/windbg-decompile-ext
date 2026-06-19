@@ -1589,6 +1589,35 @@ void TestObfuscationFactsSnapshot()
     Expect(promptDump.find("semantic edge:") != std::string::npos, "analyzer skeleton should render semantic CFG comments");
     Expect(promptDump.find("\"usage_guidance\"") != std::string::npos, "prompt dump should include obfuscation usage guidance");
 
+    decomp::AnalyzeRequest chunkScopedRequest;
+    chunkScopedRequest.RequestId = "obfuscation_chunk_scope_snapshot";
+    chunkScopedRequest.Facts = facts;
+
+    decomp::SubstitutionIdiomFact outsideChunkIdiom;
+    outsideChunkIdiom.BlockId = "bb_outside_chunk";
+    outsideChunkIdiom.OriginalExpression = "OUTSIDE_CHUNK_OBF_MARKER";
+    outsideChunkIdiom.SimplifiedExpression = "outside";
+    outsideChunkIdiom.Pattern = "outside_chunk_marker";
+    outsideChunkIdiom.Confidence = 0.99;
+    chunkScopedRequest.Facts.Obfuscation.SubstitutionIdioms.push_back(outsideChunkIdiom);
+
+    decomp::SemanticControlFlowEdge outsideChunkEdge;
+    outsideChunkEdge.SourceBlock = "bb_outside_chunk";
+    outsideChunkEdge.TargetBlock = "bb_other_outside_chunk";
+    outsideChunkEdge.Evidence = "OUTSIDE_CHUNK_SEMANTIC_MARKER";
+    outsideChunkEdge.Source = "test.outside_chunk";
+    outsideChunkEdge.Confidence = 0.99;
+    chunkScopedRequest.Facts.SemanticControlFlow.Edges.push_back(outsideChunkEdge);
+
+    decomp::LlmClientConfig chunkConfig;
+    chunkConfig.ChunkBlockLimit = 4;
+    chunkConfig.ChunkCountLimit = 8;
+    const std::string chunkPromptDump = decomp::BuildDebugFirstChunkPromptDump(chunkScopedRequest, chunkConfig);
+    Expect(!chunkPromptDump.empty(), "debug chunk prompt dump should expose the first chunk prompt");
+    Expect(chunkPromptDump.find("\"scope\":\"chunk\"") != std::string::npos, "chunk prompt obfuscation facts should be marked as chunk-scoped");
+    Expect(chunkPromptDump.find("OUTSIDE_CHUNK_OBF_MARKER") == std::string::npos, "chunk prompt should omit obfuscation facts outside the chunk block set");
+    Expect(chunkPromptDump.find("OUTSIDE_CHUNK_SEMANTIC_MARKER") == std::string::npos, "chunk prompt should omit semantic CFG edges outside the chunk block set");
+
     const decomp::AnalysisFacts stateSwitchFacts = BuildLegitimateStateSwitchFacts();
     Expect(FindHighConfidenceDispatcher(stateSwitchFacts) == nullptr, "ordinary compare-chain state switch should not become a high-confidence flattening dispatcher");
 

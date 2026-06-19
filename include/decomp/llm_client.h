@@ -82,5 +82,7 @@ bool AnalyzeWithLlm(
     std::string& error);
 
 std::string BuildDebugPromptDump(const AnalyzeRequest& request);
+std::string BuildDebugFirstChunkPromptDump(
+    const AnalyzeRequest& request,
+    const LlmClientConfig& config);
 }
-
