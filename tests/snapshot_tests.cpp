@@ -60,6 +60,19 @@ bool ContainsString(const std::vector<std::string>& values, const std::string& v
     return std::find(values.begin(), values.end(), value) != values.end();
 }
 
+bool ContainsFactSubstring(const decomp::AnalysisFacts& facts, const std::string& needle)
+{
+    for (const std::string& fact : facts.Facts)
+    {
+        if (fact.find(needle) != std::string::npos)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool ContainsReachingValueName(const std::vector<decomp::ReachingValue>& values, const std::string& name)
 {
     for (const decomp::ReachingValue& value : values)
@@ -1544,6 +1557,10 @@ void TestObfuscationFactsSnapshot()
 
     Expect(foundRecoveredEntryEdge, "recovered edges should map state constants back to original body blocks");
     Expect(foundSemanticEntryEdge, "semantic CFG overlay should expose recovered dispatcher edges");
+    Expect(ContainsFactSubstring(facts, "obfuscation dispatcher: header="), "deterministic facts should describe dispatcher evidence");
+    Expect(ContainsFactSubstring(facts, "obfuscation state variable: name=rax"), "deterministic facts should describe dispatcher state variable evidence");
+    Expect(ContainsFactSubstring(facts, "obfuscation recovered edge: source="), "deterministic facts should describe recovered edge evidence");
+    Expect(ContainsFactSubstring(facts, "semantic control-flow overlay: live_edges="), "deterministic facts should summarize semantic CFG overlay evidence");
     Expect(HasEvidenceNodeKind(facts, "obfuscation.dispatcher"), "evidence graph should expose obfuscation dispatcher nodes");
     Expect(HasEvidenceNodeKind(facts, "obfuscation.state_variable"), "evidence graph should expose obfuscation state-variable nodes");
     Expect(HasEvidenceNodeKind(facts, "obfuscation.recovered_edge"), "evidence graph should expose recovered obfuscation edges");
@@ -1661,6 +1678,8 @@ void TestObfuscationFactsSnapshot()
 
     Expect(foundOpaquePredicate, "opaque predicate fixture should prove the dead branch target");
     Expect(foundOpaqueDeadOverlayEdge, "semantic CFG overlay should expose opaque-predicate dead edges");
+    Expect(ContainsFactSubstring(opaqueFacts, "obfuscation opaque predicate: "), "deterministic facts should describe opaque predicate evidence");
+    Expect(ContainsFactSubstring(opaqueFacts, "result=true"), "opaque predicate detail fact should preserve the constant result");
     Expect(HasEvidenceNodeKind(opaqueFacts, "obfuscation.opaque_predicate"), "evidence graph should expose opaque predicate nodes");
     Expect(HasEvidenceNodeKind(opaqueFacts, "semantic_cfg.dead_edge"), "evidence graph should expose semantic CFG dead-edge nodes");
 
@@ -1686,6 +1705,8 @@ void TestObfuscationFactsSnapshot()
 
     Expect(foundAddZero, "substitution fixture should record an add-zero identity");
     Expect(foundCanonicalAdd, "substitution canonicalizer should simplify add-zero canonical values");
+    Expect(ContainsFactSubstring(substitutionFacts, "obfuscation substitution: "), "deterministic facts should describe substitution idiom evidence");
+    Expect(ContainsFactSubstring(substitutionFacts, "pattern=identity_add_zero"), "substitution detail fact should preserve the matched pattern");
     Expect(HasEvidenceNodeKind(substitutionFacts, "obfuscation.substitution_idiom"), "evidence graph should expose substitution idiom nodes");
     Expect(HasEvidenceEdgeRelation(substitutionFacts, "simplifies"), "evidence graph should link substitution facts to IR values");
 

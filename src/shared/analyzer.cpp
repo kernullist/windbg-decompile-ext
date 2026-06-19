@@ -10117,6 +10117,177 @@ double ScoreConfidence(
     score -= static_cast<double>(uncertainPoints.size()) * 0.05;
     return Clamp01(score);
 }
+
+std::string FormatFactConfidence(double confidence)
+{
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(2) << Clamp01(confidence);
+    return stream.str();
+}
+
+void AppendObfuscationDetailFacts(AnalysisFacts& facts)
+{
+    constexpr size_t kMaxDispatcherFacts = 3;
+    constexpr size_t kMaxStateVariableFacts = 3;
+    constexpr size_t kMaxRecoveredEdgeFacts = 4;
+    constexpr size_t kMaxOpaquePredicateFacts = 3;
+    constexpr size_t kMaxSubstitutionFacts = 3;
+
+    size_t emittedDispatchers = 0;
+
+    for (const ObfuscationDispatcher& dispatcher : facts.Obfuscation.Dispatchers)
+    {
+        if (emittedDispatchers >= kMaxDispatcherFacts)
+        {
+            break;
+        }
+
+        facts.Facts.push_back(
+            "obfuscation dispatcher: header="
+            + dispatcher.HeaderBlock
+            + ", kind="
+            + dispatcher.Kind
+            + ", state="
+            + dispatcher.StateVariable
+            + ", dispatcher_blocks="
+            + std::to_string(dispatcher.DispatcherBlocks.size())
+            + ", recovered_edges="
+            + std::to_string(dispatcher.RecoveredEdges.size())
+            + ", confidence="
+            + FormatFactConfidence(dispatcher.Confidence));
+        ++emittedDispatchers;
+    }
+
+    size_t emittedStateVariables = 0;
+
+    for (const ObfuscationStateVariable& variable : facts.Obfuscation.StateVariables)
+    {
+        if (emittedStateVariables >= kMaxStateVariableFacts)
+        {
+            break;
+        }
+
+        const std::string firstSite = variable.FirstSite == 0 ? "unknown" : HexU64(variable.FirstSite);
+
+        facts.Facts.push_back(
+            "obfuscation state variable: name="
+            + variable.Name
+            + ", storage="
+            + variable.Storage
+            + ", first_site="
+            + firstSite
+            + ", reads="
+            + std::to_string(variable.ReadCount)
+            + ", writes="
+            + std::to_string(variable.WriteCount)
+            + ", confidence="
+            + FormatFactConfidence(variable.Confidence));
+        ++emittedStateVariables;
+    }
+
+    size_t emittedRecoveredEdges = 0;
+
+    for (const ObfuscationDispatcher& dispatcher : facts.Obfuscation.Dispatchers)
+    {
+        for (const RecoveredControlFlowEdge& edge : dispatcher.RecoveredEdges)
+        {
+            if (emittedRecoveredEdges >= kMaxRecoveredEdgeFacts)
+            {
+                break;
+            }
+
+            std::string fact =
+                "obfuscation recovered edge: source="
+                + edge.SourceBlock
+                + ", target="
+                + edge.TargetBlock
+                + ", dispatcher="
+                + dispatcher.HeaderBlock
+                + ", state="
+                + edge.StateValue
+                + ", confidence="
+                + FormatFactConfidence(edge.Confidence);
+
+            if (edge.Conditional)
+            {
+                fact += ", conditional=true";
+            }
+
+            if (!edge.Condition.empty())
+            {
+                fact += ", condition=" + edge.Condition;
+            }
+
+            facts.Facts.push_back(fact);
+            ++emittedRecoveredEdges;
+        }
+
+        if (emittedRecoveredEdges >= kMaxRecoveredEdgeFacts)
+        {
+            break;
+        }
+    }
+
+    size_t emittedOpaquePredicates = 0;
+
+    for (const OpaquePredicateFact& predicate : facts.Obfuscation.OpaquePredicates)
+    {
+        if (emittedOpaquePredicates >= kMaxOpaquePredicateFacts)
+        {
+            break;
+        }
+
+        const std::string site = predicate.Site == 0 ? "unknown" : HexU64(predicate.Site);
+        std::string fact =
+            "obfuscation opaque predicate: block="
+            + predicate.BlockId
+            + ", site="
+            + site
+            + ", result="
+            + predicate.ConstantResult
+            + ", live="
+            + predicate.LiveTargetBlock
+            + ", dead="
+            + predicate.DeadTargetBlock
+            + ", confidence="
+            + FormatFactConfidence(predicate.Confidence);
+
+        if (!predicate.Predicate.empty())
+        {
+            fact += ", predicate=" + predicate.Predicate;
+        }
+
+        facts.Facts.push_back(fact);
+        ++emittedOpaquePredicates;
+    }
+
+    size_t emittedSubstitutions = 0;
+
+    for (const SubstitutionIdiomFact& idiom : facts.Obfuscation.SubstitutionIdioms)
+    {
+        if (emittedSubstitutions >= kMaxSubstitutionFacts)
+        {
+            break;
+        }
+
+        const std::string site = idiom.Site == 0 ? "unknown" : HexU64(idiom.Site);
+
+        facts.Facts.push_back(
+            "obfuscation substitution: block="
+            + idiom.BlockId
+            + ", site="
+            + site
+            + ", pattern="
+            + idiom.Pattern
+            + ", original="
+            + idiom.OriginalExpression
+            + " => simplified="
+            + idiom.SimplifiedExpression
+            + ", confidence="
+            + FormatFactConfidence(idiom.Confidence));
+        ++emittedSubstitutions;
+    }
+}
 }
 
 void RefreshDerivedAnalysisFacts(AnalysisFacts& facts)
@@ -10482,6 +10653,7 @@ AnalysisFacts BuildAnalysisFacts(
             + std::to_string(facts.Obfuscation.OpaquePredicates.size())
             + ", substitution_idioms="
             + std::to_string(facts.Obfuscation.SubstitutionIdioms.size()));
+        AppendObfuscationDetailFacts(facts);
     }
 
     if (!facts.SemanticControlFlow.Edges.empty())
