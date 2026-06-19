@@ -1748,6 +1748,74 @@ void TestObfuscationFactsSnapshot()
     outsideChunkEvidenceEdge.Confidence = 0.99;
     chunkScopedRequest.Facts.EvidenceGraph.Edges.push_back(outsideChunkEvidenceEdge);
 
+    decomp::PdbScopedSymbol insideChunkPdbLocal;
+    insideChunkPdbLocal.Name = "INSIDE_CHUNK_PDB_LOCAL_MARKER";
+    insideChunkPdbLocal.Type = "int";
+    insideChunkPdbLocal.Storage = "stack";
+    insideChunkPdbLocal.Location = "inside_chunk";
+    insideChunkPdbLocal.Site = insideChunkSite;
+    insideChunkPdbLocal.Confidence = 0.99;
+    chunkScopedRequest.Facts.Pdb.Locals.push_back(insideChunkPdbLocal);
+
+    decomp::PdbScopedSymbol outsideChunkPdbLocal;
+    outsideChunkPdbLocal.Name = "OUTSIDE_CHUNK_PDB_LOCAL_MARKER";
+    outsideChunkPdbLocal.Type = "int";
+    outsideChunkPdbLocal.Storage = "stack";
+    outsideChunkPdbLocal.Location = "outside_chunk";
+    outsideChunkPdbLocal.Site = 0x77770150;
+    outsideChunkPdbLocal.Confidence = 0.99;
+    chunkScopedRequest.Facts.Pdb.Locals.push_back(outsideChunkPdbLocal);
+
+    decomp::PdbFieldHint insideChunkPdbField;
+    insideChunkPdbField.BaseName = "inside";
+    insideChunkPdbField.BaseType = "INSIDE_CHUNK_PDB_FIELD_MARKER";
+    insideChunkPdbField.FieldName = "field";
+    insideChunkPdbField.FieldType = "int";
+    insideChunkPdbField.Site = insideChunkSite;
+    insideChunkPdbField.Confidence = 0.99;
+    chunkScopedRequest.Facts.Pdb.FieldHints.push_back(insideChunkPdbField);
+
+    decomp::PdbFieldHint outsideChunkPdbField;
+    outsideChunkPdbField.BaseName = "outside";
+    outsideChunkPdbField.BaseType = "OUTSIDE_CHUNK_PDB_FIELD_MARKER";
+    outsideChunkPdbField.FieldName = "field";
+    outsideChunkPdbField.FieldType = "int";
+    outsideChunkPdbField.Site = 0x77770160;
+    outsideChunkPdbField.Confidence = 0.99;
+    chunkScopedRequest.Facts.Pdb.FieldHints.push_back(outsideChunkPdbField);
+
+    decomp::PdbEnumHint insideChunkPdbEnum;
+    insideChunkPdbEnum.TypeName = "INSIDE_CHUNK_PDB_ENUM_MARKER";
+    insideChunkPdbEnum.ConstantName = "InsideValue";
+    insideChunkPdbEnum.Expression = "inside_expr";
+    insideChunkPdbEnum.Value = 1;
+    insideChunkPdbEnum.Site = insideChunkSite;
+    insideChunkPdbEnum.Confidence = 0.99;
+    chunkScopedRequest.Facts.Pdb.EnumHints.push_back(insideChunkPdbEnum);
+
+    decomp::PdbEnumHint outsideChunkPdbEnum;
+    outsideChunkPdbEnum.TypeName = "OUTSIDE_CHUNK_PDB_ENUM_MARKER";
+    outsideChunkPdbEnum.ConstantName = "OutsideValue";
+    outsideChunkPdbEnum.Expression = "outside_expr";
+    outsideChunkPdbEnum.Value = 2;
+    outsideChunkPdbEnum.Site = 0x77770170;
+    outsideChunkPdbEnum.Confidence = 0.99;
+    chunkScopedRequest.Facts.Pdb.EnumHints.push_back(outsideChunkPdbEnum);
+
+    decomp::PdbSourceLocation insideChunkPdbSource;
+    insideChunkPdbSource.Site = insideChunkSite;
+    insideChunkPdbSource.File = "INSIDE_CHUNK_PDB_SOURCE_MARKER.cpp";
+    insideChunkPdbSource.Line = 10;
+    insideChunkPdbSource.Confidence = 0.99;
+    chunkScopedRequest.Facts.Pdb.SourceLocations.push_back(insideChunkPdbSource);
+
+    decomp::PdbSourceLocation outsideChunkPdbSource;
+    outsideChunkPdbSource.Site = 0x77770180;
+    outsideChunkPdbSource.File = "OUTSIDE_CHUNK_PDB_SOURCE_MARKER.cpp";
+    outsideChunkPdbSource.Line = 20;
+    outsideChunkPdbSource.Confidence = 0.99;
+    chunkScopedRequest.Facts.Pdb.SourceLocations.push_back(outsideChunkPdbSource);
+
     decomp::LlmClientConfig chunkConfig;
     chunkConfig.ChunkBlockLimit = 4;
     chunkConfig.ChunkCountLimit = 8;
@@ -1771,6 +1839,14 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("INSIDE_CHUNK_EVIDENCE_EDGE_MARKER") != std::string::npos, "chunk prompt should include evidence graph edges between selected chunk nodes");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_EVIDENCE_NODE_MARKER") == std::string::npos, "chunk prompt should omit evidence graph nodes outside the chunk scope");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_EVIDENCE_EDGE_MARKER") == std::string::npos, "chunk prompt should omit evidence graph edges outside the chunk scope");
+    Expect(chunkPromptDump.find("INSIDE_CHUNK_PDB_LOCAL_MARKER") != std::string::npos, "chunk prompt should include PDB locals inside the chunk instruction set");
+    Expect(chunkPromptDump.find("OUTSIDE_CHUNK_PDB_LOCAL_MARKER") == std::string::npos, "chunk prompt should omit PDB locals outside the chunk instruction set");
+    Expect(chunkPromptDump.find("INSIDE_CHUNK_PDB_FIELD_MARKER") != std::string::npos, "chunk prompt should include PDB field hints inside the chunk instruction set");
+    Expect(chunkPromptDump.find("OUTSIDE_CHUNK_PDB_FIELD_MARKER") == std::string::npos, "chunk prompt should omit PDB field hints outside the chunk instruction set");
+    Expect(chunkPromptDump.find("INSIDE_CHUNK_PDB_ENUM_MARKER") != std::string::npos, "chunk prompt should include PDB enum hints inside the chunk instruction set");
+    Expect(chunkPromptDump.find("OUTSIDE_CHUNK_PDB_ENUM_MARKER") == std::string::npos, "chunk prompt should omit PDB enum hints outside the chunk instruction set");
+    Expect(chunkPromptDump.find("INSIDE_CHUNK_PDB_SOURCE_MARKER") != std::string::npos, "chunk prompt should include PDB source locations inside the chunk instruction set");
+    Expect(chunkPromptDump.find("OUTSIDE_CHUNK_PDB_SOURCE_MARKER") == std::string::npos, "chunk prompt should omit PDB source locations outside the chunk instruction set");
     Expect(chunkPromptDump.find("bb_outside_chunk") == std::string::npos, "chunk graph summary should omit semantic edge blocks outside the chunk block set");
     Expect(chunkPromptDump.find("bb_other_outside_chunk") == std::string::npos, "chunk graph summary should omit semantic edge targets outside the chunk block set");
     Expect(chunkPromptDump.find("bb_outside_important") == std::string::npos, "chunk graph summary should omit important blocks outside the chunk block set");

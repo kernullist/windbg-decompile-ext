@@ -3464,7 +3464,17 @@ JsonValue BuildNormalizedConditionsJson(const AnalyzeRequest& request, bool* tru
     return array;
 }
 
-JsonValue BuildPdbFactsJson(const AnalyzeRequest& request, bool* truncated)
+bool IsPromptAddressSelected(const std::set<uint64_t>* instructionAddresses, uint64_t site)
+{
+    return instructionAddresses == nullptr
+        || site == 0
+        || instructionAddresses->find(site) != instructionAddresses->end();
+}
+
+JsonValue BuildPdbFactsJson(
+    const AnalyzeRequest& request,
+    const std::set<uint64_t>* instructionAddresses,
+    bool* truncated)
 {
     JsonValue object = JsonValue::MakeObject();
     JsonValue params = JsonValue::MakeArray();
@@ -3474,21 +3484,57 @@ JsonValue BuildPdbFactsJson(const AnalyzeRequest& request, bool* truncated)
     JsonValue sourceLocations = JsonValue::MakeArray();
     JsonValue conflicts = JsonValue::MakeArray();
     bool anyTruncated = false;
+    std::vector<size_t> filteredLocalIndices;
+    std::vector<size_t> filteredFieldIndices;
+    std::vector<size_t> filteredEnumIndices;
+    std::vector<size_t> filteredSourceIndices;
+
+    for (size_t index = 0; index < request.Facts.Pdb.Locals.size(); ++index)
+    {
+        if (IsPromptAddressSelected(instructionAddresses, request.Facts.Pdb.Locals[index].Site))
+        {
+            filteredLocalIndices.push_back(index);
+        }
+    }
+
+    for (size_t index = 0; index < request.Facts.Pdb.FieldHints.size(); ++index)
+    {
+        if (IsPromptAddressSelected(instructionAddresses, request.Facts.Pdb.FieldHints[index].Site))
+        {
+            filteredFieldIndices.push_back(index);
+        }
+    }
+
+    for (size_t index = 0; index < request.Facts.Pdb.EnumHints.size(); ++index)
+    {
+        if (IsPromptAddressSelected(instructionAddresses, request.Facts.Pdb.EnumHints[index].Site))
+        {
+            filteredEnumIndices.push_back(index);
+        }
+    }
+
+    for (size_t index = 0; index < request.Facts.Pdb.SourceLocations.size(); ++index)
+    {
+        if (IsPromptAddressSelected(instructionAddresses, request.Facts.Pdb.SourceLocations[index].Site))
+        {
+            filteredSourceIndices.push_back(index);
+        }
+    }
 
     const std::vector<size_t> paramIndices = SelectSpreadIndices(request.Facts.Pdb.Params.size(), kPromptPdbParamLimit);
-    const std::vector<size_t> localIndices = SelectSpreadIndices(request.Facts.Pdb.Locals.size(), kPromptPdbLocalLimit);
-    const std::vector<size_t> fieldIndices = SelectSpreadIndices(request.Facts.Pdb.FieldHints.size(), kPromptPdbFieldHintLimit);
-    const std::vector<size_t> enumIndices = SelectSpreadIndices(request.Facts.Pdb.EnumHints.size(), kPromptPdbEnumHintLimit);
-    const std::vector<size_t> sourceIndices = SelectSpreadIndices(request.Facts.Pdb.SourceLocations.size(), kPromptPdbSourceLocationLimit);
+    const std::vector<size_t> localIndices = SelectSpreadIndices(filteredLocalIndices.size(), kPromptPdbLocalLimit);
+    const std::vector<size_t> fieldIndices = SelectSpreadIndices(filteredFieldIndices.size(), kPromptPdbFieldHintLimit);
+    const std::vector<size_t> enumIndices = SelectSpreadIndices(filteredEnumIndices.size(), kPromptPdbEnumHintLimit);
+    const std::vector<size_t> sourceIndices = SelectSpreadIndices(filteredSourceIndices.size(), kPromptPdbSourceLocationLimit);
     const std::vector<size_t> conflictIndices = SelectSpreadIndices(request.Facts.Pdb.Conflicts.size(), kPromptPdbConflictLimit);
 
     anyTruncated = anyTruncated
         || request.Facts.Pdb.PrototypeParameters.size() > 16
         || request.Facts.Pdb.Params.size() > paramIndices.size()
-        || request.Facts.Pdb.Locals.size() > localIndices.size()
-        || request.Facts.Pdb.FieldHints.size() > fieldIndices.size()
-        || request.Facts.Pdb.EnumHints.size() > enumIndices.size()
-        || request.Facts.Pdb.SourceLocations.size() > sourceIndices.size()
+        || filteredLocalIndices.size() > localIndices.size()
+        || filteredFieldIndices.size() > fieldIndices.size()
+        || filteredEnumIndices.size() > enumIndices.size()
+        || filteredSourceIndices.size() > sourceIndices.size()
         || request.Facts.Pdb.Conflicts.size() > conflictIndices.size();
 
     for (size_t index : paramIndices)
@@ -3504,8 +3550,9 @@ JsonValue BuildPdbFactsJson(const AnalyzeRequest& request, bool* truncated)
         params.PushBack(item);
     }
 
-    for (size_t index : localIndices)
+    for (size_t relativeIndex : localIndices)
     {
+        const size_t index = filteredLocalIndices[relativeIndex];
         const PdbScopedSymbol& symbol = request.Facts.Pdb.Locals[index];
         JsonValue item = JsonValue::MakeObject();
         item.Set("name", JsonValue::MakeString(symbol.Name));
@@ -3517,8 +3564,9 @@ JsonValue BuildPdbFactsJson(const AnalyzeRequest& request, bool* truncated)
         locals.PushBack(item);
     }
 
-    for (size_t index : fieldIndices)
+    for (size_t relativeIndex : fieldIndices)
     {
+        const size_t index = filteredFieldIndices[relativeIndex];
         const PdbFieldHint& hint = request.Facts.Pdb.FieldHints[index];
         JsonValue item = JsonValue::MakeObject();
         item.Set("base_name", JsonValue::MakeString(hint.BaseName));
@@ -3532,8 +3580,9 @@ JsonValue BuildPdbFactsJson(const AnalyzeRequest& request, bool* truncated)
         fieldHints.PushBack(item);
     }
 
-    for (size_t index : enumIndices)
+    for (size_t relativeIndex : enumIndices)
     {
+        const size_t index = filteredEnumIndices[relativeIndex];
         const PdbEnumHint& hint = request.Facts.Pdb.EnumHints[index];
         JsonValue item = JsonValue::MakeObject();
         item.Set("type_name", JsonValue::MakeString(hint.TypeName));
@@ -3545,8 +3594,9 @@ JsonValue BuildPdbFactsJson(const AnalyzeRequest& request, bool* truncated)
         enumHints.PushBack(item);
     }
 
-    for (size_t index : sourceIndices)
+    for (size_t relativeIndex : sourceIndices)
     {
+        const size_t index = filteredSourceIndices[relativeIndex];
         const PdbSourceLocation& source = request.Facts.Pdb.SourceLocations[index];
         JsonValue item = JsonValue::MakeObject();
         item.Set("site", JsonValue::MakeString(HexU64(source.Site)));
@@ -3576,6 +3626,7 @@ JsonValue BuildPdbFactsJson(const AnalyzeRequest& request, bool* truncated)
     object.Set("source_locations", sourceLocations);
     object.Set("conflicts", conflicts);
     object.Set("confidence", JsonValue::MakeNumber(request.Facts.Pdb.Confidence));
+    object.Set("scope", JsonValue::MakeString(instructionAddresses == nullptr ? "function" : "chunk"));
 
     if (truncated != nullptr)
     {
@@ -3583,6 +3634,19 @@ JsonValue BuildPdbFactsJson(const AnalyzeRequest& request, bool* truncated)
     }
 
     return object;
+}
+
+JsonValue BuildPdbFactsJson(const AnalyzeRequest& request, bool* truncated)
+{
+    return BuildPdbFactsJson(request, nullptr, truncated);
+}
+
+JsonValue BuildPdbFactsJsonForAddresses(
+    const AnalyzeRequest& request,
+    const std::set<uint64_t>& instructionAddresses,
+    bool* truncated)
+{
+    return BuildPdbFactsJson(request, &instructionAddresses, truncated);
 }
 
 JsonValue BuildSessionPolicyJson(const AnalyzeRequest& request)
@@ -5492,7 +5556,7 @@ JsonValue BuildChunkFactsJson(
     root.Set("idioms", BuildIdiomsJsonForAddresses(request, instructionAddresses, &idiomsTruncated));
     root.Set("callee_summaries", BuildCalleeSummariesJsonForAddresses(request, instructionAddresses, &calleeSummariesTruncated));
     root.Set("normalized_conditions", BuildNormalizedConditionsJsonForBlocks(request, blockIds, &normalizedConditionsTruncated));
-    root.Set("pdb", BuildPdbFactsJson(request, &pdbTruncated));
+    root.Set("pdb", BuildPdbFactsJsonForAddresses(request, instructionAddresses, &pdbTruncated));
     root.Set("evidence_graph", BuildEvidenceGraphJsonForScope(request, blockIds, instructionAddresses, &evidenceGraphTruncated));
     root.Set("global_facts", BuildChunkGlobalFactsJson(request, blockIds, kChunkPromptFactLimit, &factsTruncated));
     root.Set("global_uncertainties", BuildChunkGlobalUncertaintiesJson(request, blockIds, kChunkPromptUncertaintyLimit, &uncertaintiesTruncated));
