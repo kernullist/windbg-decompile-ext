@@ -1600,6 +1600,9 @@ void TestObfuscationFactsSnapshot()
     outsideChunkIdiom.Pattern = "outside_chunk_marker";
     outsideChunkIdiom.Confidence = 0.99;
     chunkScopedRequest.Facts.Obfuscation.SubstitutionIdioms.push_back(outsideChunkIdiom);
+    chunkScopedRequest.Facts.Facts.insert(
+        chunkScopedRequest.Facts.Facts.begin(),
+        "obfuscation substitution: block=bb_outside_chunk, original=OUTSIDE_CHUNK_FACT_MARKER => simplified=outside, confidence=0.99");
 
     decomp::SemanticControlFlowEdge outsideChunkEdge;
     outsideChunkEdge.SourceBlock = "bb_outside_chunk";
@@ -1617,6 +1620,7 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("\"scope\":\"chunk\"") != std::string::npos, "chunk prompt obfuscation facts should be marked as chunk-scoped");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_OBF_MARKER") == std::string::npos, "chunk prompt should omit obfuscation facts outside the chunk block set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_SEMANTIC_MARKER") == std::string::npos, "chunk prompt should omit semantic CFG edges outside the chunk block set");
+    Expect(chunkPromptDump.find("OUTSIDE_CHUNK_FACT_MARKER") == std::string::npos, "chunk prompt should omit obfuscation detail facts outside the chunk block set");
 
     const decomp::AnalysisFacts stateSwitchFacts = BuildLegitimateStateSwitchFacts();
     Expect(FindHighConfidenceDispatcher(stateSwitchFacts) == nullptr, "ordinary compare-chain state switch should not become a high-confidence flattening dispatcher");

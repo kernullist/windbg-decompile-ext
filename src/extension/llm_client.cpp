@@ -2024,6 +2024,97 @@ JsonValue BuildStringArray(
     return array;
 }
 
+bool IsChunkScopedObfuscationFact(const std::string& fact)
+{
+    return StartsWithInsensitive(fact, "obfuscation dispatcher:")
+        || StartsWithInsensitive(fact, "obfuscation recovered edge:")
+        || StartsWithInsensitive(fact, "obfuscation opaque predicate:")
+        || StartsWithInsensitive(fact, "obfuscation substitution:");
+}
+
+bool ChunkFactReferencesBlock(const std::string& fact, const std::string& blockId)
+{
+    if (blockId.empty())
+    {
+        return false;
+    }
+
+    const std::vector<std::string> fields = {
+        "header",
+        "source",
+        "target",
+        "dispatcher",
+        "block",
+        "live",
+        "dead"
+    };
+
+    for (const std::string& field : fields)
+    {
+        const std::string marker = field + "=" + blockId;
+        const size_t position = fact.find(marker);
+
+        if (position == std::string::npos)
+        {
+            continue;
+        }
+
+        const size_t end = position + marker.size();
+
+        if (end == fact.size() || fact[end] == ',')
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool ChunkFactReferencesAnyBlock(const std::string& fact, const std::set<std::string>& blockIds)
+{
+    for (const std::string& blockId : blockIds)
+    {
+        if (ChunkFactReferencesBlock(fact, blockId))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+JsonValue BuildChunkGlobalFactsJson(
+    const AnalyzeRequest& request,
+    const std::set<std::string>& blockIds,
+    size_t limit,
+    bool* truncated)
+{
+    std::vector<std::string> filteredFacts;
+    bool filteredOut = false;
+
+    for (const std::string& fact : request.Facts.Facts)
+    {
+        if (!IsChunkScopedObfuscationFact(fact) || ChunkFactReferencesAnyBlock(fact, blockIds))
+        {
+            filteredFacts.push_back(fact);
+        }
+        else
+        {
+            filteredOut = true;
+        }
+    }
+
+    bool arrayTruncated = false;
+    JsonValue array = BuildStringArray(filteredFacts, limit, &arrayTruncated);
+
+    if (truncated != nullptr)
+    {
+        *truncated = filteredOut || arrayTruncated;
+    }
+
+    return array;
+}
+
 JsonValue BuildRegionsJson(const AnalyzeRequest& request, bool* truncated)
 {
     JsonValue regions = JsonValue::MakeArray();
@@ -5119,7 +5210,7 @@ JsonValue BuildChunkFactsJson(
     root.Set("call_targets", BuildCallTargetsJsonForAddresses(request, instructionAddresses, &callTargetsTruncated));
     root.Set("normalized_conditions", BuildNormalizedConditionsJsonForBlocks(request, blockIds, &normalizedConditionsTruncated));
     root.Set("pdb", BuildPdbFactsJson(request, &pdbTruncated));
-    root.Set("global_facts", BuildStringArray(request.Facts.Facts, kChunkPromptFactLimit, &factsTruncated));
+    root.Set("global_facts", BuildChunkGlobalFactsJson(request, blockIds, kChunkPromptFactLimit, &factsTruncated));
     root.Set("global_uncertainties", BuildStringArray(request.Facts.UncertainPoints, kChunkPromptUncertaintyLimit, &uncertaintiesTruncated));
     root.Set("pre_llm_confidence", JsonValue::MakeNumber(request.Facts.PreLlmConfidence));
 
