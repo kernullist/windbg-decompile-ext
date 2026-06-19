@@ -1596,6 +1596,9 @@ void TestObfuscationFactsSnapshot()
     chunkScopedRequest.Facts.Abi.HomeSlots.push_back("CHUNK_ABI_HOME_SLOT_MARKER");
     chunkScopedRequest.Facts.Abi.NoReturnCalls.push_back("CHUNK_ABI_NO_RETURN_MARKER");
     chunkScopedRequest.Facts.Abi.Notes.push_back("CHUNK_ABI_NOTE_MARKER");
+    chunkScopedRequest.Facts.SessionPolicy.ExecutionKind = "CHUNK_SESSION_EXECUTION_MARKER";
+    chunkScopedRequest.Facts.SessionPolicy.AnalysisStrategy = "CHUNK_SESSION_STRATEGY_MARKER";
+    chunkScopedRequest.Facts.SessionPolicy.Notes.push_back("CHUNK_SESSION_NOTE_MARKER");
 
     decomp::SubstitutionIdiomFact outsideChunkIdiom;
     outsideChunkIdiom.BlockId = "bb_outside_chunk";
@@ -1919,6 +1922,7 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("INSIDE_CHUNK_CONTROL_FLOW_MARKER") != std::string::npos, "chunk prompt should include control-flow regions inside the chunk block set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_REGION_MARKER") == std::string::npos, "chunk graph summary should omit control-flow regions outside the chunk block set");
     Expect(chunkPromptDump.find("CHUNK_ABI_HOME_SLOT_MARKER") != std::string::npos, "chunk prompt should include ABI facts for calling-convention context");
+    Expect(chunkPromptDump.find("CHUNK_SESSION_EXECUTION_MARKER") != std::string::npos, "chunk prompt should include session policy facts for debugger context");
     Expect(chunkPromptDump.find("0x13579B") != std::string::npos, "chunk prompt should include stack pointer facts inside the chunk instruction set");
     Expect(chunkPromptDump.find("0x7ABCDE") == std::string::npos, "chunk prompt should omit stack pointer facts outside the chunk instruction set");
     Expect(chunkPromptDump.find("INSIDE_CHUNK_IR_TARGET_MARKER") != std::string::npos, "chunk prompt should include IR values inside the chunk block set");
