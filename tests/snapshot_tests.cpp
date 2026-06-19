@@ -1621,6 +1621,8 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_OBF_MARKER") == std::string::npos, "chunk prompt should omit obfuscation facts outside the chunk block set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_SEMANTIC_MARKER") == std::string::npos, "chunk prompt should omit semantic CFG edges outside the chunk block set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_FACT_MARKER") == std::string::npos, "chunk prompt should omit obfuscation detail facts outside the chunk block set");
+    Expect(chunkPromptDump.find("bb_outside_chunk") == std::string::npos, "chunk graph summary should omit semantic edge blocks outside the chunk block set");
+    Expect(chunkPromptDump.find("bb_other_outside_chunk") == std::string::npos, "chunk graph summary should omit semantic edge targets outside the chunk block set");
 
     const decomp::AnalysisFacts stateSwitchFacts = BuildLegitimateStateSwitchFacts();
     Expect(FindHighConfidenceDispatcher(stateSwitchFacts) == nullptr, "ordinary compare-chain state switch should not become a high-confidence flattening dispatcher");

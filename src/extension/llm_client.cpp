@@ -3780,7 +3780,9 @@ JsonValue BuildCountsJson(const AnalyzeRequest& request)
     return counts;
 }
 
-JsonValue BuildGraphSummaryJson(const AnalyzeRequest& request)
+JsonValue BuildGraphSummaryJson(
+    const AnalyzeRequest& request,
+    const std::set<std::string>* blockIds)
 {
     JsonValue graph = JsonValue::MakeObject();
     JsonValue entry = JsonValue::MakeObject();
@@ -3823,9 +3825,18 @@ JsonValue BuildGraphSummaryJson(const AnalyzeRequest& request)
         conditions.PushBack(item);
     }
 
-    for (size_t index = 0; index < request.Facts.SemanticControlFlow.Edges.size() && index < kPromptSemanticControlFlowEdgeLimit; ++index)
+    for (size_t index = 0;
+        index < request.Facts.SemanticControlFlow.Edges.size()
+        && semanticEdges.GetArray().size() < kPromptSemanticControlFlowEdgeLimit;
+        ++index)
     {
         const SemanticControlFlowEdge& edge = request.Facts.SemanticControlFlow.Edges[index];
+
+        if (!IsPromptSemanticEdgeSelected(blockIds, edge))
+        {
+            continue;
+        }
+
         JsonValue item = JsonValue::MakeObject();
         item.Set("source", JsonValue::MakeString(edge.SourceBlock));
         item.Set("target", JsonValue::MakeString(edge.TargetBlock));
@@ -3854,12 +3865,25 @@ JsonValue BuildGraphSummaryJson(const AnalyzeRequest& request)
     }
 
     graph.Set("entry", entry);
+    graph.Set("scope", JsonValue::MakeString(blockIds == nullptr ? "function" : "chunk"));
     graph.Set("regions", regions);
     graph.Set("conditions", conditions);
     graph.Set("semantic_edges", semanticEdges);
     graph.Set("important_blocks", importantBlocks);
     graph.Set("truncated_policy", JsonValue::MakeString("When any truncation flag is true, keep the omitted graph portions uncertain unless supported by listed evidence."));
     return graph;
+}
+
+JsonValue BuildGraphSummaryJson(const AnalyzeRequest& request)
+{
+    return BuildGraphSummaryJson(request, nullptr);
+}
+
+JsonValue BuildGraphSummaryJsonForBlocks(
+    const AnalyzeRequest& request,
+    const std::set<std::string>& blockIds)
+{
+    return BuildGraphSummaryJson(request, &blockIds);
 }
 
 JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
@@ -5187,7 +5211,7 @@ JsonValue BuildChunkFactsJson(
 
     root.Set("function_overview", functionOverview);
     root.Set("chunk", chunk);
-    root.Set("graph_summary", BuildGraphSummaryJson(request));
+    root.Set("graph_summary", BuildGraphSummaryJsonForBlocks(request, blockIds));
     root.Set("global_instruction_window_head", BuildInstructionWindowJson(request, false));
     root.Set("global_instruction_window_middle", globalMiddleInstructionIndex.has_value() ? BuildInstructionWindowJson(request, globalMiddleInstructionIndex.value()) : JsonValue::MakeArray());
     root.Set("global_instruction_window_tail", BuildInstructionWindowJson(request, true));
