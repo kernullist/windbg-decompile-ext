@@ -4966,6 +4966,56 @@ JsonValue BuildIdiomsJsonForAddresses(
     return array;
 }
 
+JsonValue BuildCalleeSummariesJsonForAddresses(
+    const AnalyzeRequest& request,
+    const std::set<uint64_t>& instructionAddresses,
+    bool* truncated)
+{
+    std::vector<size_t> filteredIndices;
+
+    for (size_t index = 0; index < request.Facts.CalleeSummaries.size(); ++index)
+    {
+        if (instructionAddresses.find(request.Facts.CalleeSummaries[index].Site) != instructionAddresses.end())
+        {
+            filteredIndices.push_back(index);
+        }
+    }
+
+    if (truncated != nullptr)
+    {
+        *truncated = filteredIndices.size() > kPromptCalleeSummaryLimit;
+    }
+
+    JsonValue array = JsonValue::MakeArray();
+    const std::vector<size_t> sampled = SelectRankedSpreadIndices(
+        filteredIndices.size(),
+        kPromptCalleeSummaryLimit,
+        [&request, &filteredIndices](size_t relativeIndex)
+        {
+            return ScorePromptCalleeSummary(request.Facts.CalleeSummaries[filteredIndices[relativeIndex]]);
+        });
+
+    for (size_t relativeIndex : sampled)
+    {
+        const CalleeSummary& summary = request.Facts.CalleeSummaries[filteredIndices[relativeIndex]];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("site", JsonValue::MakeString(HexU64(summary.Site)));
+        item.Set("callee", JsonValue::MakeString(summary.Callee));
+        item.Set("return_type", JsonValue::MakeString(summary.ReturnType));
+        item.Set("parameter_model", JsonValue::MakeString(summary.ParameterModel));
+        item.Set("side_effects", JsonValue::MakeString(summary.SideEffects));
+        item.Set("memory_effects", JsonValue::MakeString(summary.MemoryEffects));
+        item.Set("ownership", JsonValue::MakeString(summary.Ownership));
+        item.Set("source", JsonValue::MakeString(summary.Source));
+        item.Set("parameters", BuildPrototypeParametersJson(summary.Parameters, 16, nullptr));
+        item.Set("tail_call", JsonValue::MakeBoolean(summary.TailCall));
+        item.Set("confidence", JsonValue::MakeNumber(summary.Confidence));
+        array.PushBack(item);
+    }
+
+    return array;
+}
+
 JsonValue BuildCallTargetsJsonForAddresses(
     const AnalyzeRequest& request,
     const std::set<uint64_t>& instructionAddresses,
@@ -5300,6 +5350,7 @@ JsonValue BuildChunkFactsJson(
     bool callTargetsTruncated = false;
     bool typeHintsTruncated = false;
     bool idiomsTruncated = false;
+    bool calleeSummariesTruncated = false;
     bool normalizedConditionsTruncated = false;
     bool pdbTruncated = false;
     bool factsTruncated = false;
@@ -5379,6 +5430,7 @@ JsonValue BuildChunkFactsJson(
     root.Set("call_targets", BuildCallTargetsJsonForAddresses(request, instructionAddresses, &callTargetsTruncated));
     root.Set("type_hints", BuildTypeHintsJsonForAddresses(request, instructionAddresses, &typeHintsTruncated));
     root.Set("idioms", BuildIdiomsJsonForAddresses(request, instructionAddresses, &idiomsTruncated));
+    root.Set("callee_summaries", BuildCalleeSummariesJsonForAddresses(request, instructionAddresses, &calleeSummariesTruncated));
     root.Set("normalized_conditions", BuildNormalizedConditionsJsonForBlocks(request, blockIds, &normalizedConditionsTruncated));
     root.Set("pdb", BuildPdbFactsJson(request, &pdbTruncated));
     root.Set("global_facts", BuildChunkGlobalFactsJson(request, blockIds, kChunkPromptFactLimit, &factsTruncated));
@@ -5399,6 +5451,7 @@ JsonValue BuildChunkFactsJson(
     truncation.Set("call_targets", JsonValue::MakeBoolean(callTargetsTruncated));
     truncation.Set("type_hints", JsonValue::MakeBoolean(typeHintsTruncated));
     truncation.Set("idioms", JsonValue::MakeBoolean(idiomsTruncated));
+    truncation.Set("callee_summaries", JsonValue::MakeBoolean(calleeSummariesTruncated));
     truncation.Set("normalized_conditions", JsonValue::MakeBoolean(normalizedConditionsTruncated));
     truncation.Set("pdb", JsonValue::MakeBoolean(pdbTruncated));
     truncation.Set("facts", JsonValue::MakeBoolean(factsTruncated));
@@ -5852,7 +5905,7 @@ std::string BuildChunkSystemPrompt(const AnalyzeRequest& request)
         "Write summary_localized and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_steps, state_updates, observed_calls, observed_memory, identifiers, and API names in English or C-style. "
         "Do not invent external call targets that are not present in the input. "
-        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, obfuscation, semantic_control_flow, data_references, call_targets, type_hints, idioms, and pdb facts as high-signal semantic hints when present. "
+        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, obfuscation, semantic_control_flow, data_references, call_targets, type_hints, idioms, callee_summaries, and pdb facts as high-signal semantic hints when present. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
         "Prefer explicit memory reads, writes, compares, branches, and state transitions over vague summaries. "

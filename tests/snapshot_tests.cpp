@@ -1680,6 +1680,24 @@ void TestObfuscationFactsSnapshot()
     outsideChunkIdiomPattern.Confidence = 0.99;
     chunkScopedRequest.Facts.Idioms.push_back(outsideChunkIdiomPattern);
 
+    decomp::CalleeSummary insideChunkCalleeSummary;
+    insideChunkCalleeSummary.Site = insideChunkSite;
+    insideChunkCalleeSummary.Callee = "INSIDE_CHUNK_CALLEE_SUMMARY_MARKER";
+    insideChunkCalleeSummary.ReturnType = "int";
+    insideChunkCalleeSummary.ParameterModel = "inside_chunk_param";
+    insideChunkCalleeSummary.Source = "test.chunk_scope";
+    insideChunkCalleeSummary.Confidence = 0.99;
+    chunkScopedRequest.Facts.CalleeSummaries.push_back(insideChunkCalleeSummary);
+
+    decomp::CalleeSummary outsideChunkCalleeSummary;
+    outsideChunkCalleeSummary.Site = 0x77770120;
+    outsideChunkCalleeSummary.Callee = "OUTSIDE_CHUNK_CALLEE_SUMMARY_MARKER";
+    outsideChunkCalleeSummary.ReturnType = "int";
+    outsideChunkCalleeSummary.ParameterModel = "outside_chunk_param";
+    outsideChunkCalleeSummary.Source = "test.chunk_scope";
+    outsideChunkCalleeSummary.Confidence = 0.99;
+    chunkScopedRequest.Facts.CalleeSummaries.push_back(outsideChunkCalleeSummary);
+
     decomp::LlmClientConfig chunkConfig;
     chunkConfig.ChunkBlockLimit = 4;
     chunkConfig.ChunkCountLimit = 8;
@@ -1697,6 +1715,8 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_TYPE_HINT_MARKER") == std::string::npos, "chunk prompt should omit type hints outside the chunk instruction set");
     Expect(chunkPromptDump.find("INSIDE_CHUNK_IDIOM_MARKER") != std::string::npos, "chunk prompt should include idioms inside the chunk instruction set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_IDIOM_MARKER") == std::string::npos, "chunk prompt should omit idioms outside the chunk instruction set");
+    Expect(chunkPromptDump.find("INSIDE_CHUNK_CALLEE_SUMMARY_MARKER") != std::string::npos, "chunk prompt should include callee summaries inside the chunk instruction set");
+    Expect(chunkPromptDump.find("OUTSIDE_CHUNK_CALLEE_SUMMARY_MARKER") == std::string::npos, "chunk prompt should omit callee summaries outside the chunk instruction set");
     Expect(chunkPromptDump.find("bb_outside_chunk") == std::string::npos, "chunk graph summary should omit semantic edge blocks outside the chunk block set");
     Expect(chunkPromptDump.find("bb_other_outside_chunk") == std::string::npos, "chunk graph summary should omit semantic edge targets outside the chunk block set");
     Expect(chunkPromptDump.find("bb_outside_important") == std::string::npos, "chunk graph summary should omit important blocks outside the chunk block set");
