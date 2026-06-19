@@ -5,6 +5,8 @@
 #include <exception>
 #include <set>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "decomp/pseudo_tokens.h"
 #include "decomp/string_utils.h"
@@ -147,6 +149,254 @@ void AddIssue(
     issue.Evidence = evidence;
     report.Issues.push_back(issue);
     report.Warnings.push_back(message);
+}
+
+struct ClaimedControlFlowEdge
+{
+    std::string SourceBlock;
+    std::string TargetBlock;
+    bool Dead = false;
+    std::string Evidence;
+};
+
+bool IsBlockIdBoundaryChar(char ch)
+{
+    return std::isalnum(static_cast<unsigned char>(ch)) == 0 && ch != '_';
+}
+
+bool TryReadBlockIdAt(const std::string& text, size_t position, std::string& blockId, size_t& endPosition)
+{
+    if (position + 3 > text.size()
+        || std::tolower(static_cast<unsigned char>(text[position])) != 'b'
+        || std::tolower(static_cast<unsigned char>(text[position + 1])) != 'b'
+        || std::isdigit(static_cast<unsigned char>(text[position + 2])) == 0)
+    {
+        return false;
+    }
+
+    if (position != 0 && !IsBlockIdBoundaryChar(text[position - 1]))
+    {
+        return false;
+    }
+
+    size_t cursor = position + 2;
+
+    while (cursor < text.size() && std::isdigit(static_cast<unsigned char>(text[cursor])) != 0)
+    {
+        ++cursor;
+    }
+
+    if (cursor < text.size() && !IsBlockIdBoundaryChar(text[cursor]))
+    {
+        return false;
+    }
+
+    blockId = text.substr(position, cursor - position);
+    blockId[0] = 'b';
+    blockId[1] = 'b';
+    endPosition = cursor;
+    return true;
+}
+
+size_t SkipAsciiSpaces(const std::string& text, size_t position)
+{
+    while (position < text.size() && std::isspace(static_cast<unsigned char>(text[position])) != 0)
+    {
+        ++position;
+    }
+
+    return position;
+}
+
+bool TryReadEdgeArrow(const std::string& text, size_t position, size_t& endPosition)
+{
+    position = SkipAsciiSpaces(text, position);
+
+    if (position + 2 <= text.size()
+        && ((text[position] == '-' && text[position + 1] == '>')
+            || (text[position] == '=' && text[position + 1] == '>')))
+    {
+        endPosition = position + 2;
+        return true;
+    }
+
+    return false;
+}
+
+std::string BuildClaimContext(const std::string& text, size_t start, size_t end)
+{
+    const size_t contextStart = start > 48 ? start - 48 : 0;
+    const size_t contextEnd = (std::min)(text.size(), end + 48);
+    return text.substr(contextStart, contextEnd - contextStart);
+}
+
+bool IsDeadEdgeClaimContext(const std::string& context)
+{
+    return ContainsInsensitive(context, "dead")
+        || ContainsInsensitive(context, "pruned")
+        || ContainsInsensitive(context, "prune")
+        || ContainsInsensitive(context, "removed")
+        || ContainsInsensitive(context, "omitted")
+        || ContainsInsensitive(context, "opaque")
+        || ContainsInsensitive(context, "bogus")
+        || ContainsInsensitive(context, "junk");
+}
+
+void AppendClaimedControlFlowEdge(
+    std::vector<ClaimedControlFlowEdge>& edges,
+    std::set<std::string>& seen,
+    ClaimedControlFlowEdge edge)
+{
+    const std::string key = edge.SourceBlock
+        + "\n"
+        + edge.TargetBlock
+        + "\n"
+        + (edge.Dead ? "dead" : "live");
+
+    if (seen.insert(key).second)
+    {
+        edges.push_back(std::move(edge));
+    }
+}
+
+void CollectClaimedControlFlowEdgesFromText(
+    const std::string& text,
+    std::vector<ClaimedControlFlowEdge>& edges,
+    std::set<std::string>& seen)
+{
+    for (size_t position = 0; position < text.size(); ++position)
+    {
+        std::string sourceBlock;
+        size_t sourceEnd = 0;
+
+        if (!TryReadBlockIdAt(text, position, sourceBlock, sourceEnd))
+        {
+            continue;
+        }
+
+        size_t arrowEnd = 0;
+
+        if (!TryReadEdgeArrow(text, sourceEnd, arrowEnd))
+        {
+            continue;
+        }
+
+        arrowEnd = SkipAsciiSpaces(text, arrowEnd);
+
+        std::string targetBlock;
+        size_t targetEnd = 0;
+
+        if (!TryReadBlockIdAt(text, arrowEnd, targetBlock, targetEnd))
+        {
+            continue;
+        }
+
+        const std::string context = BuildClaimContext(text, position, targetEnd);
+
+        ClaimedControlFlowEdge edge;
+        edge.SourceBlock = sourceBlock;
+        edge.TargetBlock = targetBlock;
+        edge.Dead = IsDeadEdgeClaimContext(context);
+        edge.Evidence = TrimCopy(context);
+        AppendClaimedControlFlowEdge(edges, seen, std::move(edge));
+        position = targetEnd;
+    }
+}
+
+std::vector<ClaimedControlFlowEdge> CollectClaimedControlFlowEdges(const AnalyzeResponse& response)
+{
+    std::vector<ClaimedControlFlowEdge> edges;
+    std::set<std::string> seen;
+    CollectClaimedControlFlowEdgesFromText(response.PseudoC, edges, seen);
+    CollectClaimedControlFlowEdgesFromText(response.Summary, edges, seen);
+    return edges;
+}
+
+bool HasKnownBlock(const AnalysisFacts& facts, const std::string& blockId)
+{
+    return FindBlock(facts, blockId) != nullptr;
+}
+
+bool HasRawControlFlowEdge(const AnalysisFacts& facts, const std::string& sourceBlock, const std::string& targetBlock)
+{
+    const BasicBlock* block = FindBlock(facts, sourceBlock);
+    return block != nullptr && HasSuccessor(*block, targetBlock);
+}
+
+bool HasRecoveredNonDeadSemanticEdge(const AnalysisFacts& facts, const std::string& sourceBlock, const std::string& targetBlock)
+{
+    for (const SemanticControlFlowEdge& edge : facts.SemanticControlFlow.Edges)
+    {
+        if (!edge.Dead
+            && edge.Confidence >= 0.75
+            && edge.SourceBlock == sourceBlock
+            && edge.TargetBlock == targetBlock)
+        {
+            return true;
+        }
+    }
+
+    for (const ObfuscationDispatcher& dispatcher : facts.Obfuscation.Dispatchers)
+    {
+        if (dispatcher.Confidence < 0.75)
+        {
+            continue;
+        }
+
+        for (const RecoveredControlFlowEdge& edge : dispatcher.RecoveredEdges)
+        {
+            if (edge.Confidence >= 0.75
+                && edge.SourceBlock == sourceBlock
+                && edge.TargetBlock == targetBlock)
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+bool HasOpaqueDeadEdgeEvidence(const AnalysisFacts& facts, const std::string& sourceBlock, const std::string& targetBlock)
+{
+    for (const SemanticControlFlowEdge& edge : facts.SemanticControlFlow.Edges)
+    {
+        if (edge.Dead
+            && edge.Confidence >= 0.75
+            && edge.SourceBlock == sourceBlock
+            && edge.TargetBlock == targetBlock)
+        {
+            return true;
+        }
+    }
+
+    for (const OpaquePredicateFact& predicate : facts.Obfuscation.OpaquePredicates)
+    {
+        if (predicate.Confidence >= 0.75
+            && predicate.BlockId == sourceBlock
+            && predicate.DeadTargetBlock == targetBlock)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool HasSupportedClaimedControlFlowEdge(const AnalysisFacts& facts, const ClaimedControlFlowEdge& edge)
+{
+    if (!HasKnownBlock(facts, edge.SourceBlock) || !HasKnownBlock(facts, edge.TargetBlock))
+    {
+        return false;
+    }
+
+    if (edge.Dead)
+    {
+        return HasOpaqueDeadEdgeEvidence(facts, edge.SourceBlock, edge.TargetBlock);
+    }
+
+    return HasRawControlFlowEdge(facts, edge.SourceBlock, edge.TargetBlock)
+        || HasRecoveredNonDeadSemanticEdge(facts, edge.SourceBlock, edge.TargetBlock);
 }
 
 bool HasReturnInstruction(const AnalysisFacts& facts)
@@ -696,6 +946,45 @@ void CheckObfuscationClaimSupport(const AnalyzeRequest& request, const AnalyzeRe
             "obfuscation.substitution_claim_without_evidence",
             "warning",
             "response claims instruction-substitution simplification without substitution facts");
+    }
+}
+
+void CheckClaimedControlFlowEdgeSupport(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
+{
+    if (response.Confidence <= 0.60)
+    {
+        return;
+    }
+
+    const std::vector<ClaimedControlFlowEdge> claimedEdges = CollectClaimedControlFlowEdges(response);
+
+    for (const ClaimedControlFlowEdge& edge : claimedEdges)
+    {
+        if (HasSupportedClaimedControlFlowEdge(request.Facts, edge))
+        {
+            continue;
+        }
+
+        ++report.FactConflicts;
+
+        if (edge.Dead)
+        {
+            AddIssue(
+                report,
+                "obfuscation.dead_edge_claim_without_matching_evidence",
+                "warning",
+                "response claims a specific dead edge without matching opaque-predicate evidence",
+                edge.SourceBlock + " -> " + edge.TargetBlock + " in " + edge.Evidence);
+        }
+        else
+        {
+            AddIssue(
+                report,
+                "control_flow.edge_claim_without_evidence",
+                "warning",
+                "response claims a concrete control-flow edge not present in raw CFG or semantic CFG evidence",
+                edge.SourceBlock + " -> " + edge.TargetBlock + " in " + edge.Evidence);
+        }
     }
 }
 
@@ -1622,6 +1911,7 @@ VerifyReport VerifyResponse(const AnalyzeRequest& request, AnalyzeResponse& resp
     CheckPseudoBranchDensity(request, response, report);
     CheckSwitchEvidenceConsistency(request, response, report);
     CheckObfuscationClaimSupport(request, response, report);
+    CheckClaimedControlFlowEdgeSupport(request, response, report);
     CheckCalleeSummaryConsistency(request, response, report);
     CheckRecoveredCallCoverage(request, response, report);
     CheckRecoveredCallArgumentConsistency(request, response, report);

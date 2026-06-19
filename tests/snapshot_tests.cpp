@@ -2174,6 +2174,101 @@ void TestVerifierCoverageSnapshot()
     Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.dispatcher_claim_without_evidence"), "verifier should reject unsupported dispatcher recovery claims");
     Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.dead_edge_claim_without_opaque_predicate"), "verifier should reject unsupported opaque dead-edge claims");
     Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.substitution_claim_without_evidence"), "verifier should reject unsupported substitution claims");
+
+    std::string rawSource;
+    std::string rawTarget;
+
+    for (const decomp::BasicBlock& block : request.Facts.Blocks)
+    {
+        if (!block.Successors.empty())
+        {
+            rawSource = block.Id;
+            rawTarget = block.Successors.front();
+            break;
+        }
+    }
+
+    Expect(!rawSource.empty() && !rawTarget.empty(), "diamond fixture should expose at least one raw CFG edge");
+
+    decomp::AnalyzeResponse supportedRawEdgeResponse;
+    supportedRawEdgeResponse.Status = "ok";
+    supportedRawEdgeResponse.PseudoC = "void f(void) { /* semantic edge: " + rawSource + " -> " + rawTarget + " */ return; }";
+    supportedRawEdgeResponse.Summary = "preserves a listed raw edge";
+    supportedRawEdgeResponse.Confidence = 0.91;
+
+    const decomp::VerifyReport supportedRawEdgeReport = decomp::VerifyResponse(request, supportedRawEdgeResponse);
+    Expect(!HasIssueCode(supportedRawEdgeReport, "control_flow.edge_claim_without_evidence"), "verifier should allow edge claims present in raw CFG");
+
+    std::string unsupportedSource;
+    std::string unsupportedTarget;
+
+    for (const decomp::BasicBlock& source : request.Facts.Blocks)
+    {
+        for (const decomp::BasicBlock& target : request.Facts.Blocks)
+        {
+            if (source.Id != target.Id && !ContainsString(source.Successors, target.Id))
+            {
+                unsupportedSource = source.Id;
+                unsupportedTarget = target.Id;
+                break;
+            }
+        }
+
+        if (!unsupportedSource.empty())
+        {
+            break;
+        }
+    }
+
+    Expect(!unsupportedSource.empty() && !unsupportedTarget.empty(), "diamond fixture should expose at least one unsupported CFG edge pair");
+
+    decomp::AnalyzeResponse unsupportedEdgeResponse;
+    unsupportedEdgeResponse.Status = "ok";
+    unsupportedEdgeResponse.PseudoC = "void f(void) { /* semantic edge: " + unsupportedSource + " -> " + unsupportedTarget + " */ return; }";
+    unsupportedEdgeResponse.Summary = "claims an unsupported semantic edge";
+    unsupportedEdgeResponse.Confidence = 0.91;
+
+    const decomp::VerifyReport unsupportedEdgeReport = decomp::VerifyResponse(request, unsupportedEdgeResponse);
+    Expect(HasIssueCode(unsupportedEdgeReport, "control_flow.edge_claim_without_evidence"), "verifier should reject concrete edge claims missing from raw and semantic CFG evidence");
+
+    decomp::AnalyzeResponse unsupportedDeadEdgeResponse;
+    unsupportedDeadEdgeResponse.Status = "ok";
+    unsupportedDeadEdgeResponse.PseudoC = "void f(void) { /* semantic dead edge pruned: " + rawSource + " -> " + rawTarget + " */ return; }";
+    unsupportedDeadEdgeResponse.Summary = "claims a pruned dead edge without opaque proof";
+    unsupportedDeadEdgeResponse.Confidence = 0.91;
+
+    const decomp::VerifyReport unsupportedDeadEdgeReport = decomp::VerifyResponse(request, unsupportedDeadEdgeResponse);
+    Expect(HasIssueCode(unsupportedDeadEdgeReport, "obfuscation.dead_edge_claim_without_matching_evidence"), "verifier should reject specific dead-edge claims without matching opaque predicate evidence");
+
+    const decomp::AnalysisFacts flattenedFacts = BuildFlattenedDispatcherFacts();
+    const decomp::SemanticControlFlowEdge* semanticEdge = nullptr;
+
+    for (const decomp::SemanticControlFlowEdge& edge : flattenedFacts.SemanticControlFlow.Edges)
+    {
+        if (!edge.Dead && edge.Confidence >= 0.75)
+        {
+            semanticEdge = &edge;
+            break;
+        }
+    }
+
+    Expect(semanticEdge != nullptr, "flattened fixture should expose a high-confidence semantic CFG edge");
+
+    if (semanticEdge != nullptr)
+    {
+        decomp::AnalyzeRequest semanticRequest;
+        semanticRequest.RequestId = "verifier_semantic_edge_snapshot";
+        semanticRequest.Facts = flattenedFacts;
+
+        decomp::AnalyzeResponse supportedSemanticEdgeResponse;
+        supportedSemanticEdgeResponse.Status = "ok";
+        supportedSemanticEdgeResponse.PseudoC = "void f(void) { /* semantic edge: " + semanticEdge->SourceBlock + " -> " + semanticEdge->TargetBlock + " */ return; }";
+        supportedSemanticEdgeResponse.Summary = "uses recovered semantic CFG overlay edge";
+        supportedSemanticEdgeResponse.Confidence = 0.91;
+
+        const decomp::VerifyReport supportedSemanticEdgeReport = decomp::VerifyResponse(semanticRequest, supportedSemanticEdgeResponse);
+        Expect(!HasIssueCode(supportedSemanticEdgeReport, "control_flow.edge_claim_without_evidence"), "verifier should allow recovered semantic CFG edge claims");
+    }
 }
 
 void TestUxHelperSnapshot()
