@@ -9671,13 +9671,25 @@ EvidenceGraphFacts BuildEvidenceGraphFacts(const AnalysisFacts& facts)
     for (size_t index = 0; index < facts.Obfuscation.StateVariables.size(); ++index)
     {
         const ObfuscationStateVariable& variable = facts.Obfuscation.StateVariables[index];
-        builder.AddSiteFact(
+        const std::string stateNodeId = builder.AddSiteFact(
             BuildEvidenceIndexedNodeId("obf_state", index),
             "obfuscation.state_variable",
             variable.Name + " " + variable.Storage,
             variable.FirstSite,
             std::string(),
             variable.Confidence);
+
+        for (const IrValue& value : facts.IrValues)
+        {
+            if (value.Target == variable.Name && !value.BlockId.empty())
+            {
+                builder.AddEdge(
+                    BuildEvidenceBlockNodeId(value.BlockId),
+                    stateNodeId,
+                    "writes_state",
+                    (std::min)(variable.Confidence, value.Confidence));
+            }
+        }
     }
 
     for (size_t index = 0; index < facts.Obfuscation.Dispatchers.size(); ++index)

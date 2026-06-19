@@ -1548,6 +1548,7 @@ void TestObfuscationFactsSnapshot()
     Expect(HasEvidenceNodeKind(facts, "obfuscation.state_variable"), "evidence graph should expose obfuscation state-variable nodes");
     Expect(HasEvidenceNodeKind(facts, "obfuscation.recovered_edge"), "evidence graph should expose recovered obfuscation edges");
     Expect(HasEvidenceNodeKind(facts, "semantic_cfg.edge"), "evidence graph should expose semantic CFG edge nodes");
+    Expect(HasEvidenceEdgeRelation(facts, "writes_state"), "evidence graph should link state-writing blocks to state variables");
 
     decomp::AnalyzeRequest request;
     request.RequestId = "obfuscation_snapshot";
