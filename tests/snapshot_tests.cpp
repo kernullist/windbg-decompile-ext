@@ -1665,6 +1665,27 @@ void TestObfuscationFactsSnapshot()
         ? entry->InstructionAddresses.front()
         : 0x13000;
 
+    chunkScopedRequest.Facts.ObservedBehavior.InstructionPointer = insideChunkSite;
+    chunkScopedRequest.Facts.ObservedBehavior.StackPointer = 0x7777ABCD;
+    chunkScopedRequest.Facts.ObservedBehavior.CurrentInstructionInFunction = true;
+
+    decomp::ObservedArgumentValue chunkObservedArgument;
+    chunkObservedArgument.Name = "arg_observed";
+    chunkObservedArgument.Register = "rcx";
+    chunkObservedArgument.Value = 0x7777C0DE;
+    chunkObservedArgument.Symbol = "CHUNK_OBSERVED_ARGUMENT_MARKER";
+    chunkObservedArgument.Source = "test.chunk_scope";
+    chunkObservedArgument.Confidence = 0.99;
+    chunkScopedRequest.Facts.ObservedBehavior.ArgumentSamples.push_back(chunkObservedArgument);
+
+    decomp::ObservedMemoryHotspot chunkObservedHotspot;
+    chunkObservedHotspot.Expression = "CHUNK_OBSERVED_HOTSPOT_MARKER";
+    chunkObservedHotspot.Kind = "read";
+    chunkObservedHotspot.ReadCount = 2;
+    chunkObservedHotspot.Sites.push_back(insideChunkSite);
+    chunkObservedHotspot.Confidence = 0.99;
+    chunkScopedRequest.Facts.ObservedBehavior.MemoryHotspots.push_back(chunkObservedHotspot);
+
     decomp::StackPointerFact insideChunkStackPointer;
     insideChunkStackPointer.Site = insideChunkSite;
     insideChunkStackPointer.DeltaBefore = 0x13579B;
@@ -1923,6 +1944,7 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_REGION_MARKER") == std::string::npos, "chunk graph summary should omit control-flow regions outside the chunk block set");
     Expect(chunkPromptDump.find("CHUNK_ABI_HOME_SLOT_MARKER") != std::string::npos, "chunk prompt should include ABI facts for calling-convention context");
     Expect(chunkPromptDump.find("CHUNK_SESSION_EXECUTION_MARKER") != std::string::npos, "chunk prompt should include session policy facts for debugger context");
+    Expect(chunkPromptDump.find("CHUNK_OBSERVED_ARGUMENT_MARKER") != std::string::npos, "chunk prompt should include observed behavior facts for runtime context");
     Expect(chunkPromptDump.find("0x13579B") != std::string::npos, "chunk prompt should include stack pointer facts inside the chunk instruction set");
     Expect(chunkPromptDump.find("0x7ABCDE") == std::string::npos, "chunk prompt should omit stack pointer facts outside the chunk instruction set");
     Expect(chunkPromptDump.find("INSIDE_CHUNK_IR_TARGET_MARKER") != std::string::npos, "chunk prompt should include IR values inside the chunk block set");
