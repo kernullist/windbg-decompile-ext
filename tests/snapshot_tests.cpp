@@ -1698,6 +1698,56 @@ void TestObfuscationFactsSnapshot()
     outsideChunkCalleeSummary.Confidence = 0.99;
     chunkScopedRequest.Facts.CalleeSummaries.push_back(outsideChunkCalleeSummary);
 
+    decomp::EvidenceNode insideChunkEvidenceNode;
+    insideChunkEvidenceNode.Id = "test_inside_chunk_evidence_node";
+    insideChunkEvidenceNode.Kind = "type_hint";
+    insideChunkEvidenceNode.Label = "INSIDE_CHUNK_EVIDENCE_NODE_MARKER";
+    insideChunkEvidenceNode.Site = insideChunkSite;
+    insideChunkEvidenceNode.BlockId = entry != nullptr ? entry->Id : std::string();
+    insideChunkEvidenceNode.Confidence = 0.99;
+    chunkScopedRequest.Facts.EvidenceGraph.Nodes.push_back(insideChunkEvidenceNode);
+
+    decomp::EvidenceNode insideChunkEvidenceTarget;
+    insideChunkEvidenceTarget.Id = "test_inside_chunk_evidence_target";
+    insideChunkEvidenceTarget.Kind = "callee_summary";
+    insideChunkEvidenceTarget.Label = "INSIDE_CHUNK_EVIDENCE_TARGET_MARKER";
+    insideChunkEvidenceTarget.Site = insideChunkSite;
+    insideChunkEvidenceTarget.BlockId = entry != nullptr ? entry->Id : std::string();
+    insideChunkEvidenceTarget.Confidence = 0.99;
+    chunkScopedRequest.Facts.EvidenceGraph.Nodes.push_back(insideChunkEvidenceTarget);
+
+    decomp::EvidenceEdge insideChunkEvidenceEdge;
+    insideChunkEvidenceEdge.SourceId = insideChunkEvidenceNode.Id;
+    insideChunkEvidenceEdge.TargetId = insideChunkEvidenceTarget.Id;
+    insideChunkEvidenceEdge.Relation = "INSIDE_CHUNK_EVIDENCE_EDGE_MARKER";
+    insideChunkEvidenceEdge.Confidence = 0.99;
+    chunkScopedRequest.Facts.EvidenceGraph.Edges.push_back(insideChunkEvidenceEdge);
+
+    decomp::EvidenceNode outsideChunkEvidenceNode;
+    outsideChunkEvidenceNode.Id = "test_outside_chunk_evidence_node";
+    outsideChunkEvidenceNode.Kind = "type_hint";
+    outsideChunkEvidenceNode.Label = "OUTSIDE_CHUNK_EVIDENCE_NODE_MARKER";
+    outsideChunkEvidenceNode.Site = 0x77770130;
+    outsideChunkEvidenceNode.BlockId = "bb_outside_evidence";
+    outsideChunkEvidenceNode.Confidence = 0.99;
+    chunkScopedRequest.Facts.EvidenceGraph.Nodes.push_back(outsideChunkEvidenceNode);
+
+    decomp::EvidenceNode outsideChunkEvidenceTarget;
+    outsideChunkEvidenceTarget.Id = "test_outside_chunk_evidence_target";
+    outsideChunkEvidenceTarget.Kind = "callee_summary";
+    outsideChunkEvidenceTarget.Label = "OUTSIDE_CHUNK_EVIDENCE_TARGET_MARKER";
+    outsideChunkEvidenceTarget.Site = 0x77770140;
+    outsideChunkEvidenceTarget.BlockId = "bb_outside_evidence";
+    outsideChunkEvidenceTarget.Confidence = 0.99;
+    chunkScopedRequest.Facts.EvidenceGraph.Nodes.push_back(outsideChunkEvidenceTarget);
+
+    decomp::EvidenceEdge outsideChunkEvidenceEdge;
+    outsideChunkEvidenceEdge.SourceId = outsideChunkEvidenceNode.Id;
+    outsideChunkEvidenceEdge.TargetId = outsideChunkEvidenceTarget.Id;
+    outsideChunkEvidenceEdge.Relation = "OUTSIDE_CHUNK_EVIDENCE_EDGE_MARKER";
+    outsideChunkEvidenceEdge.Confidence = 0.99;
+    chunkScopedRequest.Facts.EvidenceGraph.Edges.push_back(outsideChunkEvidenceEdge);
+
     decomp::LlmClientConfig chunkConfig;
     chunkConfig.ChunkBlockLimit = 4;
     chunkConfig.ChunkCountLimit = 8;
@@ -1717,6 +1767,10 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_IDIOM_MARKER") == std::string::npos, "chunk prompt should omit idioms outside the chunk instruction set");
     Expect(chunkPromptDump.find("INSIDE_CHUNK_CALLEE_SUMMARY_MARKER") != std::string::npos, "chunk prompt should include callee summaries inside the chunk instruction set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_CALLEE_SUMMARY_MARKER") == std::string::npos, "chunk prompt should omit callee summaries outside the chunk instruction set");
+    Expect(chunkPromptDump.find("INSIDE_CHUNK_EVIDENCE_NODE_MARKER") != std::string::npos, "chunk prompt should include evidence graph nodes inside the chunk scope");
+    Expect(chunkPromptDump.find("INSIDE_CHUNK_EVIDENCE_EDGE_MARKER") != std::string::npos, "chunk prompt should include evidence graph edges between selected chunk nodes");
+    Expect(chunkPromptDump.find("OUTSIDE_CHUNK_EVIDENCE_NODE_MARKER") == std::string::npos, "chunk prompt should omit evidence graph nodes outside the chunk scope");
+    Expect(chunkPromptDump.find("OUTSIDE_CHUNK_EVIDENCE_EDGE_MARKER") == std::string::npos, "chunk prompt should omit evidence graph edges outside the chunk scope");
     Expect(chunkPromptDump.find("bb_outside_chunk") == std::string::npos, "chunk graph summary should omit semantic edge blocks outside the chunk block set");
     Expect(chunkPromptDump.find("bb_other_outside_chunk") == std::string::npos, "chunk graph summary should omit semantic edge targets outside the chunk block set");
     Expect(chunkPromptDump.find("bb_outside_important") == std::string::npos, "chunk graph summary should omit important blocks outside the chunk block set");

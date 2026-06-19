@@ -3699,7 +3699,40 @@ double ScorePromptEvidenceNode(const EvidenceNode& node)
     return score;
 }
 
-JsonValue BuildEvidenceGraphJson(const AnalyzeRequest& request, bool* truncated)
+bool IsPromptEvidenceNodeSelected(
+    const AnalyzeRequest& request,
+    const std::set<std::string>* blockIds,
+    const std::set<uint64_t>* instructionAddresses,
+    const EvidenceNode& node)
+{
+    if (blockIds == nullptr && instructionAddresses == nullptr)
+    {
+        return true;
+    }
+
+    if (blockIds != nullptr && IsPromptBlockSelected(blockIds, node.BlockId))
+    {
+        return true;
+    }
+
+    if (node.Site != 0 && instructionAddresses != nullptr)
+    {
+        return instructionAddresses->find(node.Site) != instructionAddresses->end();
+    }
+
+    if (node.Site != 0)
+    {
+        return IsPromptSiteSelected(request, blockIds, node.Site);
+    }
+
+    return false;
+}
+
+JsonValue BuildEvidenceGraphJson(
+    const AnalyzeRequest& request,
+    const std::set<std::string>* blockIds,
+    const std::set<uint64_t>* instructionAddresses,
+    bool* truncated)
 {
     JsonValue object = JsonValue::MakeObject();
     JsonValue nodes = JsonValue::MakeArray();
@@ -3707,16 +3740,27 @@ JsonValue BuildEvidenceGraphJson(const AnalyzeRequest& request, bool* truncated)
     bool notesTruncated = false;
     std::set<std::string> selectedNodeIds;
     const EvidenceGraphFacts& graph = request.Facts.EvidenceGraph;
-    const std::vector<size_t> nodeIndices = SelectRankedSpreadIndices(
-        graph.Nodes.size(),
-        kPromptEvidenceNodeLimit,
-        [&graph](size_t index)
+    std::vector<size_t> filteredNodeIndices;
+
+    for (size_t index = 0; index < graph.Nodes.size(); ++index)
+    {
+        if (IsPromptEvidenceNodeSelected(request, blockIds, instructionAddresses, graph.Nodes[index]))
         {
-            return ScorePromptEvidenceNode(graph.Nodes[index]);
+            filteredNodeIndices.push_back(index);
+        }
+    }
+
+    const std::vector<size_t> nodeIndices = SelectRankedSpreadIndices(
+        filteredNodeIndices.size(),
+        kPromptEvidenceNodeLimit,
+        [&graph, &filteredNodeIndices](size_t relativeIndex)
+        {
+            return ScorePromptEvidenceNode(graph.Nodes[filteredNodeIndices[relativeIndex]]);
         });
 
-    for (size_t index : nodeIndices)
+    for (size_t relativeIndex : nodeIndices)
     {
+        const size_t index = filteredNodeIndices[relativeIndex];
         const EvidenceNode& node = graph.Nodes[index];
         JsonValue item = JsonValue::MakeObject();
         item.Set("id", JsonValue::MakeString(node.Id));
@@ -3754,15 +3798,30 @@ JsonValue BuildEvidenceGraphJson(const AnalyzeRequest& request, bool* truncated)
     object.Set("edges", edges);
     object.Set("notes", BuildStringArray(graph.Notes, kPromptEvidenceNoteLimit, &notesTruncated));
     object.Set("coverage", JsonValue::MakeNumber(graph.Coverage));
+    object.Set("scope", JsonValue::MakeString(blockIds == nullptr && instructionAddresses == nullptr ? "function" : "chunk"));
 
     if (truncated != nullptr)
     {
-        *truncated = graph.Nodes.size() > nodeIndices.size()
+        *truncated = filteredNodeIndices.size() > nodeIndices.size()
             || graph.Edges.size() > edges.GetArray().size()
             || notesTruncated;
     }
 
     return object;
+}
+
+JsonValue BuildEvidenceGraphJson(const AnalyzeRequest& request, bool* truncated)
+{
+    return BuildEvidenceGraphJson(request, nullptr, nullptr, truncated);
+}
+
+JsonValue BuildEvidenceGraphJsonForScope(
+    const AnalyzeRequest& request,
+    const std::set<std::string>& blockIds,
+    const std::set<uint64_t>& instructionAddresses,
+    bool* truncated)
+{
+    return BuildEvidenceGraphJson(request, &blockIds, &instructionAddresses, truncated);
 }
 
 JsonValue BuildCountsJson(const AnalyzeRequest& request)
@@ -5353,6 +5412,7 @@ JsonValue BuildChunkFactsJson(
     bool calleeSummariesTruncated = false;
     bool normalizedConditionsTruncated = false;
     bool pdbTruncated = false;
+    bool evidenceGraphTruncated = false;
     bool factsTruncated = false;
     bool uncertaintiesTruncated = false;
 
@@ -5433,6 +5493,7 @@ JsonValue BuildChunkFactsJson(
     root.Set("callee_summaries", BuildCalleeSummariesJsonForAddresses(request, instructionAddresses, &calleeSummariesTruncated));
     root.Set("normalized_conditions", BuildNormalizedConditionsJsonForBlocks(request, blockIds, &normalizedConditionsTruncated));
     root.Set("pdb", BuildPdbFactsJson(request, &pdbTruncated));
+    root.Set("evidence_graph", BuildEvidenceGraphJsonForScope(request, blockIds, instructionAddresses, &evidenceGraphTruncated));
     root.Set("global_facts", BuildChunkGlobalFactsJson(request, blockIds, kChunkPromptFactLimit, &factsTruncated));
     root.Set("global_uncertainties", BuildChunkGlobalUncertaintiesJson(request, blockIds, kChunkPromptUncertaintyLimit, &uncertaintiesTruncated));
     root.Set("pre_llm_confidence", JsonValue::MakeNumber(request.Facts.PreLlmConfidence));
@@ -5454,6 +5515,7 @@ JsonValue BuildChunkFactsJson(
     truncation.Set("callee_summaries", JsonValue::MakeBoolean(calleeSummariesTruncated));
     truncation.Set("normalized_conditions", JsonValue::MakeBoolean(normalizedConditionsTruncated));
     truncation.Set("pdb", JsonValue::MakeBoolean(pdbTruncated));
+    truncation.Set("evidence_graph", JsonValue::MakeBoolean(evidenceGraphTruncated));
     truncation.Set("facts", JsonValue::MakeBoolean(factsTruncated));
     truncation.Set("uncertainties", JsonValue::MakeBoolean(uncertaintiesTruncated));
     root.Set("truncation", truncation);
@@ -5905,7 +5967,7 @@ std::string BuildChunkSystemPrompt(const AnalyzeRequest& request)
         "Write summary_localized and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_steps, state_updates, observed_calls, observed_memory, identifiers, and API names in English or C-style. "
         "Do not invent external call targets that are not present in the input. "
-        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, obfuscation, semantic_control_flow, data_references, call_targets, type_hints, idioms, callee_summaries, and pdb facts as high-signal semantic hints when present. "
+        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, obfuscation, semantic_control_flow, data_references, call_targets, type_hints, idioms, callee_summaries, evidence_graph, and pdb facts as high-signal semantic hints when present. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
         "Prefer explicit memory reads, writes, compares, branches, and state transitions over vague summaries. "
