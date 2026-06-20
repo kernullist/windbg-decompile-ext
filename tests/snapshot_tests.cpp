@@ -3086,6 +3086,9 @@ void TestVerifierCoverageSnapshot()
 
     const decomp::VerifyReport lowEvidenceReport = decomp::VerifyResponse(request, lowEvidenceResponse);
     Expect(HasIssueCode(lowEvidenceReport, "evidence.low_coverage"), "verifier should flag high-confidence responses with sparse high-signal evidence coverage");
+    const std::string lowEvidenceFeedbackPrompt = decomp::BuildDebugVerifierFeedbackPrompt(lowEvidenceReport);
+    Expect(lowEvidenceFeedbackPrompt.find("block-grounded evidence entries") != std::string::npos, "verifier feedback should require block-grounded evidence coverage");
+    Expect(lowEvidenceFeedbackPrompt.find("coverage gap") != std::string::npos, "verifier feedback should require uncertainty for evidence coverage gaps");
 
     decomp::AnalyzeRequest missingGraphRequest = request;
     missingGraphRequest.Facts.EvidenceGraph = decomp::EvidenceGraphFacts();
@@ -3099,6 +3102,9 @@ void TestVerifierCoverageSnapshot()
     const decomp::VerifyReport missingGraphReport = decomp::VerifyResponse(missingGraphRequest, missingGraphResponse);
     Expect(HasIssueCode(missingGraphReport, "evidence_graph.missing"), "verifier should flag high-confidence semantic facts without an evidence graph");
     Expect(missingGraphReport.AdjustedConfidence < missingGraphResponse.Confidence, "missing evidence graph should reduce verifier confidence");
+    const std::string missingGraphFeedbackPrompt = decomp::BuildDebugVerifierFeedbackPrompt(missingGraphReport);
+    Expect(missingGraphFeedbackPrompt.find("evidence_graph is absent or weak") != std::string::npos, "verifier feedback should require weaker claims without evidence graph grounding");
+    Expect(missingGraphFeedbackPrompt.find("weak graph grounding") != std::string::npos, "verifier feedback should require graph-grounding uncertainty");
 
     decomp::AnalyzeRequest unconvergedRequest = request;
 
@@ -3116,6 +3122,9 @@ void TestVerifierCoverageSnapshot()
     const decomp::VerifyReport unconvergedReport = decomp::VerifyResponse(unconvergedRequest, unconvergedResponse);
     Expect(HasIssueCode(unconvergedReport, "dataflow.unconverged_without_uncertainty"), "verifier should flag confident responses that omit unconverged dataflow uncertainty");
     Expect(unconvergedReport.AdjustedConfidence < unconvergedResponse.Confidence, "unconverged dataflow without uncertainty should reduce verifier confidence");
+    const std::string unconvergedFeedbackPrompt = decomp::BuildDebugVerifierFeedbackPrompt(unconvergedReport);
+    Expect(unconvergedFeedbackPrompt.find("block_value_states are unconverged") != std::string::npos, "verifier feedback should name unconverged dataflow state");
+    Expect(unconvergedFeedbackPrompt.find("alias-sensitive rewrites") != std::string::npos, "verifier feedback should constrain dataflow-dependent rewrites");
 
     decomp::AnalyzeRequest unsupportedObfuscationRequest;
     unsupportedObfuscationRequest.RequestId = "unsupported_obfuscation_claims";

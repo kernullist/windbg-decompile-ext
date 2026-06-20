@@ -8467,6 +8467,23 @@ std::string BuildVerifierIssueCorrectionHint(const VerificationIssue& issue)
         return "Ground branch structure in normalized_conditions, conditional branch instructions, or semantic_control_flow facts; avoid adding or collapsing branches beyond recovered evidence.";
     }
 
+    if (issue.Code == "evidence.missing_for_high_confidence"
+        || issue.Code == "evidence.low_coverage")
+    {
+        return "Add block-grounded evidence entries for high-signal blocks, calls, branches, and memory effects before keeping high confidence; otherwise lower confidence and explain the coverage gap in uncertainties.";
+    }
+
+    if (issue.Code == "evidence_graph.missing"
+        || issue.Code == "evidence_graph.low_coverage")
+    {
+        return "When evidence_graph is absent or weak, avoid presenting semantic claims as fully cross-checked; cite available facts directly, lower confidence, and add uncertainty about weak graph grounding.";
+    }
+
+    if (issue.Code == "dataflow.unconverged_without_uncertainty")
+    {
+        return "When block_value_states are unconverged, avoid definitive reaching-value or alias-sensitive rewrites; add uncertainty and cap confidence until dataflow convergence is proven.";
+    }
+
     if (StartsWithInsensitive(issue.Code, "obfuscation."))
     {
         return "Revise the obfuscation claim using only grounded obfuscation and semantic_control_flow facts, or lower confidence and move the claim to uncertainties.";
