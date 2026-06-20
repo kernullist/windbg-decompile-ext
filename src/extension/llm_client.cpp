@@ -2341,6 +2341,7 @@ JsonValue BuildChunkFactsJson(
     root.Set("ir_values", BuildIrValuesJsonForBlocks(request, blockIds, &irValuesTruncated));
     root.Set("block_value_states", BuildBlockValueStatesJsonForBlocks(request, blockIds, &blockValueStatesTruncated));
     root.Set("obfuscation", BuildObfuscationJsonForBlocks(request, blockIds, &obfuscationTruncated));
+    root.Set("deobfuscation_readiness", BuildDeobfuscationReadinessJson(request));
     root.Set("semantic_control_flow", BuildSemanticControlFlowJsonForBlocks(request, blockIds, &semanticControlFlowTruncated));
     root.Set("control_flow", BuildControlFlowJsonForBlocks(request, blockIds, &controlFlowTruncated));
     root.Set("abi", BuildAbiJson(request, &abiTruncated));
@@ -4408,6 +4409,7 @@ JsonValue BuildMergeFactsJson(
     root.Set("ir_values", BuildIrValuesJson(request, &irValuesTruncated));
     root.Set("block_value_states", BuildBlockValueStatesJson(request, &blockValueStatesTruncated));
     root.Set("obfuscation", BuildObfuscationJson(request, &obfuscationTruncated));
+    root.Set("deobfuscation_readiness", BuildDeobfuscationReadinessJson(request));
     root.Set("semantic_control_flow", BuildSemanticControlFlowJson(request, &semanticControlFlowTruncated));
     root.Set("control_flow", BuildControlFlowJson(request, &controlFlowTruncated));
     root.Set("abi", BuildAbiJson(request, &abiTruncated));

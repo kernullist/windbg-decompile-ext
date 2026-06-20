@@ -7552,6 +7552,158 @@ void AppendUniqueString(std::vector<std::string>& values, const std::string& val
     }
 }
 
+bool IsLocalScalarSubstitutionIdiom(const SubstitutionIdiomFact& idiom)
+{
+    if (idiom.Confidence < kSemanticControlFlowApplyConfidence)
+    {
+        return false;
+    }
+
+    return idiom.OriginalExpression.find('[') == std::string::npos
+        && idiom.OriginalExpression.find(']') == std::string::npos
+        && idiom.SimplifiedExpression.find('[') == std::string::npos
+        && idiom.SimplifiedExpression.find(']') == std::string::npos
+        && !ContainsInsensitive(idiom.OriginalExpression, "ptr")
+        && !ContainsInsensitive(idiom.SimplifiedExpression, "ptr")
+        && !ContainsInsensitive(idiom.OriginalExpression, "memory")
+        && !ContainsInsensitive(idiom.SimplifiedExpression, "memory");
+}
+
+DeobfuscationReadiness BuildDeobfuscationReadiness(
+    const ObfuscationFacts& obfuscation,
+    const SemanticControlFlowOverlay& semanticControlFlow)
+{
+    DeobfuscationReadiness readiness;
+    uint32_t highConfidenceRecoveredEdges = 0;
+    uint32_t highConfidenceSemanticLiveEdges = 0;
+
+    readiness.DispatcherCount = static_cast<uint32_t>(obfuscation.Dispatchers.size());
+    readiness.HasObfuscationFacts = !obfuscation.Dispatchers.empty()
+        || !obfuscation.StateVariables.empty()
+        || !obfuscation.OpaquePredicates.empty()
+        || !obfuscation.SubstitutionIdioms.empty();
+
+    if (readiness.HasObfuscationFacts)
+    {
+        AppendUniqueString(readiness.PriorityFactPaths, "obfuscation");
+    }
+
+    for (const ObfuscationDispatcher& dispatcher : obfuscation.Dispatchers)
+    {
+        if (dispatcher.Confidence >= kSemanticControlFlowApplyConfidence)
+        {
+            readiness.HasFlatteningDispatcher = true;
+        }
+
+        for (const RecoveredControlFlowEdge& edge : dispatcher.RecoveredEdges)
+        {
+            ++readiness.RecoveredEdgeCount;
+
+            if (edge.Confidence >= kSemanticControlFlowApplyConfidence)
+            {
+                ++highConfidenceRecoveredEdges;
+            }
+        }
+    }
+
+    for (const OpaquePredicateFact& predicate : obfuscation.OpaquePredicates)
+    {
+        if (predicate.Confidence >= kSemanticControlFlowApplyConfidence && !predicate.DeadTargetBlock.empty())
+        {
+            ++readiness.OpaqueDeadEdgeCount;
+        }
+    }
+
+    for (const SubstitutionIdiomFact& idiom : obfuscation.SubstitutionIdioms)
+    {
+        if (IsLocalScalarSubstitutionIdiom(idiom))
+        {
+            ++readiness.SubstitutionIdiomCount;
+        }
+    }
+
+    for (const SemanticControlFlowEdge& edge : semanticControlFlow.Edges)
+    {
+        if (edge.Confidence >= kSemanticControlFlowApplyConfidence && !edge.Dead)
+        {
+            ++highConfidenceSemanticLiveEdges;
+        }
+    }
+
+    readiness.HasHighConfidenceDispatcherEdges = highConfidenceRecoveredEdges != 0;
+    readiness.HasOpaqueDeadEdges = readiness.OpaqueDeadEdgeCount != 0;
+    readiness.HasSubstitutionIdioms = readiness.SubstitutionIdiomCount != 0;
+    readiness.SafeToRewriteControlFlow = readiness.HasFlatteningDispatcher
+        && readiness.HasHighConfidenceDispatcherEdges
+        && highConfidenceSemanticLiveEdges != 0;
+    readiness.RequiresRawCfgFallbackUncertainty = readiness.HasFlatteningDispatcher && !readiness.SafeToRewriteControlFlow;
+
+    if (readiness.HasHighConfidenceDispatcherEdges)
+    {
+        AppendUniqueString(readiness.SafeActions, "recover_dispatcher_edges");
+        AppendUniqueString(readiness.PriorityFactPaths, "obfuscation.dispatchers");
+        AppendUniqueString(readiness.PriorityFactPaths, "semantic_control_flow.edges");
+    }
+
+    if (readiness.SafeToRewriteControlFlow)
+    {
+        AppendUniqueString(readiness.SafeActions, "apply_semantic_control_flow_overlay");
+    }
+    else if (readiness.HasFlatteningDispatcher)
+    {
+        AppendUniqueString(readiness.BlockedAssumptions, "control_flow_rewrite_without_high_confidence_semantic_edges");
+    }
+
+    if (readiness.HasOpaqueDeadEdges)
+    {
+        AppendUniqueString(readiness.SafeActions, "prune_proven_opaque_dead_edges");
+        AppendUniqueString(readiness.PriorityFactPaths, "obfuscation.opaque_predicates");
+    }
+    else if (!obfuscation.OpaquePredicates.empty())
+    {
+        AppendUniqueString(readiness.BlockedAssumptions, "opaque_branch_is_dead_without_high_confidence_predicate");
+    }
+
+    if (readiness.HasSubstitutionIdioms)
+    {
+        AppendUniqueString(readiness.SafeActions, "apply_local_substitution_simplifications");
+        AppendUniqueString(readiness.PriorityFactPaths, "obfuscation.substitution_idioms");
+    }
+    else if (!obfuscation.SubstitutionIdioms.empty())
+    {
+        AppendUniqueString(readiness.BlockedAssumptions, "memory_sensitive_substitution_rewrite");
+    }
+
+    if (readiness.HasFlatteningDispatcher)
+    {
+        AppendUniqueString(readiness.BlockedAssumptions, "raw_dispatcher_loop_is_source_loop");
+    }
+    else if (!readiness.HasObfuscationFacts)
+    {
+        AppendUniqueString(readiness.BlockedAssumptions, "deobfuscation_without_obfuscation_facts");
+    }
+
+    if (readiness.SafeToRewriteControlFlow)
+    {
+        readiness.Confidence = 0.85;
+    }
+    else if (readiness.HasFlatteningDispatcher)
+    {
+        readiness.Confidence = 0.60;
+    }
+    else if (readiness.HasObfuscationFacts)
+    {
+        readiness.Confidence = 0.40;
+    }
+
+    if (readiness.HasOpaqueDeadEdges || readiness.HasSubstitutionIdioms)
+    {
+        readiness.Confidence = Clamp01(readiness.Confidence + 0.05);
+    }
+
+    return readiness;
+}
+
 std::vector<BasicBlock> BuildBlocksWithSemanticControlFlow(
     const std::vector<BasicBlock>& blocks,
     const SemanticControlFlowOverlay& overlay)
@@ -10327,6 +10479,7 @@ void RefreshDerivedAnalysisFacts(AnalysisFacts& facts)
         facts.Switches);
     AppendSubstitutionIdioms(facts.Obfuscation, substitutionIdioms);
     facts.SemanticControlFlow = BuildSemanticControlFlowOverlay(facts.Obfuscation);
+    facts.DeobfuscationReadiness = BuildDeobfuscationReadiness(facts.Obfuscation, facts.SemanticControlFlow);
     const std::vector<BasicBlock> semanticBlocks = BuildBlocksWithSemanticControlFlow(facts.Blocks, facts.SemanticControlFlow);
     facts.ControlFlow = AnalyzeControlFlow(facts.Instructions, semanticBlocks, facts.NormalizedConditions, facts.Switches);
     RefreshEvidenceGraph(facts);
@@ -10618,6 +10771,17 @@ void AppendAnalysisFactSummaries(AnalysisFacts& facts)
             + std::to_string(deadEdges));
     }
 
+    if (facts.DeobfuscationReadiness.HasObfuscationFacts)
+    {
+        facts.Facts.push_back(
+            "deobfuscation readiness: safe_actions="
+            + JoinStrings(facts.DeobfuscationReadiness.SafeActions, ",")
+            + ", blocked_assumptions="
+            + JoinStrings(facts.DeobfuscationReadiness.BlockedAssumptions, ",")
+            + ", confidence="
+            + std::to_string(facts.DeobfuscationReadiness.Confidence));
+    }
+
     if (!facts.NormalizedConditions.empty())
     {
         facts.Facts.push_back("normalized branch conditions: " + std::to_string(facts.NormalizedConditions.size()));
@@ -10757,6 +10921,7 @@ AnalysisFacts BuildAnalysisFacts(
         facts.Switches);
     AppendSubstitutionIdioms(facts.Obfuscation, substitutionIdioms);
     facts.SemanticControlFlow = BuildSemanticControlFlowOverlay(facts.Obfuscation);
+    facts.DeobfuscationReadiness = BuildDeobfuscationReadiness(facts.Obfuscation, facts.SemanticControlFlow);
     const std::vector<BasicBlock> semanticBlocks = BuildBlocksWithSemanticControlFlow(facts.Blocks, facts.SemanticControlFlow);
     facts.ControlFlow = AnalyzeControlFlow(facts.Instructions, semanticBlocks, facts.NormalizedConditions, facts.Switches);
     facts.Abi = AnalyzeAbiFacts(instructions, facts.MemoryAccesses, facts.StackFrame, entryAddress);

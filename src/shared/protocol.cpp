@@ -926,6 +926,46 @@ JsonValue ToJson(const EvidenceGraphFacts& graph)
     return object;
 }
 
+JsonValue ToJson(const DeobfuscationReadiness& readiness)
+{
+    JsonValue object = JsonValue::MakeObject();
+    JsonValue safeActions = JsonValue::MakeArray();
+    JsonValue blockedAssumptions = JsonValue::MakeArray();
+    JsonValue priorityFactPaths = JsonValue::MakeArray();
+
+    for (const std::string& action : readiness.SafeActions)
+    {
+        safeActions.PushBack(JsonValue::MakeString(action));
+    }
+
+    for (const std::string& assumption : readiness.BlockedAssumptions)
+    {
+        blockedAssumptions.PushBack(JsonValue::MakeString(assumption));
+    }
+
+    for (const std::string& path : readiness.PriorityFactPaths)
+    {
+        priorityFactPaths.PushBack(JsonValue::MakeString(path));
+    }
+
+    object.Set("has_obfuscation_facts", JsonValue::MakeBoolean(readiness.HasObfuscationFacts));
+    object.Set("has_flattening_dispatcher", JsonValue::MakeBoolean(readiness.HasFlatteningDispatcher));
+    object.Set("has_high_confidence_dispatcher_edges", JsonValue::MakeBoolean(readiness.HasHighConfidenceDispatcherEdges));
+    object.Set("has_opaque_dead_edges", JsonValue::MakeBoolean(readiness.HasOpaqueDeadEdges));
+    object.Set("has_substitution_idioms", JsonValue::MakeBoolean(readiness.HasSubstitutionIdioms));
+    object.Set("safe_to_rewrite_control_flow", JsonValue::MakeBoolean(readiness.SafeToRewriteControlFlow));
+    object.Set("requires_raw_cfg_fallback_uncertainty", JsonValue::MakeBoolean(readiness.RequiresRawCfgFallbackUncertainty));
+    object.Set("dispatcher_count", JsonValue::MakeNumber(static_cast<double>(readiness.DispatcherCount)));
+    object.Set("recovered_edge_count", JsonValue::MakeNumber(static_cast<double>(readiness.RecoveredEdgeCount)));
+    object.Set("opaque_dead_edge_count", JsonValue::MakeNumber(static_cast<double>(readiness.OpaqueDeadEdgeCount)));
+    object.Set("substitution_idiom_count", JsonValue::MakeNumber(static_cast<double>(readiness.SubstitutionIdiomCount)));
+    object.Set("safe_actions", safeActions);
+    object.Set("blocked_assumptions", blockedAssumptions);
+    object.Set("priority_fact_paths", priorityFactPaths);
+    object.Set("confidence", JsonValue::MakeNumber(readiness.Confidence));
+    return object;
+}
+
 JsonValue ToJson(const TypedNameConfidence& value)
 {
     JsonValue object = JsonValue::MakeObject();
@@ -1580,6 +1620,26 @@ bool ParseSemanticControlFlowOverlay(const JsonValue& object, SemanticControlFlo
     return true;
 }
 
+bool ParseDeobfuscationReadiness(const JsonValue& object, DeobfuscationReadiness& readiness)
+{
+    TryGetBool(object, "has_obfuscation_facts", readiness.HasObfuscationFacts);
+    TryGetBool(object, "has_flattening_dispatcher", readiness.HasFlatteningDispatcher);
+    TryGetBool(object, "has_high_confidence_dispatcher_edges", readiness.HasHighConfidenceDispatcherEdges);
+    TryGetBool(object, "has_opaque_dead_edges", readiness.HasOpaqueDeadEdges);
+    TryGetBool(object, "has_substitution_idioms", readiness.HasSubstitutionIdioms);
+    TryGetBool(object, "safe_to_rewrite_control_flow", readiness.SafeToRewriteControlFlow);
+    TryGetBool(object, "requires_raw_cfg_fallback_uncertainty", readiness.RequiresRawCfgFallbackUncertainty);
+    TryGetU32(object, "dispatcher_count", readiness.DispatcherCount);
+    TryGetU32(object, "recovered_edge_count", readiness.RecoveredEdgeCount);
+    TryGetU32(object, "opaque_dead_edge_count", readiness.OpaqueDeadEdgeCount);
+    TryGetU32(object, "substitution_idiom_count", readiness.SubstitutionIdiomCount);
+    ParseStringArrayMember(object, "safe_actions", readiness.SafeActions);
+    ParseStringArrayMember(object, "blocked_assumptions", readiness.BlockedAssumptions);
+    ParseStringArrayMember(object, "priority_fact_paths", readiness.PriorityFactPaths);
+    TryGetDouble(object, "confidence", readiness.Confidence);
+    return true;
+}
+
 bool ParseControlFlowRegion(const JsonValue& object, ControlFlowRegion& region)
 {
     TryGetString(object, "kind", region.Kind);
@@ -2114,6 +2174,7 @@ JsonValue ToJson(const AnalyzeRequest& request)
     object.Set("block_value_states", blockValueStates);
     object.Set("obfuscation", ToJson(request.Facts.Obfuscation));
     object.Set("semantic_control_flow", semanticControlFlow);
+    object.Set("deobfuscation_readiness", ToJson(request.Facts.DeobfuscationReadiness));
     object.Set("control_flow", controlFlow);
     object.Set("abi", ToJson(request.Facts.Abi));
     object.Set("type_hints", typeHints);
@@ -2611,6 +2672,13 @@ bool ParseAnalyzeRequest(const std::string& text, AnalyzeRequest& request, std::
     if (semanticControlFlow != nullptr && semanticControlFlow->IsObject())
     {
         ParseSemanticControlFlowOverlay(*semanticControlFlow, request.Facts.SemanticControlFlow);
+    }
+
+    const JsonValue* deobfuscationReadiness = object.Find("deobfuscation_readiness");
+
+    if (deobfuscationReadiness != nullptr && deobfuscationReadiness->IsObject())
+    {
+        ParseDeobfuscationReadiness(*deobfuscationReadiness, request.Facts.DeobfuscationReadiness);
     }
 
     const JsonValue* controlFlow = object.Find("control_flow");

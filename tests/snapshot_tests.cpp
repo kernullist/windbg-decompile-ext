@@ -1781,6 +1781,12 @@ void TestObfuscationFactsSnapshot()
     Expect(ContainsFactSubstring(facts, "obfuscation state variable: name=rax"), "deterministic facts should describe dispatcher state variable evidence");
     Expect(ContainsFactSubstring(facts, "obfuscation recovered edge: source="), "deterministic facts should describe recovered edge evidence");
     Expect(ContainsFactSubstring(facts, "semantic control-flow overlay: live_edges="), "deterministic facts should summarize semantic CFG overlay evidence");
+    Expect(facts.DeobfuscationReadiness.HasFlatteningDispatcher, "deobfuscation readiness should flag the flattening dispatcher");
+    Expect(facts.DeobfuscationReadiness.HasHighConfidenceDispatcherEdges, "deobfuscation readiness should see high-confidence dispatcher edges");
+    Expect(facts.DeobfuscationReadiness.SafeToRewriteControlFlow, "deobfuscation readiness should allow semantic CFG rewrite for recovered flattened flow");
+    Expect(ContainsString(facts.DeobfuscationReadiness.SafeActions, "recover_dispatcher_edges"), "deobfuscation readiness should expose dispatcher recovery action");
+    Expect(ContainsString(facts.DeobfuscationReadiness.SafeActions, "apply_semantic_control_flow_overlay"), "deobfuscation readiness should expose semantic overlay action");
+    Expect(ContainsFactSubstring(facts, "deobfuscation readiness: safe_actions="), "deterministic facts should summarize deobfuscation readiness");
     Expect(HasEvidenceNodeKind(facts, "obfuscation.dispatcher"), "evidence graph should expose obfuscation dispatcher nodes");
     Expect(HasEvidenceNodeKind(facts, "obfuscation.state_variable"), "evidence graph should expose obfuscation state-variable nodes");
     Expect(HasEvidenceNodeKind(facts, "obfuscation.recovered_edge"), "evidence graph should expose recovered obfuscation edges");
@@ -1795,6 +1801,7 @@ void TestObfuscationFactsSnapshot()
     Expect(serialized.find("\"obfuscation\"") != std::string::npos, "request snapshot should serialize obfuscation facts");
     Expect(serialized.find("\"recovered_edges\"") != std::string::npos, "request snapshot should serialize recovered obfuscation edges");
     Expect(serialized.find("\"semantic_control_flow\"") != std::string::npos, "request snapshot should serialize semantic CFG overlay");
+    Expect(serialized.find("\"deobfuscation_readiness\"") != std::string::npos, "request snapshot should serialize deobfuscation readiness");
 
     decomp::AnalyzeRequest parsed;
     std::string error;
@@ -1802,12 +1809,20 @@ void TestObfuscationFactsSnapshot()
     Expect(!parsed.Facts.Obfuscation.Dispatchers.empty(), "obfuscation dispatchers should round-trip through protocol JSON");
     Expect(!parsed.Facts.Obfuscation.Dispatchers.empty() && parsed.Facts.Obfuscation.Dispatchers.front().RecoveredEdges.size() >= 2, "recovered obfuscation edges should round-trip through protocol JSON");
     Expect(parsed.Facts.SemanticControlFlow.Edges.size() >= 2, "semantic CFG overlay should round-trip through protocol JSON");
+    Expect(parsed.Facts.DeobfuscationReadiness.SafeToRewriteControlFlow, "deobfuscation readiness should round-trip through protocol JSON");
+    Expect(ContainsString(parsed.Facts.DeobfuscationReadiness.SafeActions, "recover_dispatcher_edges"), "deobfuscation readiness safe actions should round-trip");
 
     const std::string promptDump = decomp::BuildDebugPromptDump(request);
     Expect(promptDump.find("\"obfuscation\"") != std::string::npos, "prompt dump should include obfuscation facts");
     Expect(promptDump.find("\"semantic_control_flow\"") != std::string::npos, "prompt dump should include semantic CFG overlay");
+    Expect(promptDump.find("\"deobfuscation_readiness\"") != std::string::npos, "prompt dump should include deobfuscation readiness");
+    Expect(promptDump.find("\"safe_actions\"") != std::string::npos, "prompt dump should include deobfuscation readiness actions");
     Expect(promptDump.find("semantic edge:") != std::string::npos, "analyzer skeleton should render semantic CFG comments");
     Expect(promptDump.find("\"usage_guidance\"") != std::string::npos, "prompt dump should include obfuscation usage guidance");
+
+    const decomp::AnalysisFacts negativeStateSwitchFacts = BuildLegitimateStateSwitchFacts();
+    Expect(!negativeStateSwitchFacts.DeobfuscationReadiness.SafeToRewriteControlFlow, "negative state-machine fixture should not mark CFG rewrite safe");
+    Expect(!negativeStateSwitchFacts.DeobfuscationReadiness.HasFlatteningDispatcher, "negative state-machine fixture should not report a flattening dispatcher");
 
     decomp::AnalyzeRequest chunkScopedRequest;
     chunkScopedRequest.RequestId = "obfuscation_chunk_scope_snapshot";
@@ -2589,6 +2604,11 @@ void TestObfuscationFactsSnapshot()
     Expect(foundOllvmSubstitution, "OLLVM-like fixture should recover scalar substitution idiom evidence");
     Expect(foundOllvmRecoveredEdge, "OLLVM-like semantic CFG should include recovered flattened edges");
     Expect(foundOllvmDeadEdge, "OLLVM-like semantic CFG should include proven opaque dead edges");
+    Expect(ollvmFacts.DeobfuscationReadiness.SafeToRewriteControlFlow, "OLLVM-like readiness should allow semantic CFG rewrite");
+    Expect(ContainsString(ollvmFacts.DeobfuscationReadiness.SafeActions, "recover_dispatcher_edges"), "OLLVM-like readiness should recover dispatcher edges");
+    Expect(ContainsString(ollvmFacts.DeobfuscationReadiness.SafeActions, "prune_proven_opaque_dead_edges"), "OLLVM-like readiness should prune proven opaque dead edges");
+    Expect(ContainsString(ollvmFacts.DeobfuscationReadiness.SafeActions, "apply_local_substitution_simplifications"), "OLLVM-like readiness should apply local substitution simplifications");
+    Expect(ContainsString(ollvmFacts.DeobfuscationReadiness.BlockedAssumptions, "raw_dispatcher_loop_is_source_loop"), "OLLVM-like readiness should block raw dispatcher loop assumption");
     Expect(ContainsFactSubstring(ollvmFacts, "obfuscation dispatcher: header="), "OLLVM-like facts should describe dispatcher evidence");
     Expect(ContainsFactSubstring(ollvmFacts, "obfuscation opaque predicate: "), "OLLVM-like facts should describe opaque predicate evidence");
     Expect(ContainsFactSubstring(ollvmFacts, "obfuscation substitution: "), "OLLVM-like facts should describe substitution evidence");
@@ -2605,6 +2625,8 @@ void TestObfuscationFactsSnapshot()
     Expect(ollvmPromptDump.find("\"dispatchers\"") != std::string::npos, "OLLVM-like prompt should include dispatcher facts");
     Expect(ollvmPromptDump.find("\"opaque_predicates\"") != std::string::npos, "OLLVM-like prompt should include opaque predicate facts");
     Expect(ollvmPromptDump.find("\"substitution_idioms\"") != std::string::npos, "OLLVM-like prompt should include substitution facts");
+    Expect(ollvmPromptDump.find("\"deobfuscation_readiness\"") != std::string::npos, "OLLVM-like prompt should include deobfuscation readiness");
+    Expect(ollvmPromptDump.find("prune_proven_opaque_dead_edges") != std::string::npos, "OLLVM-like prompt should include opaque dead-edge readiness action");
     Expect(ollvmPromptDump.find("semantic edge:") != std::string::npos, "OLLVM-like analyzer skeleton should render semantic CFG overlay comments");
     Expect(ollvmPromptDump.find("opaque predicate:") != std::string::npos, "OLLVM-like analyzer skeleton should render opaque predicate comments");
     Expect(ollvmPromptDump.find("substitution:") != std::string::npos, "OLLVM-like analyzer skeleton should render substitution comments");

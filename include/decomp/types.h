@@ -583,6 +583,25 @@ struct EvidenceGraphFacts
     double Coverage = 0.0;
 };
 
+struct DeobfuscationReadiness
+{
+    bool HasObfuscationFacts = false;
+    bool HasFlatteningDispatcher = false;
+    bool HasHighConfidenceDispatcherEdges = false;
+    bool HasOpaqueDeadEdges = false;
+    bool HasSubstitutionIdioms = false;
+    bool SafeToRewriteControlFlow = false;
+    bool RequiresRawCfgFallbackUncertainty = false;
+    uint32_t DispatcherCount = 0;
+    uint32_t RecoveredEdgeCount = 0;
+    uint32_t OpaqueDeadEdgeCount = 0;
+    uint32_t SubstitutionIdiomCount = 0;
+    std::vector<std::string> SafeActions;
+    std::vector<std::string> BlockedAssumptions;
+    std::vector<std::string> PriorityFactPaths;
+    double Confidence = 0.0;
+};
+
 struct AnalysisFacts
 {
     std::string Arch = "x64";
@@ -613,6 +632,7 @@ struct AnalysisFacts
     std::vector<BlockValueState> BlockValueStates;
     ObfuscationFacts Obfuscation;
     SemanticControlFlowOverlay SemanticControlFlow;
+    DeobfuscationReadiness DeobfuscationReadiness;
     std::vector<ControlFlowRegion> ControlFlow;
     AbiFacts Abi;
     std::vector<TypeRecoveryHint> TypeHints;

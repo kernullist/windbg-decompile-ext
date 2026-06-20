@@ -1999,6 +1999,31 @@ JsonValue BuildObfuscationJsonForBlocks(
     return BuildObfuscationJson(request, &blockIds, truncated);
 }
 
+JsonValue BuildDeobfuscationReadinessJson(const AnalyzeRequest& request)
+{
+    const DeobfuscationReadiness& readiness = request.Facts.DeobfuscationReadiness;
+    JsonValue object = JsonValue::MakeObject();
+    object.Set("has_obfuscation_facts", JsonValue::MakeBoolean(readiness.HasObfuscationFacts));
+    object.Set("has_flattening_dispatcher", JsonValue::MakeBoolean(readiness.HasFlatteningDispatcher));
+    object.Set("has_high_confidence_dispatcher_edges", JsonValue::MakeBoolean(readiness.HasHighConfidenceDispatcherEdges));
+    object.Set("has_opaque_dead_edges", JsonValue::MakeBoolean(readiness.HasOpaqueDeadEdges));
+    object.Set("has_substitution_idioms", JsonValue::MakeBoolean(readiness.HasSubstitutionIdioms));
+    object.Set("safe_to_rewrite_control_flow", JsonValue::MakeBoolean(readiness.SafeToRewriteControlFlow));
+    object.Set("requires_raw_cfg_fallback_uncertainty", JsonValue::MakeBoolean(readiness.RequiresRawCfgFallbackUncertainty));
+    object.Set("dispatcher_count", JsonValue::MakeNumber(static_cast<double>(readiness.DispatcherCount)));
+    object.Set("recovered_edge_count", JsonValue::MakeNumber(static_cast<double>(readiness.RecoveredEdgeCount)));
+    object.Set("opaque_dead_edge_count", JsonValue::MakeNumber(static_cast<double>(readiness.OpaqueDeadEdgeCount)));
+    object.Set("substitution_idiom_count", JsonValue::MakeNumber(static_cast<double>(readiness.SubstitutionIdiomCount)));
+    object.Set("safe_actions", BuildStringArray(readiness.SafeActions, 16, nullptr));
+    object.Set("blocked_assumptions", BuildStringArray(readiness.BlockedAssumptions, 16, nullptr));
+    object.Set("priority_fact_paths", BuildStringArray(readiness.PriorityFactPaths, 16, nullptr));
+    object.Set("confidence", JsonValue::MakeNumber(readiness.Confidence));
+    object.Set(
+        "usage_guidance",
+        JsonValue::MakeString("Use safe_actions only when the corresponding priority_fact_paths are present; keep blocked_assumptions as uncertainty instead of inventing deobfuscated control flow."));
+    return object;
+}
+
 JsonValue BuildSemanticControlFlowJson(
     const AnalyzeRequest& request,
     const std::set<std::string>* blockIds,
@@ -3057,6 +3082,7 @@ JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
     root.Set("ir_values", BuildIrValuesJson(request, &irValuesTruncated));
     root.Set("block_value_states", BuildBlockValueStatesJson(request, &blockValueStatesTruncated));
     root.Set("obfuscation", BuildObfuscationJson(request, &obfuscationTruncated));
+    root.Set("deobfuscation_readiness", BuildDeobfuscationReadinessJson(request));
     root.Set("semantic_control_flow", BuildSemanticControlFlowJson(request, &semanticControlFlowTruncated));
     root.Set("control_flow", BuildControlFlowJson(request, &controlFlowTruncated));
     root.Set("abi", BuildAbiJson(request, &abiTruncated));

@@ -1451,7 +1451,8 @@ void CheckDeobfuscationConflictPolicy(const AnalyzeRequest& request, const Analy
     }
 
     if (response.Confidence > 0.70
-        && HasHighConfidenceDispatcherRecovery(request.Facts)
+        && (HasHighConfidenceDispatcherRecovery(request.Facts)
+            || request.Facts.DeobfuscationReadiness.RequiresRawCfgFallbackUncertainty)
         && !rawDispatcherLoopContexts.empty()
         && response.Uncertainties.empty())
     {

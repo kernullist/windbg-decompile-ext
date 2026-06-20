@@ -137,6 +137,7 @@ JsonValue BuildObfuscationJsonForBlocks(
     const AnalyzeRequest& request,
     const std::set<std::string>& blockIds,
     bool* truncated);
+JsonValue BuildDeobfuscationReadinessJson(const AnalyzeRequest& request);
 JsonValue BuildSemanticControlFlowJson(const AnalyzeRequest& request, bool* truncated);
 JsonValue BuildSemanticControlFlowJsonForBlocks(
     const AnalyzeRequest& request,
