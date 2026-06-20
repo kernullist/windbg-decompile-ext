@@ -1592,6 +1592,8 @@ void TestObfuscationFactsSnapshot()
     decomp::AnalyzeRequest chunkScopedRequest;
     chunkScopedRequest.RequestId = "obfuscation_chunk_scope_snapshot";
     chunkScopedRequest.Facts = facts;
+    chunkScopedRequest.Facts.Arch = "MERGE_ARCH_MARKER";
+    chunkScopedRequest.Facts.Mode = decomp::AnalysisMode::LiveMemory;
     chunkScopedRequest.Facts.Abi.FrameBase = "CHUNK_ABI_FRAME_BASE_MARKER";
     chunkScopedRequest.Facts.Abi.HomeSlots.push_back("CHUNK_ABI_HOME_SLOT_MARKER");
     chunkScopedRequest.Facts.Abi.NoReturnCalls.push_back("CHUNK_ABI_NO_RETURN_MARKER");
@@ -2020,6 +2022,13 @@ void TestObfuscationFactsSnapshot()
 
     const std::string mergePromptDump = decomp::BuildDebugMergePromptDump(chunkScopedRequest, chunkConfig);
     Expect(!mergePromptDump.empty(), "debug merge prompt dump should expose merge facts");
+    Expect(mergePromptDump.find("\"arch\"") != std::string::npos, "merge prompt should include analysis architecture");
+    Expect(mergePromptDump.find("MERGE_ARCH_MARKER") != std::string::npos, "merge prompt should preserve analysis architecture");
+    Expect(mergePromptDump.find("\"mode\"") != std::string::npos, "merge prompt should include analysis mode");
+    Expect(mergePromptDump.find("\"live\"") != std::string::npos, "merge prompt should preserve live analysis mode");
+    Expect(mergePromptDump.find("\"selection\"") != std::string::npos, "merge prompt should include prompt selection metadata");
+    Expect(mergePromptDump.find("\"fact_strategy\"") != std::string::npos, "merge prompt should describe fact selection strategy");
+    Expect(mergePromptDump.find("ranked high-signal facts + spread sampling") != std::string::npos, "merge prompt should preserve fact selection strategy");
     Expect(mergePromptDump.find("\"type_hints\"") != std::string::npos, "merge prompt should include type hints");
     Expect(mergePromptDump.find("INSIDE_CHUNK_TYPE_HINT_MARKER") != std::string::npos, "merge prompt should preserve type hints for final synthesis");
     Expect(mergePromptDump.find("\"idioms\"") != std::string::npos, "merge prompt should include idiom facts");
