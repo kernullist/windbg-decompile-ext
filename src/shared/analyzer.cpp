@@ -10377,76 +10377,14 @@ void ApplyRecoveredSwitchTargets(AnalysisFacts& facts)
     RefreshDerivedAnalysisFacts(facts);
 }
 
-AnalysisFacts BuildAnalysisFacts(
-    const std::string& queryText,
-    const ModuleInfo& moduleInfo,
-    DebugSessionKind sessionKind,
-    const DecompOptions& options,
-    uint64_t queryAddress,
-    uint64_t entryAddress,
-    const std::vector<FunctionRegion>& regions,
-    const std::vector<uint8_t>& bytes,
-    const std::vector<DisassembledInstruction>& rawInstructions)
+void AppendAnalysisFactSummaries(AnalysisFacts& facts)
 {
-    AnalysisFacts facts;
-    const std::vector<DisassembledInstruction> instructions = NormalizeInstructions(rawInstructions);
-
-    facts.QueryText = queryText;
-    facts.Module = moduleInfo;
-    facts.Session = sessionKind;
-    facts.Mode = options.UseLiveMemory ? AnalysisMode::LiveMemory : AnalysisMode::FileImage;
-    facts.QueryAddress = queryAddress;
-    facts.EntryAddress = entryAddress;
-    facts.Regions = regions;
-    facts.Rva = (moduleInfo.Base != 0 && entryAddress >= moduleInfo.Base) ? (entryAddress - moduleInfo.Base) : 0;
-    facts.Instructions = instructions;
-    facts.StackFrame = InferStackFrame(instructions);
-    facts.Blocks = BuildBasicBlocks(instructions);
-    facts.Calls = CollectCalls(instructions, false);
-    facts.IndirectCalls = CollectCalls(instructions, true);
-    facts.Switches = CollectSwitches(instructions);
-    facts.StackPointer = CollectStackPointerFacts(instructions, facts.Blocks);
-    facts.MemoryAccesses = CollectMemoryAccesses(instructions, facts.Blocks, facts.StackPointer);
-    facts.RecoveredArguments = RecoverArguments(instructions);
-    facts.RecoveredLocals = RecoverLocals(facts.MemoryAccesses, facts.StackFrame);
-    facts.CallArguments = CollectCallArgumentFacts(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
-    facts.ValueMerges = CollectValueMerges(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
-    facts.IrValues = CollectIrValues(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
-    const std::vector<SubstitutionIdiomFact> substitutionIdioms = CanonicalizeSubstitutionIdioms(facts.IrValues);
-    facts.BlockValueStates = CollectBlockValueStates(facts.Blocks, facts.IrValues);
-    facts.NormalizedConditions = CollectNormalizedConditions(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
-    facts.Obfuscation = AnalyzeObfuscationFacts(
-        facts.Instructions,
-        facts.Blocks,
-        facts.IrValues,
-        facts.BlockValueStates,
-        facts.NormalizedConditions,
-        facts.Switches);
-    AppendSubstitutionIdioms(facts.Obfuscation, substitutionIdioms);
-    facts.SemanticControlFlow = BuildSemanticControlFlowOverlay(facts.Obfuscation);
-    const std::vector<BasicBlock> semanticBlocks = BuildBlocksWithSemanticControlFlow(facts.Blocks, facts.SemanticControlFlow);
-    facts.ControlFlow = AnalyzeControlFlow(facts.Instructions, semanticBlocks, facts.NormalizedConditions, facts.Switches);
-    facts.Abi = AnalyzeAbiFacts(instructions, facts.MemoryAccesses, facts.StackFrame, entryAddress);
-    facts.TypeHints = CollectTypeRecoveryHints(instructions, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
-    facts.Idioms = CollectIdiomPatterns(instructions, facts.Calls, facts.MemoryAccesses, facts.Abi);
-    facts.CallTargets = CollectTailCallTargets(instructions, entryAddress);
-    {
-        std::vector<CallTargetInfo> indirectTargets = CollectIndirectCallTargets(instructions, facts.MemoryAccesses);
-        facts.CallTargets.insert(
-            facts.CallTargets.end(),
-            std::make_move_iterator(indirectTargets.begin()),
-            std::make_move_iterator(indirectTargets.end()));
-    }
-    facts.CalleeSummaries = CollectCalleeSummaries(facts.Calls);
-    AppendCalleeSummariesFromCallTargets(facts.CallTargets, facts.CalleeSummaries);
-    facts.BytesSha256 = ComputeSha256Hex(bytes);
-
-    if (regions.empty())
+    if (facts.Regions.empty())
     {
         facts.UncertainPoints.push_back("function range recovered heuristically");
     }
 
-    if (instructions.empty())
+    if (facts.Instructions.empty())
     {
         facts.UncertainPoints.push_back("no instructions were disassembled");
     }
@@ -10770,6 +10708,73 @@ AnalysisFacts BuildAnalysisFacts(
     {
         facts.UncertainPoints.push_back("control-flow structuring produced no high-confidence regions");
     }
+}
+
+AnalysisFacts BuildAnalysisFacts(
+    const std::string& queryText,
+    const ModuleInfo& moduleInfo,
+    DebugSessionKind sessionKind,
+    const DecompOptions& options,
+    uint64_t queryAddress,
+    uint64_t entryAddress,
+    const std::vector<FunctionRegion>& regions,
+    const std::vector<uint8_t>& bytes,
+    const std::vector<DisassembledInstruction>& rawInstructions)
+{
+    AnalysisFacts facts;
+    const std::vector<DisassembledInstruction> instructions = NormalizeInstructions(rawInstructions);
+
+    facts.QueryText = queryText;
+    facts.Module = moduleInfo;
+    facts.Session = sessionKind;
+    facts.Mode = options.UseLiveMemory ? AnalysisMode::LiveMemory : AnalysisMode::FileImage;
+    facts.QueryAddress = queryAddress;
+    facts.EntryAddress = entryAddress;
+    facts.Regions = regions;
+    facts.Rva = (moduleInfo.Base != 0 && entryAddress >= moduleInfo.Base) ? (entryAddress - moduleInfo.Base) : 0;
+    facts.Instructions = instructions;
+    facts.StackFrame = InferStackFrame(instructions);
+    facts.Blocks = BuildBasicBlocks(instructions);
+    facts.Calls = CollectCalls(instructions, false);
+    facts.IndirectCalls = CollectCalls(instructions, true);
+    facts.Switches = CollectSwitches(instructions);
+    facts.StackPointer = CollectStackPointerFacts(instructions, facts.Blocks);
+    facts.MemoryAccesses = CollectMemoryAccesses(instructions, facts.Blocks, facts.StackPointer);
+    facts.RecoveredArguments = RecoverArguments(instructions);
+    facts.RecoveredLocals = RecoverLocals(facts.MemoryAccesses, facts.StackFrame);
+    facts.CallArguments = CollectCallArgumentFacts(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
+    facts.ValueMerges = CollectValueMerges(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
+    facts.IrValues = CollectIrValues(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
+    const std::vector<SubstitutionIdiomFact> substitutionIdioms = CanonicalizeSubstitutionIdioms(facts.IrValues);
+    facts.BlockValueStates = CollectBlockValueStates(facts.Blocks, facts.IrValues);
+    facts.NormalizedConditions = CollectNormalizedConditions(instructions, facts.Blocks, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
+    facts.Obfuscation = AnalyzeObfuscationFacts(
+        facts.Instructions,
+        facts.Blocks,
+        facts.IrValues,
+        facts.BlockValueStates,
+        facts.NormalizedConditions,
+        facts.Switches);
+    AppendSubstitutionIdioms(facts.Obfuscation, substitutionIdioms);
+    facts.SemanticControlFlow = BuildSemanticControlFlowOverlay(facts.Obfuscation);
+    const std::vector<BasicBlock> semanticBlocks = BuildBlocksWithSemanticControlFlow(facts.Blocks, facts.SemanticControlFlow);
+    facts.ControlFlow = AnalyzeControlFlow(facts.Instructions, semanticBlocks, facts.NormalizedConditions, facts.Switches);
+    facts.Abi = AnalyzeAbiFacts(instructions, facts.MemoryAccesses, facts.StackFrame, entryAddress);
+    facts.TypeHints = CollectTypeRecoveryHints(instructions, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
+    facts.Idioms = CollectIdiomPatterns(instructions, facts.Calls, facts.MemoryAccesses, facts.Abi);
+    facts.CallTargets = CollectTailCallTargets(instructions, entryAddress);
+    {
+        std::vector<CallTargetInfo> indirectTargets = CollectIndirectCallTargets(instructions, facts.MemoryAccesses);
+        facts.CallTargets.insert(
+            facts.CallTargets.end(),
+            std::make_move_iterator(indirectTargets.begin()),
+            std::make_move_iterator(indirectTargets.end()));
+    }
+    facts.CalleeSummaries = CollectCalleeSummaries(facts.Calls);
+    AppendCalleeSummariesFromCallTargets(facts.CallTargets, facts.CalleeSummaries);
+    facts.BytesSha256 = ComputeSha256Hex(bytes);
+
+    AppendAnalysisFactSummaries(facts);
 
     facts.PreLlmConfidence = ScoreConfidence(
         moduleInfo,
