@@ -7365,6 +7365,159 @@ JsonValue BuildMergeChunkConfidencePolicyJson(
     return object;
 }
 
+JsonValue BuildMergeChunkAcceptanceChecksJson(
+    const AnalyzeRequest& request,
+    const std::vector<ChunkPlan>& chunkPlans,
+    const std::vector<ChunkAnalysis>& chunkAnalyses,
+    size_t uncoveredBlockCount)
+{
+    JsonValue object = JsonValue::MakeObject();
+    std::unordered_map<std::string, size_t> summaryCountsByChunkId;
+    std::set<std::string> planIds;
+    std::set<std::string> plannedBlockIds;
+    std::vector<std::string> acceptanceChecks;
+    std::vector<std::string> blockingIssues;
+    size_t missingSummaryCount = 0;
+    size_t orphanSummaryCount = 0;
+    size_t duplicateSummaryCount = 0;
+    size_t lowConfidenceSummaryCount = 0;
+    size_t uncertainSummaryCount = 0;
+    size_t weakEvidenceSummaryCount = 0;
+    size_t ungroundedEvidenceSummaryCount = 0;
+
+    AppendMergeReviewAction(acceptanceChecks, "preserve_visible_operations");
+    AppendMergeReviewAction(acceptanceChecks, "ground_claims_to_chunk_blocks");
+    AppendMergeReviewAction(acceptanceChecks, "respect_confidence_policy");
+
+    for (const ChunkPlan& plan : chunkPlans)
+    {
+        planIds.insert(plan.Id);
+
+        for (const size_t blockIndex : plan.BlockIndices)
+        {
+            if (blockIndex < request.Facts.Blocks.size())
+            {
+                plannedBlockIds.insert(request.Facts.Blocks[blockIndex].Id);
+            }
+        }
+    }
+
+    for (const ChunkAnalysis& analysis : chunkAnalyses)
+    {
+        ++summaryCountsByChunkId[analysis.ChunkId];
+
+        if (planIds.find(analysis.ChunkId) == planIds.end())
+        {
+            ++orphanSummaryCount;
+        }
+
+        if (analysis.Confidence < kMergeChunkLowConfidenceThreshold)
+        {
+            ++lowConfidenceSummaryCount;
+        }
+
+        if (!analysis.Uncertainties.empty())
+        {
+            ++uncertainSummaryCount;
+        }
+
+        bool hasBlockEvidence = false;
+        bool hasUngroundedEvidence = false;
+
+        for (const EvidenceItem& evidence : analysis.Evidence)
+        {
+            for (const std::string& blockId : evidence.Blocks)
+            {
+                if (blockId.empty())
+                {
+                    continue;
+                }
+
+                hasBlockEvidence = true;
+
+                if (plannedBlockIds.find(blockId) == plannedBlockIds.end())
+                {
+                    hasUngroundedEvidence = true;
+                }
+            }
+        }
+
+        if (analysis.Evidence.empty() || !hasBlockEvidence)
+        {
+            ++weakEvidenceSummaryCount;
+        }
+
+        if (hasUngroundedEvidence)
+        {
+            ++ungroundedEvidenceSummaryCount;
+        }
+    }
+
+    for (const ChunkPlan& plan : chunkPlans)
+    {
+        const auto summaryCountIt = summaryCountsByChunkId.find(plan.Id);
+
+        if (summaryCountIt == summaryCountsByChunkId.end())
+        {
+            ++missingSummaryCount;
+            continue;
+        }
+
+        if (summaryCountIt->second > 1)
+        {
+            duplicateSummaryCount += summaryCountIt->second - 1;
+        }
+    }
+
+    if (uncoveredBlockCount != 0)
+    {
+        AppendMergeReviewAction(acceptanceChecks, "describe_uncovered_blocks");
+        AppendMergeReviewAction(blockingIssues, "coverage_gap");
+    }
+
+    if (missingSummaryCount != 0 || orphanSummaryCount != 0 || duplicateSummaryCount != 0)
+    {
+        AppendMergeReviewAction(acceptanceChecks, "reconcile_chunk_summary_alignment");
+        AppendMergeReviewAction(blockingIssues, "summary_alignment_issue");
+    }
+
+    if (lowConfidenceSummaryCount != 0 || uncertainSummaryCount != 0)
+    {
+        AppendMergeReviewAction(acceptanceChecks, "carry_chunk_uncertainties");
+        AppendMergeReviewAction(blockingIssues, "uncertain_or_low_confidence_summary");
+    }
+
+    if (weakEvidenceSummaryCount != 0)
+    {
+        AppendMergeReviewAction(acceptanceChecks, "avoid_unsupported_evidence_claims");
+        AppendMergeReviewAction(blockingIssues, "weak_chunk_evidence");
+    }
+
+    if (ungroundedEvidenceSummaryCount != 0)
+    {
+        AppendMergeReviewAction(acceptanceChecks, "discard_ungrounded_evidence");
+        AppendMergeReviewAction(blockingIssues, "ungrounded_chunk_evidence");
+    }
+
+    object.Set("acceptance_check_count", JsonValue::MakeNumber(static_cast<double>(acceptanceChecks.size())));
+    object.Set("acceptance_checks", BuildStringArray(acceptanceChecks, 16, nullptr));
+    object.Set("blocking_issue_count", JsonValue::MakeNumber(static_cast<double>(blockingIssues.size())));
+    object.Set("blocking_issues", BuildStringArray(blockingIssues, 16, nullptr));
+    object.Set("must_emit_uncertainties", JsonValue::MakeBoolean(!blockingIssues.empty()));
+    object.Set("must_bound_confidence", JsonValue::MakeBoolean(!blockingIssues.empty()));
+    object.Set("requires_coverage_statement", JsonValue::MakeBoolean(uncoveredBlockCount != 0));
+    object.Set("requires_evidence_rewrite", JsonValue::MakeBoolean(weakEvidenceSummaryCount != 0 || ungroundedEvidenceSummaryCount != 0));
+    object.Set("ready_for_high_confidence_merge", JsonValue::MakeBoolean(blockingIssues.empty()));
+    object.Set("missing_summary_count", JsonValue::MakeNumber(static_cast<double>(missingSummaryCount)));
+    object.Set("orphan_summary_count", JsonValue::MakeNumber(static_cast<double>(orphanSummaryCount)));
+    object.Set("duplicate_summary_count", JsonValue::MakeNumber(static_cast<double>(duplicateSummaryCount)));
+    object.Set("low_confidence_summary_count", JsonValue::MakeNumber(static_cast<double>(lowConfidenceSummaryCount)));
+    object.Set("uncertain_summary_count", JsonValue::MakeNumber(static_cast<double>(uncertainSummaryCount)));
+    object.Set("weak_evidence_summary_count", JsonValue::MakeNumber(static_cast<double>(weakEvidenceSummaryCount)));
+    object.Set("ungrounded_evidence_summary_count", JsonValue::MakeNumber(static_cast<double>(ungroundedEvidenceSummaryCount)));
+    return object;
+}
+
 JsonValue BuildMergeFactsJson(
     const AnalyzeRequest& request,
     const std::vector<ChunkPlan>& chunkPlans,
@@ -7456,6 +7609,7 @@ JsonValue BuildMergeFactsJson(
     chunking.Set("merge_risk_details", BuildMergeChunkRiskDetailsJson(request, chunkPlans, chunkAnalyses));
     chunking.Set("merge_review_plan", BuildMergeChunkReviewPlanJson(request, chunkPlans, chunkAnalyses, uncoveredBlockCount));
     chunking.Set("merge_confidence_policy", BuildMergeChunkConfidencePolicyJson(request, chunkPlans, chunkAnalyses, uncoveredBlockCount));
+    chunking.Set("merge_acceptance_checks", BuildMergeChunkAcceptanceChecksJson(request, chunkPlans, chunkAnalyses, uncoveredBlockCount));
 
     root.Set("arch", JsonValue::MakeString(request.Facts.Arch));
     root.Set("mode", JsonValue::MakeString(request.Facts.Mode == AnalysisMode::LiveMemory ? "live" : "file"));
@@ -7597,7 +7751,7 @@ std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
         "Return only a JSON object with these keys: status, pseudo_c, summary, params, locals, uncertainties, evidence, confidence. "
         "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style. "
-        "Use the chunk plans, coverage metadata, summary alignment, quality, evidence, risk metadata, per-chunk risk details, merge review plan, and confidence policy, and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
+        "Use the chunk plans, coverage metadata, summary alignment, quality, evidence, risk metadata, per-chunk risk details, merge review plan, confidence policy, and acceptance checks, and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
         "Use selection, blocks, direct_calls, indirect_calls, recovered_arguments, recovered_locals, call_arguments, stack_pointer, memory_accesses, ir_values, switches, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, control_flow, type_hints, idioms, callee_summaries, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, and pdb facts to preserve semantic names, prompt coverage limits, block grounding, call-site grounding, stack-frame context, reaching-value state, memory side effects, switch dispatch intent, control-flow intent, debugger-session constraints, and observed runtime context. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
@@ -7628,9 +7782,10 @@ std::string BuildMergeUserPrompt(
     prompt += "6. If chunks disagree or coverage remains partial, explain that in uncertainties, but still keep the visible operations explicit.\n";
     prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
     prompt += "8. evidence.blocks must reference block ids that appear in the chunk summaries.\n";
-    prompt += "9. Use chunking.coverage_complete, chunking.uncovered_block_ids, chunking.chunk_plans, chunking.summary_alignment, chunking.summary_quality, chunking.summary_evidence, chunking.merge_risk, chunking.merge_risk_details, chunking.merge_review_plan, and chunking.merge_confidence_policy to detect omitted, duplicated, orphaned, low-confidence, weak-evidence, ungrounded, or risk-coded chunks before trusting a short chunk summary.\n";
+    prompt += "9. Use chunking.coverage_complete, chunking.uncovered_block_ids, chunking.chunk_plans, chunking.summary_alignment, chunking.summary_quality, chunking.summary_evidence, chunking.merge_risk, chunking.merge_risk_details, chunking.merge_review_plan, chunking.merge_confidence_policy, and chunking.merge_acceptance_checks to detect omitted, duplicated, orphaned, low-confidence, weak-evidence, ungrounded, or risk-coded chunks before trusting a short chunk summary.\n";
     prompt += "10. Respect chunking.merge_confidence_policy.recommended_confidence_ceiling when setting confidence, and carry required uncertainty into uncertainties.\n";
-    prompt += "11. Treat the analyzer skeleton and graph-derived facts as a draft to refine; do not invent unsupported loops, switches, or calls during merge.\n";
+    prompt += "11. Satisfy chunking.merge_acceptance_checks before reporting a clean merge; if blocking_issues is non-empty, reflect that in uncertainties and confidence.\n";
+    prompt += "12. Treat the analyzer skeleton and graph-derived facts as a draft to refine; do not invent unsupported loops, switches, or calls during merge.\n";
     return prompt;
 }
 
