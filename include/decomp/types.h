@@ -42,6 +42,7 @@ struct DecompOptions
     bool HistoryOutput = false;
     bool ClearUserOverrides = false;
     bool VerboseOutput = false;
+    bool RefreshAnalysis = false;
     uint32_t LastCacheIndex = 1;
     uint32_t TimeoutMs = 5000;
     uint32_t MaxInstructions = 4096;

@@ -1582,6 +1582,10 @@ bool ParseCommandLine(const char* args, decomp::DecompOptions& options, std::str
             {
                 options.ClearUserOverrides = true;
             }
+            else if (option == "refresh")
+            {
+                options.RefreshAnalysis = true;
+            }
             else if (option == "verbose")
             {
                 options.VerboseOutput = true;
@@ -7170,10 +7174,11 @@ void PrintAnalyzeHistory(IDebugControl* control, IDebugControl4* control4)
 
 void PrintUsage(IDebugControl* control, IDebugControl4* control4)
 {
-    OutputLine(control, control4, "usage: !decomp [/verbose] [/doctor] [/history] [/view:brief|explain|json|facts|prompt|data|window|analyzer|plan] [/last[:N]:explain|facts|json|data|prompt] [/limit:deep|huge|N] [/deobf:on|off] [/timeout:N] <addr|module!symbol>\n");
+    OutputLine(control, control4, "usage: !decomp [/refresh] [/verbose] [/doctor] [/history] [/view:brief|explain|json|facts|prompt|data|window|analyzer|plan] [/last[:N]:explain|facts|json|data|prompt] [/limit:deep|huge|N] [/deobf:on|off] [/timeout:N] <addr|module!symbol>\n");
     OutputLine(control, control4, "view : !decomp /view:window opens cached analyzed functions when no target is supplied; /view:window /history does the same explicitly\n");
     OutputLine(control, control4, "fix  : /fix:noreturn:name /fix:type:expr=TYPE /fix:field:expr=TYPE /fix:rename:old=new /fix:clear\n");
     OutputLine(control, control4, "deobf: /deobf:on enables obfuscation-aware rewrite guidance; /deobf:off keeps facts visible but preserves raw CFG shape\n");
+    OutputLine(control, control4, "cache: /refresh bypasses persistent artifact replay for the target and saves a new artifact after a successful LLM result\n");
     OutputLine(control, control4, "file : successful LLM results are saved automatically beside decomp.dll under artifact\\ and replayed automatically for the same target and kernel_build\n");
     OutputLine(control, control4, "compat: legacy switches such as /brief, /json, /facts-only, /debug-prompt, /data-model, /last-json, /deep, and /noreturn: still work\n");
     OutputLine(control, control4, "cfg  : decomp.llm.json beside decomp.dll\n");
@@ -10922,6 +10927,11 @@ bool PrintCachedAnalyzeResult(
 
 bool ShouldTryPersistentArtifactReplay(const decomp::DecompOptions& options)
 {
+    if (options.RefreshAnalysis)
+    {
+        return false;
+    }
+
     if (options.PlanOutput)
     {
         return false;
@@ -10990,6 +11000,12 @@ bool TryReplayPersistentAnalyzeArtifact(
     const CachedAnalyzeArtifact& lookup,
     std::string& error)
 {
+    if (options.RefreshAnalysis)
+    {
+        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "artifact replay skipped: refresh requested");
+        return false;
+    }
+
     if (!ShouldTryPersistentArtifactReplay(options))
     {
         return false;

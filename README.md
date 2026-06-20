@@ -176,6 +176,7 @@ Cache and replay helpers:
 !decomp /view:prompt module!FunctionName
 !decomp /last:prompt
 !decomp /history
+!decomp /refresh module!FunctionName
 !decomp /last:2:explain
 !decomp /last:2:json
 ```
@@ -186,6 +187,7 @@ Cache and replay helpers:
 - `/last:data` prints the previous data-model snapshot without re-running analysis.
 - `/last:prompt` prints the previous prompt dump without re-running analysis.
 - `/history` lists the in-memory result ring buffer. Index `1` is the newest result.
+- `/refresh <target>` bypasses persistent artifact replay for that target, runs fresh local analysis and LLM analysis, and replaces the saved artifact after a successful LLM-backed result.
 - `/last:N:explain`, `/last:N:json`, `/last:N:facts`, `/last:N:data`, and `/last:N:prompt` replay an older cached result by history index without re-running local analysis or calling the LLM.
 - `/last:*` modes are terminal replay commands. If a target is present in the same command, the cached artifact is replayed and no local analysis or LLM request is started for that target.
 - In-memory cached artifacts live in the loaded extension instance only. The result history keeps the newest 8 results and disappears when WinDbg unloads the extension or the process exits.
@@ -245,10 +247,11 @@ Recommended investigation workflow:
 2. Use `!decomp /view:plan target` to estimate chunking, prompt size, timeout risk, and symbol quality before spending an LLM request.
 3. Use `!decomp /view:prompt target` when prompt size, language, or evidence selection looks wrong.
 4. Run `!decomp target` for the full verified pseudo-C result.
-5. If the result looks wrong, run `!decomp /view:explain target` and inspect verifier warnings, evidence coverage, and suggested fixes.
-6. Add focused corrections such as `/fix:noreturn:`, `/fix:type:`, `/fix:field:`, or `/fix:rename:` and re-run the same target.
-7. Use `/history` and indexed `/last:N:*` replay when comparing several recent results.
-8. Capture `/view:json` or `/last:json` when filing bugs or comparing behavior across builds.
+5. Use `!decomp /refresh target` when an existing persistent artifact is being replayed but you need a fresh analysis.
+6. If the result looks wrong, run `!decomp /view:explain target` and inspect verifier warnings, evidence coverage, and suggested fixes.
+7. Add focused corrections such as `/fix:noreturn:`, `/fix:type:`, `/fix:field:`, or `/fix:rename:` and re-run the same target.
+8. Use `/history` and indexed `/last:N:*` replay when comparing several recent results.
+9. Capture `/view:json` or `/last:json` when filing bugs or comparing behavior across builds.
 
 ## Analyzer Fact Surface
 
@@ -482,13 +485,14 @@ Example:
   "model": "gpt-5.4-2026-03-05",
   "api_key_env": "OPENAI_API_KEY",
   "timeout_ms": 120000,
-  "max_completion_tokens": 4000,
-  "chunk_trigger_instructions": 512,
-  "chunk_trigger_blocks": 24,
-  "chunk_block_limit": 14,
-  "chunk_count_limit": 20,
-  "chunk_completion_tokens": 3500,
-  "merge_completion_tokens": 9000,
+  "max_completion_tokens": 12000,
+  "force_chunked": false,
+  "chunk_trigger_instructions": 900,
+  "chunk_trigger_blocks": 36,
+  "chunk_block_limit": 24,
+  "chunk_count_limit": 16,
+  "chunk_completion_tokens": 6000,
+  "merge_completion_tokens": 12000,
   "display_language": {
     "mode": "auto",
     "tag": "en-US",
@@ -518,9 +522,14 @@ ChatGPT subscription example:
   "model": "gpt-5.5",
   "chatgpt_auth_file": "%USERPROFILE%\\.codex\\auth.json",
   "timeout_ms": 120000,
-  "max_completion_tokens": 4000,
-  "chunk_completion_tokens": 3500,
-  "merge_completion_tokens": 9000,
+  "max_completion_tokens": 12000,
+  "force_chunked": false,
+  "chunk_trigger_instructions": 900,
+  "chunk_trigger_blocks": 36,
+  "chunk_block_limit": 24,
+  "chunk_count_limit": 16,
+  "chunk_completion_tokens": 6000,
+  "merge_completion_tokens": 12000,
   "reasoning_effort": "medium"
 }
 ```
@@ -793,7 +802,8 @@ Quality-first note:
 - The analyzer sends IR value facts, block value states, control-flow regions, evidence graph facts, and x64 ABI/no-return evidence to the LLM before refinement, so `/view:analyzer`, `/view:json`, and normal LLM mode all share the same P0 evidence base.
 - The verifier cross-checks loop, switch, no-return, branch targets, return behavior, callee call effects, evidence graph grounding, block value state consistency, evidence coverage, and suspicious identifier claims against analyzer evidence. It lowers trust when confident prose outruns recovered facts and labels each issue with a stable severity/code pair.
 - When verifier feedback finds schema errors, fact conflicts, or very low adjusted confidence, the LLM path performs one automatic retry with the verifier issues appended to the prompt.
-- A good starting point for cloud models is `max_completion_tokens=4000`, `chunk_completion_tokens=3500`, and `merge_completion_tokens=9000`, with chunk triggers around `512 instructions` or `24 blocks`.
+- A good starting point for cloud models is `max_completion_tokens=12000`, `chunk_completion_tokens=6000`, and `merge_completion_tokens=12000`, with `force_chunked=false` and chunk triggers around `900 instructions` or `36 blocks`.
+- Keep `force_chunked=true` for chunk-pipeline stress tests only. Quality-focused decompilation of flattened or dispatcher-heavy functions usually needs a single prompt until the function is large enough to exceed the configured chunk triggers.
 - Keep `timeout_ms` high for cloud models. `120000` is a safer starting point than `15000`.
 - If quality is still weak on huge functions, raise `chunk_count_limit` before shrinking `/limit:N`.
 - If no endpoint is configured, the extension falls back to the deterministic mock provider.

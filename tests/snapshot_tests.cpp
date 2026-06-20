@@ -3357,6 +3357,16 @@ void TestUxHelperSnapshot()
     request.Facts = BuildDiamondFacts();
 
     decomp::LlmClientConfig config;
+    Expect(config.TimeoutMs == 120000, "default UX config should use a cloud-safe timeout");
+    Expect(config.MaxCompletionTokens == 12000, "default UX config should allow single-pass quality output");
+    Expect(!config.ForceChunked, "default UX config should avoid forced chunking");
+    Expect(config.ChunkTriggerInstructions == 900, "default UX config should keep moderate functions single-pass by instruction count");
+    Expect(config.ChunkTriggerBlocks == 36, "default UX config should keep moderate functions single-pass by block count");
+    Expect(config.ChunkBlockLimit == 24, "default UX config should avoid over-splitting large functions");
+    Expect(config.ChunkCountLimit == 16, "default UX config should cap chunk count conservatively");
+    Expect(config.ChunkCompletionTokens == 6000, "default UX config should leave room for chunk-local output");
+    Expect(config.MergeCompletionTokens == 12000, "default UX config should leave room for merge output");
+
     decomp::LlmChunkPlanSummary plan = decomp::SummarizeLlmChunkPlan(request, config);
     Expect(!plan.UseChunked, "small UX plan should use single-pass analysis");
     Expect(plan.EstimatedChunks == 1, "single-pass UX plan should report one estimated chunk");
