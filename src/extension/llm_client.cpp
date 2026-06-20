@@ -4394,6 +4394,7 @@ struct ChunkAnalysis
 constexpr size_t kChunkOverlapBlocks = 2;
 constexpr size_t kChunkPromptFactLimit = 16;
 constexpr size_t kChunkPromptUncertaintyLimit = 8;
+constexpr size_t kMergeChunkUncoveredBlockIdLimit = 32;
 
 std::string DescribePreferredNaturalLanguage(const AnalyzeRequest& request)
 {
@@ -6396,6 +6397,37 @@ JsonValue BuildMergeChunkPlansJson(
     return array;
 }
 
+JsonValue BuildMergeUncoveredBlockIdsJson(
+    const AnalyzeRequest& request,
+    const std::set<size_t>& coveredBlocks,
+    bool* truncated)
+{
+    JsonValue array = JsonValue::MakeArray();
+    size_t uncoveredCount = 0;
+
+    for (size_t index = 0; index < request.Facts.Blocks.size(); ++index)
+    {
+        if (coveredBlocks.find(index) != coveredBlocks.end())
+        {
+            continue;
+        }
+
+        ++uncoveredCount;
+
+        if (array.GetArray().size() < kMergeChunkUncoveredBlockIdLimit)
+        {
+            array.PushBack(JsonValue::MakeString(request.Facts.Blocks[index].Id));
+        }
+    }
+
+    if (truncated != nullptr)
+    {
+        *truncated = uncoveredCount > kMergeChunkUncoveredBlockIdLimit;
+    }
+
+    return array;
+}
+
 JsonValue BuildMergeFactsJson(
     const AnalyzeRequest& request,
     const std::vector<ChunkPlan>& chunkPlans,
@@ -6435,6 +6467,7 @@ JsonValue BuildMergeFactsJson(
     bool evidenceGraphTruncated = false;
     bool factsTruncated = false;
     bool uncertaintiesTruncated = false;
+    bool uncoveredBlockIdsTruncated = false;
     const std::optional<size_t> middleInstructionIndex = FindMiddleInterestingInstructionIndex(request);
     std::set<size_t> coveredBlocks;
 
@@ -6466,10 +6499,18 @@ JsonValue BuildMergeFactsJson(
         }
     }
 
+    const size_t totalBlockCount = request.Facts.Blocks.size();
+    const size_t coveredBlockCount = coveredBlocks.size() > totalBlockCount ? totalBlockCount : coveredBlocks.size();
+    const size_t uncoveredBlockCount = totalBlockCount - coveredBlockCount;
     chunking.Set("chunk_count", JsonValue::MakeNumber(static_cast<double>(chunkPlans.size())));
     chunking.Set("chunk_summaries_count", JsonValue::MakeNumber(static_cast<double>(chunkAnalyses.size())));
-    chunking.Set("covered_block_count", JsonValue::MakeNumber(static_cast<double>(coveredBlocks.size())));
-    chunking.Set("coverage_ratio", JsonValue::MakeNumber(request.Facts.Blocks.empty() ? 0.0 : static_cast<double>(coveredBlocks.size()) / static_cast<double>(request.Facts.Blocks.size())));
+    chunking.Set("total_block_count", JsonValue::MakeNumber(static_cast<double>(totalBlockCount)));
+    chunking.Set("covered_block_count", JsonValue::MakeNumber(static_cast<double>(coveredBlockCount)));
+    chunking.Set("uncovered_block_count", JsonValue::MakeNumber(static_cast<double>(uncoveredBlockCount)));
+    chunking.Set("coverage_complete", JsonValue::MakeBoolean(uncoveredBlockCount == 0));
+    chunking.Set("coverage_ratio", JsonValue::MakeNumber(totalBlockCount == 0 ? 0.0 : static_cast<double>(coveredBlockCount) / static_cast<double>(totalBlockCount)));
+    chunking.Set("uncovered_block_ids", BuildMergeUncoveredBlockIdsJson(request, coveredBlocks, &uncoveredBlockIdsTruncated));
+    chunking.Set("uncovered_block_ids_truncated", JsonValue::MakeBoolean(uncoveredBlockIdsTruncated));
     chunking.Set("chunk_plans", BuildMergeChunkPlansJson(request, chunkPlans));
 
     root.Set("arch", JsonValue::MakeString(request.Facts.Arch));
@@ -6612,7 +6653,7 @@ std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
         "Return only a JSON object with these keys: status, pseudo_c, summary, params, locals, uncertainties, evidence, confidence. "
         "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style. "
-        "Use the chunk plans and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
+        "Use the chunk plans, coverage metadata, and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
         "Use selection, blocks, direct_calls, indirect_calls, recovered_arguments, recovered_locals, call_arguments, stack_pointer, memory_accesses, ir_values, switches, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, control_flow, type_hints, idioms, callee_summaries, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, and pdb facts to preserve semantic names, prompt coverage limits, block grounding, call-site grounding, stack-frame context, reaching-value state, memory side effects, switch dispatch intent, control-flow intent, debugger-session constraints, and observed runtime context. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
@@ -6643,7 +6684,7 @@ std::string BuildMergeUserPrompt(
     prompt += "6. If chunks disagree or coverage remains partial, explain that in uncertainties, but still keep the visible operations explicit.\n";
     prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
     prompt += "8. evidence.blocks must reference block ids that appear in the chunk summaries.\n";
-    prompt += "9. Use chunking.chunk_plans to detect omitted or duplicated block coverage before trusting a short chunk summary.\n";
+    prompt += "9. Use chunking.coverage_complete, chunking.uncovered_block_ids, and chunking.chunk_plans to detect omitted or duplicated block coverage before trusting a short chunk summary.\n";
     prompt += "10. Treat the analyzer skeleton and graph-derived facts as a draft to refine; do not invent unsupported loops, switches, or calls during merge.\n";
     return prompt;
 }

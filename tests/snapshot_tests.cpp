@@ -2048,6 +2048,10 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("\"selection\"") != std::string::npos, "merge prompt should include prompt selection metadata");
     Expect(mergePromptDump.find("\"fact_strategy\"") != std::string::npos, "merge prompt should describe fact selection strategy");
     Expect(mergePromptDump.find("ranked high-signal facts + spread sampling") != std::string::npos, "merge prompt should preserve fact selection strategy");
+    Expect(mergePromptDump.find("\"total_block_count\"") != std::string::npos, "merge prompt should include total block count");
+    Expect(mergePromptDump.find("\"uncovered_block_count\"") != std::string::npos, "merge prompt should include uncovered block count");
+    Expect(mergePromptDump.find("\"coverage_complete\"") != std::string::npos, "merge prompt should include chunk coverage completeness");
+    Expect(mergePromptDump.find("\"uncovered_block_ids\"") != std::string::npos, "merge prompt should include uncovered block ids");
     Expect(mergePromptDump.find("\"chunk_plans\"") != std::string::npos, "merge prompt should include deterministic chunk plans");
     Expect(mergePromptDump.find("\"first_block\"") != std::string::npos, "merge prompt should include chunk first-block provenance");
     Expect(mergePromptDump.find("\"last_block\"") != std::string::npos, "merge prompt should include chunk last-block provenance");
