@@ -6433,257 +6433,137 @@ JsonValue BuildMergeUncoveredBlockIdsJson(
     return array;
 }
 
-JsonValue BuildMergeChunkSummaryAlignmentJson(
-    const std::vector<ChunkPlan>& chunkPlans,
-    const std::vector<ChunkAnalysis>& chunkAnalyses)
+struct MergeChunkAnalysisDiagnostic
 {
-    JsonValue object = JsonValue::MakeObject();
-    std::set<std::string> planIds;
-    std::set<std::string> summaryIds;
-    std::set<std::string> duplicateSummaryIds;
-    std::vector<std::string> missingSummaryChunkIds;
-    std::vector<std::string> orphanSummaryChunkIds;
-    std::vector<std::string> duplicateSummaryChunkIds;
+    const ChunkAnalysis* Analysis = nullptr;
+    std::string ChunkId;
+    bool Planned = false;
+    bool HasBlockEvidence = false;
+    bool HasUngroundedEvidence = false;
+    bool LowConfidence = false;
+    bool HasUncertainties = false;
+    bool EmptyEvidence = false;
+};
 
-    for (const ChunkPlan& plan : chunkPlans)
-    {
-        planIds.insert(plan.Id);
-    }
-
-    for (const ChunkAnalysis& analysis : chunkAnalyses)
-    {
-        if (!summaryIds.insert(analysis.ChunkId).second && duplicateSummaryIds.insert(analysis.ChunkId).second)
-        {
-            duplicateSummaryChunkIds.push_back(analysis.ChunkId);
-        }
-    }
-
-    for (const ChunkPlan& plan : chunkPlans)
-    {
-        if (summaryIds.find(plan.Id) == summaryIds.end())
-        {
-            missingSummaryChunkIds.push_back(plan.Id);
-        }
-    }
-
-    for (const ChunkAnalysis& analysis : chunkAnalyses)
-    {
-        if (planIds.find(analysis.ChunkId) == planIds.end())
-        {
-            orphanSummaryChunkIds.push_back(analysis.ChunkId);
-        }
-    }
-
-    object.Set("alignment_complete", JsonValue::MakeBoolean(
-        missingSummaryChunkIds.empty()
-        && orphanSummaryChunkIds.empty()
-        && duplicateSummaryChunkIds.empty()));
-    object.Set("missing_summary_chunk_ids", BuildStringArray(missingSummaryChunkIds, 16, nullptr));
-    object.Set("orphan_summary_chunk_ids", BuildStringArray(orphanSummaryChunkIds, 16, nullptr));
-    object.Set("duplicate_summary_chunk_ids", BuildStringArray(duplicateSummaryChunkIds, 16, nullptr));
-    return object;
-}
-
-JsonValue BuildMergeChunkSummaryQualityJson(
-    const std::vector<ChunkAnalysis>& chunkAnalyses)
+struct MergeChunkDiagnostics
 {
-    JsonValue object = JsonValue::MakeObject();
-    std::vector<std::string> lowConfidenceChunkIds;
-    std::vector<std::string> uncertaintyChunkIds;
-    std::vector<std::string> emptyEvidenceChunkIds;
-    double confidenceSum = 0.0;
-    double minConfidence = 0.0;
-    double maxConfidence = 0.0;
-    bool hasConfidence = false;
+    size_t ChunkPlanCount = 0;
+    size_t ChunkSummaryCount = 0;
+    size_t UncoveredBlockCount = 0;
+    size_t PlannedBlockCount = 0;
+    size_t EvidenceBlockCount = 0;
+    size_t GroundedEvidenceBlockCount = 0;
+    size_t MissingSummaryCount = 0;
+    size_t OrphanSummaryCount = 0;
+    size_t DuplicateSummaryCount = 0;
+    size_t LowConfidenceSummaryCount = 0;
+    size_t UncertainSummaryCount = 0;
+    size_t EmptyEvidenceSummaryCount = 0;
+    size_t MissingBlockEvidenceSummaryCount = 0;
+    size_t WeakEvidenceSummaryCount = 0;
+    size_t UngroundedEvidenceSummaryCount = 0;
+    double ConfidenceSum = 0.0;
+    double MinConfidence = 0.0;
+    double MaxConfidence = 0.0;
+    bool HasConfidence = false;
+    bool EvidenceBlocksOutsideChunkPlansTruncated = false;
+    std::set<std::string> PlanIds;
+    std::set<std::string> PlannedBlockIds;
+    std::unordered_map<std::string, size_t> SummaryCountsByChunkId;
+    std::vector<MergeChunkAnalysisDiagnostic> AnalysisDiagnostics;
+    std::vector<std::string> MissingSummaryChunkIds;
+    std::vector<std::string> OrphanSummaryChunkIds;
+    std::vector<std::string> DuplicateSummaryChunkIds;
+    std::vector<std::string> LowConfidenceChunkIds;
+    std::vector<std::string> UncertaintyChunkIds;
+    std::vector<std::string> EmptyEvidenceChunkIds;
+    std::vector<std::string> ChunksWithoutBlockEvidence;
+    std::vector<std::string> EvidenceBlocksOutsideChunkPlans;
+    std::vector<std::string> RiskCodes;
+};
 
-    for (const ChunkAnalysis& analysis : chunkAnalyses)
-    {
-        confidenceSum += analysis.Confidence;
-
-        if (!hasConfidence)
-        {
-            minConfidence = analysis.Confidence;
-            maxConfidence = analysis.Confidence;
-            hasConfidence = true;
-        }
-        else
-        {
-            minConfidence = (std::min)(minConfidence, analysis.Confidence);
-            maxConfidence = (std::max)(maxConfidence, analysis.Confidence);
-        }
-
-        if (analysis.Confidence < kMergeChunkLowConfidenceThreshold)
-        {
-            lowConfidenceChunkIds.push_back(analysis.ChunkId);
-        }
-
-        if (!analysis.Uncertainties.empty())
-        {
-            uncertaintyChunkIds.push_back(analysis.ChunkId);
-        }
-
-        if (analysis.Evidence.empty())
-        {
-            emptyEvidenceChunkIds.push_back(analysis.ChunkId);
-        }
-    }
-
-    object.Set("summary_count", JsonValue::MakeNumber(static_cast<double>(chunkAnalyses.size())));
-    object.Set("average_confidence", JsonValue::MakeNumber(chunkAnalyses.empty() ? 0.0 : confidenceSum / static_cast<double>(chunkAnalyses.size())));
-    object.Set("min_confidence", JsonValue::MakeNumber(hasConfidence ? minConfidence : 0.0));
-    object.Set("max_confidence", JsonValue::MakeNumber(hasConfidence ? maxConfidence : 0.0));
-    object.Set("low_confidence_threshold", JsonValue::MakeNumber(kMergeChunkLowConfidenceThreshold));
-    object.Set("low_confidence_chunk_ids", BuildStringArray(lowConfidenceChunkIds, 16, nullptr));
-    object.Set("uncertainty_chunk_ids", BuildStringArray(uncertaintyChunkIds, 16, nullptr));
-    object.Set("empty_evidence_chunk_ids", BuildStringArray(emptyEvidenceChunkIds, 16, nullptr));
-    object.Set("all_summaries_have_evidence", JsonValue::MakeBoolean(emptyEvidenceChunkIds.empty()));
-    return object;
-}
-
-JsonValue BuildMergeChunkSummaryEvidenceJson(
-    const AnalyzeRequest& request,
-    const std::vector<ChunkPlan>& chunkPlans,
-    const std::vector<ChunkAnalysis>& chunkAnalyses)
-{
-    JsonValue object = JsonValue::MakeObject();
-    std::set<std::string> plannedBlockIds;
-    std::set<std::string> evidenceBlockIds;
-    std::set<std::string> outsideEvidenceBlockIds;
-    std::vector<std::string> chunksWithoutBlockEvidence;
-
-    for (const ChunkPlan& plan : chunkPlans)
-    {
-        for (const size_t blockIndex : plan.BlockIndices)
-        {
-            if (blockIndex < request.Facts.Blocks.size())
-            {
-                plannedBlockIds.insert(request.Facts.Blocks[blockIndex].Id);
-            }
-        }
-    }
-
-    for (const ChunkAnalysis& analysis : chunkAnalyses)
-    {
-        bool hasBlockEvidence = false;
-
-        for (const EvidenceItem& evidence : analysis.Evidence)
-        {
-            for (const std::string& blockId : evidence.Blocks)
-            {
-                if (blockId.empty())
-                {
-                    continue;
-                }
-
-                hasBlockEvidence = true;
-                evidenceBlockIds.insert(blockId);
-
-                if (plannedBlockIds.find(blockId) == plannedBlockIds.end())
-                {
-                    outsideEvidenceBlockIds.insert(blockId);
-                }
-            }
-        }
-
-        if (!hasBlockEvidence)
-        {
-            chunksWithoutBlockEvidence.push_back(analysis.ChunkId);
-        }
-    }
-
-    size_t groundedEvidenceBlockCount = 0;
-
-    for (const std::string& blockId : evidenceBlockIds)
-    {
-        if (plannedBlockIds.find(blockId) != plannedBlockIds.end())
-        {
-            ++groundedEvidenceBlockCount;
-        }
-    }
-
-    std::vector<std::string> outsideEvidenceBlockIdList;
-
-    for (const std::string& blockId : outsideEvidenceBlockIds)
-    {
-        if (outsideEvidenceBlockIdList.size() >= kMergeChunkEvidenceBlockIdLimit)
-        {
-            break;
-        }
-
-        outsideEvidenceBlockIdList.push_back(blockId);
-    }
-
-    object.Set("planned_block_count", JsonValue::MakeNumber(static_cast<double>(plannedBlockIds.size())));
-    object.Set("evidence_block_count", JsonValue::MakeNumber(static_cast<double>(evidenceBlockIds.size())));
-    object.Set("grounded_evidence_block_count", JsonValue::MakeNumber(static_cast<double>(groundedEvidenceBlockCount)));
-    object.Set("evidence_block_coverage_ratio", JsonValue::MakeNumber(plannedBlockIds.empty() ? 0.0 : static_cast<double>(groundedEvidenceBlockCount) / static_cast<double>(plannedBlockIds.size())));
-    object.Set("chunks_without_block_evidence", BuildStringArray(chunksWithoutBlockEvidence, 16, nullptr));
-    object.Set("evidence_blocks_outside_chunk_plans", BuildStringArray(outsideEvidenceBlockIdList, kMergeChunkEvidenceBlockIdLimit, nullptr));
-    object.Set("evidence_blocks_outside_chunk_plans_truncated", JsonValue::MakeBoolean(outsideEvidenceBlockIds.size() > kMergeChunkEvidenceBlockIdLimit));
-    object.Set("all_evidence_blocks_grounded", JsonValue::MakeBoolean(outsideEvidenceBlockIds.empty()));
-    return object;
-}
-
-JsonValue BuildMergeChunkRiskJson(
+MergeChunkDiagnostics BuildMergeChunkDiagnostics(
     const AnalyzeRequest& request,
     const std::vector<ChunkPlan>& chunkPlans,
     const std::vector<ChunkAnalysis>& chunkAnalyses,
     size_t uncoveredBlockCount)
 {
-    JsonValue object = JsonValue::MakeObject();
-    std::set<std::string> planIds;
+    MergeChunkDiagnostics diagnostics;
     std::set<std::string> summaryIds;
     std::set<std::string> duplicateSummaryIds;
-    std::set<std::string> plannedBlockIds;
-    std::vector<std::string> riskCodes;
-    bool hasSummaryAlignmentIssue = false;
-    bool hasLowConfidenceChunks = false;
-    bool hasUncertainChunks = false;
-    bool hasEmptyEvidenceChunks = false;
-    bool hasChunksWithoutBlockEvidence = false;
-    bool hasUngroundedEvidenceBlocks = false;
+    std::set<std::string> evidenceBlockIds;
+    std::set<std::string> outsideEvidenceBlockIds;
+
+    diagnostics.ChunkPlanCount = chunkPlans.size();
+    diagnostics.ChunkSummaryCount = chunkAnalyses.size();
+    diagnostics.UncoveredBlockCount = uncoveredBlockCount;
 
     for (const ChunkPlan& plan : chunkPlans)
     {
-        planIds.insert(plan.Id);
+        diagnostics.PlanIds.insert(plan.Id);
 
         for (const size_t blockIndex : plan.BlockIndices)
         {
             if (blockIndex < request.Facts.Blocks.size())
             {
-                plannedBlockIds.insert(request.Facts.Blocks[blockIndex].Id);
+                diagnostics.PlannedBlockIds.insert(request.Facts.Blocks[blockIndex].Id);
             }
         }
     }
 
     for (const ChunkAnalysis& analysis : chunkAnalyses)
     {
-        if (!summaryIds.insert(analysis.ChunkId).second)
+        MergeChunkAnalysisDiagnostic analysisDiagnostic;
+        analysisDiagnostic.Analysis = &analysis;
+        analysisDiagnostic.ChunkId = analysis.ChunkId;
+        analysisDiagnostic.Planned = diagnostics.PlanIds.find(analysis.ChunkId) != diagnostics.PlanIds.end();
+        analysisDiagnostic.LowConfidence = analysis.Confidence < kMergeChunkLowConfidenceThreshold;
+        analysisDiagnostic.HasUncertainties = !analysis.Uncertainties.empty();
+        analysisDiagnostic.EmptyEvidence = analysis.Evidence.empty();
+
+        ++diagnostics.SummaryCountsByChunkId[analysis.ChunkId];
+        diagnostics.ConfidenceSum += analysis.Confidence;
+
+        if (!diagnostics.HasConfidence)
         {
-            duplicateSummaryIds.insert(analysis.ChunkId);
+            diagnostics.MinConfidence = analysis.Confidence;
+            diagnostics.MaxConfidence = analysis.Confidence;
+            diagnostics.HasConfidence = true;
+        }
+        else
+        {
+            diagnostics.MinConfidence = (std::min)(diagnostics.MinConfidence, analysis.Confidence);
+            diagnostics.MaxConfidence = (std::max)(diagnostics.MaxConfidence, analysis.Confidence);
         }
 
-        if (planIds.find(analysis.ChunkId) == planIds.end())
+        if (!summaryIds.insert(analysis.ChunkId).second && duplicateSummaryIds.insert(analysis.ChunkId).second)
         {
-            hasSummaryAlignmentIssue = true;
+            diagnostics.DuplicateSummaryChunkIds.push_back(analysis.ChunkId);
         }
 
-        if (analysis.Confidence < kMergeChunkLowConfidenceThreshold)
+        if (!analysisDiagnostic.Planned)
         {
-            hasLowConfidenceChunks = true;
+            ++diagnostics.OrphanSummaryCount;
+            diagnostics.OrphanSummaryChunkIds.push_back(analysis.ChunkId);
         }
 
-        if (!analysis.Uncertainties.empty())
+        if (analysisDiagnostic.LowConfidence)
         {
-            hasUncertainChunks = true;
+            ++diagnostics.LowConfidenceSummaryCount;
+            diagnostics.LowConfidenceChunkIds.push_back(analysis.ChunkId);
         }
 
-        if (analysis.Evidence.empty())
+        if (analysisDiagnostic.HasUncertainties)
         {
-            hasEmptyEvidenceChunks = true;
+            ++diagnostics.UncertainSummaryCount;
+            diagnostics.UncertaintyChunkIds.push_back(analysis.ChunkId);
         }
 
-        bool hasBlockEvidence = false;
+        if (analysisDiagnostic.EmptyEvidence)
+        {
+            ++diagnostics.EmptyEvidenceSummaryCount;
+            diagnostics.EmptyEvidenceChunkIds.push_back(analysis.ChunkId);
+        }
 
         for (const EvidenceItem& evidence : analysis.Evidence)
         {
@@ -6694,79 +6574,180 @@ JsonValue BuildMergeChunkRiskJson(
                     continue;
                 }
 
-                hasBlockEvidence = true;
+                analysisDiagnostic.HasBlockEvidence = true;
+                evidenceBlockIds.insert(blockId);
 
-                if (plannedBlockIds.find(blockId) == plannedBlockIds.end())
+                if (diagnostics.PlannedBlockIds.find(blockId) == diagnostics.PlannedBlockIds.end())
                 {
-                    hasUngroundedEvidenceBlocks = true;
+                    analysisDiagnostic.HasUngroundedEvidence = true;
+                    outsideEvidenceBlockIds.insert(blockId);
                 }
             }
         }
 
-        if (!hasBlockEvidence)
+        if (!analysisDiagnostic.HasBlockEvidence)
         {
-            hasChunksWithoutBlockEvidence = true;
+            ++diagnostics.MissingBlockEvidenceSummaryCount;
+            diagnostics.ChunksWithoutBlockEvidence.push_back(analysis.ChunkId);
         }
+
+        if (analysisDiagnostic.EmptyEvidence || !analysisDiagnostic.HasBlockEvidence)
+        {
+            ++diagnostics.WeakEvidenceSummaryCount;
+        }
+
+        if (analysisDiagnostic.HasUngroundedEvidence)
+        {
+            ++diagnostics.UngroundedEvidenceSummaryCount;
+        }
+
+        diagnostics.AnalysisDiagnostics.push_back(analysisDiagnostic);
     }
 
     for (const ChunkPlan& plan : chunkPlans)
     {
-        if (summaryIds.find(plan.Id) == summaryIds.end())
+        const auto summaryCountIt = diagnostics.SummaryCountsByChunkId.find(plan.Id);
+
+        if (summaryCountIt == diagnostics.SummaryCountsByChunkId.end())
         {
-            hasSummaryAlignmentIssue = true;
-            break;
+            ++diagnostics.MissingSummaryCount;
+            diagnostics.MissingSummaryChunkIds.push_back(plan.Id);
+            continue;
+        }
+
+        if (summaryCountIt->second > 1)
+        {
+            diagnostics.DuplicateSummaryCount += summaryCountIt->second - 1;
         }
     }
 
-    if (!duplicateSummaryIds.empty())
+    for (const std::string& blockId : evidenceBlockIds)
     {
-        hasSummaryAlignmentIssue = true;
+        if (diagnostics.PlannedBlockIds.find(blockId) != diagnostics.PlannedBlockIds.end())
+        {
+            ++diagnostics.GroundedEvidenceBlockCount;
+        }
     }
 
-    if (uncoveredBlockCount != 0)
+    for (const std::string& blockId : outsideEvidenceBlockIds)
     {
-        riskCodes.push_back("coverage_gap");
+        if (diagnostics.EvidenceBlocksOutsideChunkPlans.size() >= kMergeChunkEvidenceBlockIdLimit)
+        {
+            break;
+        }
+
+        diagnostics.EvidenceBlocksOutsideChunkPlans.push_back(blockId);
     }
 
-    if (hasSummaryAlignmentIssue)
+    diagnostics.PlannedBlockCount = diagnostics.PlannedBlockIds.size();
+    diagnostics.EvidenceBlockCount = evidenceBlockIds.size();
+    diagnostics.EvidenceBlocksOutsideChunkPlansTruncated = outsideEvidenceBlockIds.size() > kMergeChunkEvidenceBlockIdLimit;
+
+    if (diagnostics.UncoveredBlockCount != 0)
     {
-        riskCodes.push_back("summary_alignment_issue");
+        diagnostics.RiskCodes.push_back("coverage_gap");
     }
 
-    if (hasLowConfidenceChunks)
+    if (!diagnostics.MissingSummaryChunkIds.empty()
+        || !diagnostics.OrphanSummaryChunkIds.empty()
+        || !diagnostics.DuplicateSummaryChunkIds.empty())
     {
-        riskCodes.push_back("low_confidence_chunks");
+        diagnostics.RiskCodes.push_back("summary_alignment_issue");
     }
 
-    if (hasUncertainChunks)
+    if (!diagnostics.LowConfidenceChunkIds.empty())
     {
-        riskCodes.push_back("uncertain_chunks");
+        diagnostics.RiskCodes.push_back("low_confidence_chunks");
     }
 
-    if (hasEmptyEvidenceChunks)
+    if (!diagnostics.UncertaintyChunkIds.empty())
     {
-        riskCodes.push_back("empty_evidence_chunks");
+        diagnostics.RiskCodes.push_back("uncertain_chunks");
     }
 
-    if (hasChunksWithoutBlockEvidence)
+    if (!diagnostics.EmptyEvidenceChunkIds.empty())
     {
-        riskCodes.push_back("missing_block_evidence");
+        diagnostics.RiskCodes.push_back("empty_evidence_chunks");
     }
 
-    if (hasUngroundedEvidenceBlocks)
+    if (!diagnostics.ChunksWithoutBlockEvidence.empty())
     {
-        riskCodes.push_back("ungrounded_evidence_blocks");
+        diagnostics.RiskCodes.push_back("missing_block_evidence");
     }
 
-    object.Set("risk_count", JsonValue::MakeNumber(static_cast<double>(riskCodes.size())));
-    object.Set("risk_codes", BuildStringArray(riskCodes, 16, nullptr));
-    object.Set("has_coverage_gap", JsonValue::MakeBoolean(uncoveredBlockCount != 0));
-    object.Set("has_summary_alignment_issue", JsonValue::MakeBoolean(hasSummaryAlignmentIssue));
-    object.Set("has_low_confidence_chunks", JsonValue::MakeBoolean(hasLowConfidenceChunks));
-    object.Set("has_uncertain_chunks", JsonValue::MakeBoolean(hasUncertainChunks));
-    object.Set("has_empty_evidence_chunks", JsonValue::MakeBoolean(hasEmptyEvidenceChunks));
-    object.Set("has_chunks_without_block_evidence", JsonValue::MakeBoolean(hasChunksWithoutBlockEvidence));
-    object.Set("has_ungrounded_evidence_blocks", JsonValue::MakeBoolean(hasUngroundedEvidenceBlocks));
+    if (!outsideEvidenceBlockIds.empty())
+    {
+        diagnostics.RiskCodes.push_back("ungrounded_evidence_blocks");
+    }
+
+    return diagnostics;
+}
+
+JsonValue BuildMergeChunkSummaryAlignmentJson(
+    const MergeChunkDiagnostics& diagnostics)
+{
+    JsonValue object = JsonValue::MakeObject();
+
+    object.Set("alignment_complete", JsonValue::MakeBoolean(
+        diagnostics.MissingSummaryChunkIds.empty()
+        && diagnostics.OrphanSummaryChunkIds.empty()
+        && diagnostics.DuplicateSummaryChunkIds.empty()));
+    object.Set("missing_summary_chunk_ids", BuildStringArray(diagnostics.MissingSummaryChunkIds, 16, nullptr));
+    object.Set("orphan_summary_chunk_ids", BuildStringArray(diagnostics.OrphanSummaryChunkIds, 16, nullptr));
+    object.Set("duplicate_summary_chunk_ids", BuildStringArray(diagnostics.DuplicateSummaryChunkIds, 16, nullptr));
+    return object;
+}
+
+JsonValue BuildMergeChunkSummaryQualityJson(
+    const MergeChunkDiagnostics& diagnostics)
+{
+    JsonValue object = JsonValue::MakeObject();
+
+    object.Set("summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.ChunkSummaryCount)));
+    object.Set("average_confidence", JsonValue::MakeNumber(diagnostics.ChunkSummaryCount == 0 ? 0.0 : diagnostics.ConfidenceSum / static_cast<double>(diagnostics.ChunkSummaryCount)));
+    object.Set("min_confidence", JsonValue::MakeNumber(diagnostics.HasConfidence ? diagnostics.MinConfidence : 0.0));
+    object.Set("max_confidence", JsonValue::MakeNumber(diagnostics.HasConfidence ? diagnostics.MaxConfidence : 0.0));
+    object.Set("low_confidence_threshold", JsonValue::MakeNumber(kMergeChunkLowConfidenceThreshold));
+    object.Set("low_confidence_chunk_ids", BuildStringArray(diagnostics.LowConfidenceChunkIds, 16, nullptr));
+    object.Set("uncertainty_chunk_ids", BuildStringArray(diagnostics.UncertaintyChunkIds, 16, nullptr));
+    object.Set("empty_evidence_chunk_ids", BuildStringArray(diagnostics.EmptyEvidenceChunkIds, 16, nullptr));
+    object.Set("all_summaries_have_evidence", JsonValue::MakeBoolean(diagnostics.EmptyEvidenceChunkIds.empty()));
+    return object;
+}
+
+JsonValue BuildMergeChunkSummaryEvidenceJson(
+    const MergeChunkDiagnostics& diagnostics)
+{
+    JsonValue object = JsonValue::MakeObject();
+
+    object.Set("planned_block_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.PlannedBlockCount)));
+    object.Set("evidence_block_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.EvidenceBlockCount)));
+    object.Set("grounded_evidence_block_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.GroundedEvidenceBlockCount)));
+    object.Set("evidence_block_coverage_ratio", JsonValue::MakeNumber(diagnostics.PlannedBlockCount == 0 ? 0.0 : static_cast<double>(diagnostics.GroundedEvidenceBlockCount) / static_cast<double>(diagnostics.PlannedBlockCount)));
+    object.Set("chunks_without_block_evidence", BuildStringArray(diagnostics.ChunksWithoutBlockEvidence, 16, nullptr));
+    object.Set("evidence_blocks_outside_chunk_plans", BuildStringArray(diagnostics.EvidenceBlocksOutsideChunkPlans, kMergeChunkEvidenceBlockIdLimit, nullptr));
+    object.Set("evidence_blocks_outside_chunk_plans_truncated", JsonValue::MakeBoolean(diagnostics.EvidenceBlocksOutsideChunkPlansTruncated));
+    object.Set("all_evidence_blocks_grounded", JsonValue::MakeBoolean(diagnostics.EvidenceBlocksOutsideChunkPlans.empty() && !diagnostics.EvidenceBlocksOutsideChunkPlansTruncated));
+    return object;
+}
+
+JsonValue BuildMergeChunkRiskJson(
+    const MergeChunkDiagnostics& diagnostics)
+{
+    JsonValue object = JsonValue::MakeObject();
+
+    object.Set("risk_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.RiskCodes.size())));
+    object.Set("risk_codes", BuildStringArray(diagnostics.RiskCodes, 16, nullptr));
+    object.Set("has_coverage_gap", JsonValue::MakeBoolean(diagnostics.UncoveredBlockCount != 0));
+    object.Set("has_summary_alignment_issue", JsonValue::MakeBoolean(
+        !diagnostics.MissingSummaryChunkIds.empty()
+        || !diagnostics.OrphanSummaryChunkIds.empty()
+        || !diagnostics.DuplicateSummaryChunkIds.empty()));
+    object.Set("has_low_confidence_chunks", JsonValue::MakeBoolean(!diagnostics.LowConfidenceChunkIds.empty()));
+    object.Set("has_uncertain_chunks", JsonValue::MakeBoolean(!diagnostics.UncertaintyChunkIds.empty()));
+    object.Set("has_empty_evidence_chunks", JsonValue::MakeBoolean(!diagnostics.EmptyEvidenceChunkIds.empty()));
+    object.Set("has_chunks_without_block_evidence", JsonValue::MakeBoolean(!diagnostics.ChunksWithoutBlockEvidence.empty()));
+    object.Set("has_ungrounded_evidence_blocks", JsonValue::MakeBoolean(!diagnostics.EvidenceBlocksOutsideChunkPlans.empty() || diagnostics.EvidenceBlocksOutsideChunkPlansTruncated));
     return object;
 }
 
@@ -7045,14 +7026,10 @@ void AppendMergeReviewChunkId(
 }
 
 JsonValue BuildMergeChunkReviewPlanJson(
-    const AnalyzeRequest& request,
     const std::vector<ChunkPlan>& chunkPlans,
-    const std::vector<ChunkAnalysis>& chunkAnalyses,
-    size_t uncoveredBlockCount)
+    const MergeChunkDiagnostics& diagnostics)
 {
     JsonValue object = JsonValue::MakeObject();
-    std::unordered_map<std::string, std::vector<const ChunkAnalysis*>> analysesByChunkId;
-    std::set<std::string> planIds;
     std::vector<std::string> reviewActions;
     std::vector<std::string> priorityChunkIds;
     bool priorityChunkIdsTruncated = false;
@@ -7061,17 +7038,7 @@ JsonValue BuildMergeChunkReviewPlanJson(
     bool requiresConfidenceReview = false;
     bool requiresEvidenceReview = false;
 
-    for (const ChunkAnalysis& analysis : chunkAnalyses)
-    {
-        analysesByChunkId[analysis.ChunkId].push_back(&analysis);
-    }
-
-    for (const ChunkPlan& plan : chunkPlans)
-    {
-        planIds.insert(plan.Id);
-    }
-
-    if (uncoveredBlockCount != 0)
+    if (diagnostics.UncoveredBlockCount != 0)
     {
         requiresCoverageReview = true;
         AppendMergeReviewAction(reviewActions, "verify_uncovered_blocks");
@@ -7079,83 +7046,52 @@ JsonValue BuildMergeChunkReviewPlanJson(
 
     for (const ChunkPlan& plan : chunkPlans)
     {
-        std::set<std::string> plannedBlockIds;
-        std::vector<const ChunkAnalysis*> emptyAnalyses;
-        const auto analysisIt = analysesByChunkId.find(plan.Id);
-        const std::vector<const ChunkAnalysis*>& analyses = analysisIt == analysesByChunkId.end() ? emptyAnalyses : analysisIt->second;
+        const auto summaryCountIt = diagnostics.SummaryCountsByChunkId.find(plan.Id);
+        const size_t summaryCount = summaryCountIt == diagnostics.SummaryCountsByChunkId.end() ? 0 : summaryCountIt->second;
 
-        for (const size_t blockIndex : plan.BlockIndices)
-        {
-            if (blockIndex < request.Facts.Blocks.size())
-            {
-                plannedBlockIds.insert(request.Facts.Blocks[blockIndex].Id);
-            }
-        }
-
-        if (analyses.empty())
+        if (summaryCount == 0)
         {
             requiresSummaryReconciliation = true;
             AppendMergeReviewAction(reviewActions, "recover_missing_chunk_summary");
             AppendMergeReviewChunkId(priorityChunkIds, priorityChunkIdsTruncated, plan.Id);
         }
 
-        if (analyses.size() > 1)
+        if (summaryCount > 1)
         {
             requiresSummaryReconciliation = true;
             AppendMergeReviewAction(reviewActions, "reconcile_duplicate_chunk_summaries");
             AppendMergeReviewChunkId(priorityChunkIds, priorityChunkIdsTruncated, plan.Id);
         }
 
-        for (const ChunkAnalysis* analysis : analyses)
+        for (const MergeChunkAnalysisDiagnostic& analysisDiagnostic : diagnostics.AnalysisDiagnostics)
         {
-            if (analysis == nullptr)
+            if (analysisDiagnostic.ChunkId != plan.Id)
             {
                 continue;
             }
 
-            if (analysis->Confidence < kMergeChunkLowConfidenceThreshold)
+            if (analysisDiagnostic.LowConfidence)
             {
                 requiresConfidenceReview = true;
                 AppendMergeReviewAction(reviewActions, "recheck_low_confidence_chunks");
                 AppendMergeReviewChunkId(priorityChunkIds, priorityChunkIdsTruncated, plan.Id);
             }
 
-            if (!analysis->Uncertainties.empty())
+            if (analysisDiagnostic.HasUncertainties)
             {
                 requiresConfidenceReview = true;
                 AppendMergeReviewAction(reviewActions, "preserve_chunk_uncertainties");
                 AppendMergeReviewChunkId(priorityChunkIds, priorityChunkIdsTruncated, plan.Id);
             }
 
-            bool hasBlockEvidence = false;
-            bool hasUngroundedEvidence = false;
-
-            for (const EvidenceItem& evidence : analysis->Evidence)
-            {
-                for (const std::string& blockId : evidence.Blocks)
-                {
-                    if (blockId.empty())
-                    {
-                        continue;
-                    }
-
-                    hasBlockEvidence = true;
-
-                    if (plannedBlockIds.find(blockId) == plannedBlockIds.end())
-                    {
-                        hasUngroundedEvidence = true;
-                    }
-                }
-            }
-
-            if (analysis->Evidence.empty() || !hasBlockEvidence)
+            if (analysisDiagnostic.EmptyEvidence || !analysisDiagnostic.HasBlockEvidence)
             {
                 requiresEvidenceReview = true;
                 AppendMergeReviewAction(reviewActions, "require_chunk_block_evidence");
                 AppendMergeReviewChunkId(priorityChunkIds, priorityChunkIdsTruncated, plan.Id);
             }
 
-            if (hasUngroundedEvidence)
+            if (analysisDiagnostic.HasUngroundedEvidence)
             {
                 requiresEvidenceReview = true;
                 AppendMergeReviewAction(reviewActions, "discard_ungrounded_chunk_evidence");
@@ -7164,16 +7100,16 @@ JsonValue BuildMergeChunkReviewPlanJson(
         }
     }
 
-    for (const ChunkAnalysis& analysis : chunkAnalyses)
+    for (const MergeChunkAnalysisDiagnostic& analysisDiagnostic : diagnostics.AnalysisDiagnostics)
     {
-        if (planIds.find(analysis.ChunkId) != planIds.end())
+        if (analysisDiagnostic.Planned)
         {
             continue;
         }
 
         requiresSummaryReconciliation = true;
         AppendMergeReviewAction(reviewActions, "ignore_or_reconcile_orphan_summary");
-        AppendMergeReviewChunkId(priorityChunkIds, priorityChunkIdsTruncated, analysis.ChunkId);
+        AppendMergeReviewChunkId(priorityChunkIds, priorityChunkIdsTruncated, analysisDiagnostic.ChunkId);
     }
 
     if (reviewActions.empty())
@@ -7209,141 +7145,48 @@ void ApplyMergeConfidenceCeiling(
 }
 
 JsonValue BuildMergeChunkConfidencePolicyJson(
-    const AnalyzeRequest& request,
-    const std::vector<ChunkPlan>& chunkPlans,
-    const std::vector<ChunkAnalysis>& chunkAnalyses,
-    size_t uncoveredBlockCount)
+    const MergeChunkDiagnostics& diagnostics)
 {
     JsonValue object = JsonValue::MakeObject();
-    std::unordered_map<std::string, size_t> summaryCountsByChunkId;
-    std::set<std::string> planIds;
-    std::set<std::string> plannedBlockIds;
     std::vector<std::string> ceilingReasons;
     double confidenceCeiling = 0.90;
-    size_t missingSummaryCount = 0;
-    size_t orphanSummaryCount = 0;
-    size_t duplicateSummaryCount = 0;
-    size_t lowConfidenceSummaryCount = 0;
-    size_t emptyEvidenceSummaryCount = 0;
-    size_t missingBlockEvidenceSummaryCount = 0;
-    size_t ungroundedEvidenceSummaryCount = 0;
 
-    for (const ChunkPlan& plan : chunkPlans)
-    {
-        planIds.insert(plan.Id);
-
-        for (const size_t blockIndex : plan.BlockIndices)
-        {
-            if (blockIndex < request.Facts.Blocks.size())
-            {
-                plannedBlockIds.insert(request.Facts.Blocks[blockIndex].Id);
-            }
-        }
-    }
-
-    for (const ChunkAnalysis& analysis : chunkAnalyses)
-    {
-        ++summaryCountsByChunkId[analysis.ChunkId];
-
-        if (planIds.find(analysis.ChunkId) == planIds.end())
-        {
-            ++orphanSummaryCount;
-        }
-
-        if (analysis.Confidence < kMergeChunkLowConfidenceThreshold)
-        {
-            ++lowConfidenceSummaryCount;
-        }
-
-        if (analysis.Evidence.empty())
-        {
-            ++emptyEvidenceSummaryCount;
-        }
-
-        bool hasBlockEvidence = false;
-        bool hasUngroundedEvidence = false;
-
-        for (const EvidenceItem& evidence : analysis.Evidence)
-        {
-            for (const std::string& blockId : evidence.Blocks)
-            {
-                if (blockId.empty())
-                {
-                    continue;
-                }
-
-                hasBlockEvidence = true;
-
-                if (plannedBlockIds.find(blockId) == plannedBlockIds.end())
-                {
-                    hasUngroundedEvidence = true;
-                }
-            }
-        }
-
-        if (!hasBlockEvidence)
-        {
-            ++missingBlockEvidenceSummaryCount;
-        }
-
-        if (hasUngroundedEvidence)
-        {
-            ++ungroundedEvidenceSummaryCount;
-        }
-    }
-
-    for (const ChunkPlan& plan : chunkPlans)
-    {
-        const auto summaryCountIt = summaryCountsByChunkId.find(plan.Id);
-
-        if (summaryCountIt == summaryCountsByChunkId.end())
-        {
-            ++missingSummaryCount;
-            continue;
-        }
-
-        if (summaryCountIt->second > 1)
-        {
-            duplicateSummaryCount += summaryCountIt->second - 1;
-        }
-    }
-
-    if (chunkAnalyses.empty())
+    if (diagnostics.ChunkSummaryCount == 0)
     {
         ApplyMergeConfidenceCeiling(confidenceCeiling, ceilingReasons, 0.45, "no_chunk_summaries");
     }
 
-    if (uncoveredBlockCount != 0)
+    if (diagnostics.UncoveredBlockCount != 0)
     {
         ApplyMergeConfidenceCeiling(confidenceCeiling, ceilingReasons, 0.65, "coverage_gap");
     }
 
-    if (missingSummaryCount != 0)
+    if (diagnostics.MissingSummaryCount != 0)
     {
         ApplyMergeConfidenceCeiling(confidenceCeiling, ceilingReasons, 0.60, "missing_chunk_summary");
     }
 
-    if (orphanSummaryCount != 0)
+    if (diagnostics.OrphanSummaryCount != 0)
     {
         ApplyMergeConfidenceCeiling(confidenceCeiling, ceilingReasons, 0.65, "orphan_chunk_summary");
     }
 
-    if (duplicateSummaryCount != 0)
+    if (diagnostics.DuplicateSummaryCount != 0)
     {
         ApplyMergeConfidenceCeiling(confidenceCeiling, ceilingReasons, 0.62, "duplicate_chunk_summary");
     }
 
-    if (lowConfidenceSummaryCount != 0)
+    if (diagnostics.LowConfidenceSummaryCount != 0)
     {
         ApplyMergeConfidenceCeiling(confidenceCeiling, ceilingReasons, 0.55, "low_confidence_chunk_summary");
     }
 
-    if (emptyEvidenceSummaryCount != 0 || missingBlockEvidenceSummaryCount != 0)
+    if (diagnostics.EmptyEvidenceSummaryCount != 0 || diagnostics.MissingBlockEvidenceSummaryCount != 0)
     {
         ApplyMergeConfidenceCeiling(confidenceCeiling, ceilingReasons, 0.58, "weak_chunk_evidence");
     }
 
-    if (ungroundedEvidenceSummaryCount != 0)
+    if (diagnostics.UngroundedEvidenceSummaryCount != 0)
     {
         ApplyMergeConfidenceCeiling(confidenceCeiling, ceilingReasons, 0.55, "ungrounded_chunk_evidence");
     }
@@ -7353,147 +7196,54 @@ JsonValue BuildMergeChunkConfidencePolicyJson(
     object.Set("requires_uncertainty", JsonValue::MakeBoolean(!ceilingReasons.empty()));
     object.Set("can_report_high_confidence", JsonValue::MakeBoolean(ceilingReasons.empty()));
     object.Set("low_confidence_threshold", JsonValue::MakeNumber(kMergeChunkLowConfidenceThreshold));
-    object.Set("chunk_plan_count", JsonValue::MakeNumber(static_cast<double>(chunkPlans.size())));
-    object.Set("chunk_summary_count", JsonValue::MakeNumber(static_cast<double>(chunkAnalyses.size())));
-    object.Set("missing_summary_count", JsonValue::MakeNumber(static_cast<double>(missingSummaryCount)));
-    object.Set("orphan_summary_count", JsonValue::MakeNumber(static_cast<double>(orphanSummaryCount)));
-    object.Set("duplicate_summary_count", JsonValue::MakeNumber(static_cast<double>(duplicateSummaryCount)));
-    object.Set("low_confidence_summary_count", JsonValue::MakeNumber(static_cast<double>(lowConfidenceSummaryCount)));
-    object.Set("empty_evidence_summary_count", JsonValue::MakeNumber(static_cast<double>(emptyEvidenceSummaryCount)));
-    object.Set("missing_block_evidence_summary_count", JsonValue::MakeNumber(static_cast<double>(missingBlockEvidenceSummaryCount)));
-    object.Set("ungrounded_evidence_summary_count", JsonValue::MakeNumber(static_cast<double>(ungroundedEvidenceSummaryCount)));
+    object.Set("chunk_plan_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.ChunkPlanCount)));
+    object.Set("chunk_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.ChunkSummaryCount)));
+    object.Set("missing_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.MissingSummaryCount)));
+    object.Set("orphan_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.OrphanSummaryCount)));
+    object.Set("duplicate_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.DuplicateSummaryCount)));
+    object.Set("low_confidence_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.LowConfidenceSummaryCount)));
+    object.Set("empty_evidence_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.EmptyEvidenceSummaryCount)));
+    object.Set("missing_block_evidence_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.MissingBlockEvidenceSummaryCount)));
+    object.Set("ungrounded_evidence_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.UngroundedEvidenceSummaryCount)));
     return object;
 }
 
 JsonValue BuildMergeChunkAcceptanceChecksJson(
-    const AnalyzeRequest& request,
-    const std::vector<ChunkPlan>& chunkPlans,
-    const std::vector<ChunkAnalysis>& chunkAnalyses,
-    size_t uncoveredBlockCount)
+    const MergeChunkDiagnostics& diagnostics)
 {
     JsonValue object = JsonValue::MakeObject();
-    std::unordered_map<std::string, size_t> summaryCountsByChunkId;
-    std::set<std::string> planIds;
-    std::set<std::string> plannedBlockIds;
     std::vector<std::string> acceptanceChecks;
     std::vector<std::string> blockingIssues;
-    size_t missingSummaryCount = 0;
-    size_t orphanSummaryCount = 0;
-    size_t duplicateSummaryCount = 0;
-    size_t lowConfidenceSummaryCount = 0;
-    size_t uncertainSummaryCount = 0;
-    size_t weakEvidenceSummaryCount = 0;
-    size_t ungroundedEvidenceSummaryCount = 0;
 
     AppendMergeReviewAction(acceptanceChecks, "preserve_visible_operations");
     AppendMergeReviewAction(acceptanceChecks, "ground_claims_to_chunk_blocks");
     AppendMergeReviewAction(acceptanceChecks, "respect_confidence_policy");
 
-    for (const ChunkPlan& plan : chunkPlans)
-    {
-        planIds.insert(plan.Id);
-
-        for (const size_t blockIndex : plan.BlockIndices)
-        {
-            if (blockIndex < request.Facts.Blocks.size())
-            {
-                plannedBlockIds.insert(request.Facts.Blocks[blockIndex].Id);
-            }
-        }
-    }
-
-    for (const ChunkAnalysis& analysis : chunkAnalyses)
-    {
-        ++summaryCountsByChunkId[analysis.ChunkId];
-
-        if (planIds.find(analysis.ChunkId) == planIds.end())
-        {
-            ++orphanSummaryCount;
-        }
-
-        if (analysis.Confidence < kMergeChunkLowConfidenceThreshold)
-        {
-            ++lowConfidenceSummaryCount;
-        }
-
-        if (!analysis.Uncertainties.empty())
-        {
-            ++uncertainSummaryCount;
-        }
-
-        bool hasBlockEvidence = false;
-        bool hasUngroundedEvidence = false;
-
-        for (const EvidenceItem& evidence : analysis.Evidence)
-        {
-            for (const std::string& blockId : evidence.Blocks)
-            {
-                if (blockId.empty())
-                {
-                    continue;
-                }
-
-                hasBlockEvidence = true;
-
-                if (plannedBlockIds.find(blockId) == plannedBlockIds.end())
-                {
-                    hasUngroundedEvidence = true;
-                }
-            }
-        }
-
-        if (analysis.Evidence.empty() || !hasBlockEvidence)
-        {
-            ++weakEvidenceSummaryCount;
-        }
-
-        if (hasUngroundedEvidence)
-        {
-            ++ungroundedEvidenceSummaryCount;
-        }
-    }
-
-    for (const ChunkPlan& plan : chunkPlans)
-    {
-        const auto summaryCountIt = summaryCountsByChunkId.find(plan.Id);
-
-        if (summaryCountIt == summaryCountsByChunkId.end())
-        {
-            ++missingSummaryCount;
-            continue;
-        }
-
-        if (summaryCountIt->second > 1)
-        {
-            duplicateSummaryCount += summaryCountIt->second - 1;
-        }
-    }
-
-    if (uncoveredBlockCount != 0)
+    if (diagnostics.UncoveredBlockCount != 0)
     {
         AppendMergeReviewAction(acceptanceChecks, "describe_uncovered_blocks");
         AppendMergeReviewAction(blockingIssues, "coverage_gap");
     }
 
-    if (missingSummaryCount != 0 || orphanSummaryCount != 0 || duplicateSummaryCount != 0)
+    if (diagnostics.MissingSummaryCount != 0 || diagnostics.OrphanSummaryCount != 0 || diagnostics.DuplicateSummaryCount != 0)
     {
         AppendMergeReviewAction(acceptanceChecks, "reconcile_chunk_summary_alignment");
         AppendMergeReviewAction(blockingIssues, "summary_alignment_issue");
     }
 
-    if (lowConfidenceSummaryCount != 0 || uncertainSummaryCount != 0)
+    if (diagnostics.LowConfidenceSummaryCount != 0 || diagnostics.UncertainSummaryCount != 0)
     {
         AppendMergeReviewAction(acceptanceChecks, "carry_chunk_uncertainties");
         AppendMergeReviewAction(blockingIssues, "uncertain_or_low_confidence_summary");
     }
 
-    if (weakEvidenceSummaryCount != 0)
+    if (diagnostics.WeakEvidenceSummaryCount != 0)
     {
         AppendMergeReviewAction(acceptanceChecks, "avoid_unsupported_evidence_claims");
         AppendMergeReviewAction(blockingIssues, "weak_chunk_evidence");
     }
 
-    if (ungroundedEvidenceSummaryCount != 0)
+    if (diagnostics.UngroundedEvidenceSummaryCount != 0)
     {
         AppendMergeReviewAction(acceptanceChecks, "discard_ungrounded_evidence");
         AppendMergeReviewAction(blockingIssues, "ungrounded_chunk_evidence");
@@ -7505,16 +7255,16 @@ JsonValue BuildMergeChunkAcceptanceChecksJson(
     object.Set("blocking_issues", BuildStringArray(blockingIssues, 16, nullptr));
     object.Set("must_emit_uncertainties", JsonValue::MakeBoolean(!blockingIssues.empty()));
     object.Set("must_bound_confidence", JsonValue::MakeBoolean(!blockingIssues.empty()));
-    object.Set("requires_coverage_statement", JsonValue::MakeBoolean(uncoveredBlockCount != 0));
-    object.Set("requires_evidence_rewrite", JsonValue::MakeBoolean(weakEvidenceSummaryCount != 0 || ungroundedEvidenceSummaryCount != 0));
+    object.Set("requires_coverage_statement", JsonValue::MakeBoolean(diagnostics.UncoveredBlockCount != 0));
+    object.Set("requires_evidence_rewrite", JsonValue::MakeBoolean(diagnostics.WeakEvidenceSummaryCount != 0 || diagnostics.UngroundedEvidenceSummaryCount != 0));
     object.Set("ready_for_high_confidence_merge", JsonValue::MakeBoolean(blockingIssues.empty()));
-    object.Set("missing_summary_count", JsonValue::MakeNumber(static_cast<double>(missingSummaryCount)));
-    object.Set("orphan_summary_count", JsonValue::MakeNumber(static_cast<double>(orphanSummaryCount)));
-    object.Set("duplicate_summary_count", JsonValue::MakeNumber(static_cast<double>(duplicateSummaryCount)));
-    object.Set("low_confidence_summary_count", JsonValue::MakeNumber(static_cast<double>(lowConfidenceSummaryCount)));
-    object.Set("uncertain_summary_count", JsonValue::MakeNumber(static_cast<double>(uncertainSummaryCount)));
-    object.Set("weak_evidence_summary_count", JsonValue::MakeNumber(static_cast<double>(weakEvidenceSummaryCount)));
-    object.Set("ungrounded_evidence_summary_count", JsonValue::MakeNumber(static_cast<double>(ungroundedEvidenceSummaryCount)));
+    object.Set("missing_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.MissingSummaryCount)));
+    object.Set("orphan_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.OrphanSummaryCount)));
+    object.Set("duplicate_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.DuplicateSummaryCount)));
+    object.Set("low_confidence_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.LowConfidenceSummaryCount)));
+    object.Set("uncertain_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.UncertainSummaryCount)));
+    object.Set("weak_evidence_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.WeakEvidenceSummaryCount)));
+    object.Set("ungrounded_evidence_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.UngroundedEvidenceSummaryCount)));
     return object;
 }
 
@@ -8059,6 +7809,7 @@ JsonValue BuildMergeFactsJson(
     const size_t totalBlockCount = request.Facts.Blocks.size();
     const size_t coveredBlockCount = coveredBlocks.size() > totalBlockCount ? totalBlockCount : coveredBlocks.size();
     const size_t uncoveredBlockCount = totalBlockCount - coveredBlockCount;
+    const MergeChunkDiagnostics diagnostics = BuildMergeChunkDiagnostics(request, chunkPlans, chunkAnalyses, uncoveredBlockCount);
     chunking.Set("chunk_count", JsonValue::MakeNumber(static_cast<double>(chunkPlans.size())));
     chunking.Set("chunk_summaries_count", JsonValue::MakeNumber(static_cast<double>(chunkAnalyses.size())));
     chunking.Set("total_block_count", JsonValue::MakeNumber(static_cast<double>(totalBlockCount)));
@@ -8069,14 +7820,14 @@ JsonValue BuildMergeFactsJson(
     chunking.Set("uncovered_block_ids", BuildMergeUncoveredBlockIdsJson(request, coveredBlocks, &uncoveredBlockIdsTruncated));
     chunking.Set("uncovered_block_ids_truncated", JsonValue::MakeBoolean(uncoveredBlockIdsTruncated));
     chunking.Set("chunk_plans", BuildMergeChunkPlansJson(request, chunkPlans));
-    chunking.Set("summary_alignment", BuildMergeChunkSummaryAlignmentJson(chunkPlans, chunkAnalyses));
-    chunking.Set("summary_quality", BuildMergeChunkSummaryQualityJson(chunkAnalyses));
-    chunking.Set("summary_evidence", BuildMergeChunkSummaryEvidenceJson(request, chunkPlans, chunkAnalyses));
-    chunking.Set("merge_risk", BuildMergeChunkRiskJson(request, chunkPlans, chunkAnalyses, uncoveredBlockCount));
+    chunking.Set("summary_alignment", BuildMergeChunkSummaryAlignmentJson(diagnostics));
+    chunking.Set("summary_quality", BuildMergeChunkSummaryQualityJson(diagnostics));
+    chunking.Set("summary_evidence", BuildMergeChunkSummaryEvidenceJson(diagnostics));
+    chunking.Set("merge_risk", BuildMergeChunkRiskJson(diagnostics));
     chunking.Set("merge_risk_details", BuildMergeChunkRiskDetailsJson(request, chunkPlans, chunkAnalyses));
-    chunking.Set("merge_review_plan", BuildMergeChunkReviewPlanJson(request, chunkPlans, chunkAnalyses, uncoveredBlockCount));
-    chunking.Set("merge_confidence_policy", BuildMergeChunkConfidencePolicyJson(request, chunkPlans, chunkAnalyses, uncoveredBlockCount));
-    chunking.Set("merge_acceptance_checks", BuildMergeChunkAcceptanceChecksJson(request, chunkPlans, chunkAnalyses, uncoveredBlockCount));
+    chunking.Set("merge_review_plan", BuildMergeChunkReviewPlanJson(chunkPlans, diagnostics));
+    chunking.Set("merge_confidence_policy", BuildMergeChunkConfidencePolicyJson(diagnostics));
+    chunking.Set("merge_acceptance_checks", BuildMergeChunkAcceptanceChecksJson(diagnostics));
     chunking.Set("merge_output_contract", BuildMergeChunkOutputContractJson());
     chunking.Set("merge_traceability_matrix", BuildMergeChunkTraceabilityMatrixJson());
     chunking.Set("merge_obfuscation_policy", BuildMergeChunkObfuscationPolicyJson(request));
