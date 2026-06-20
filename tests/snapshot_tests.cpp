@@ -1992,6 +1992,8 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("\"observed_behavior\"") != std::string::npos, "merge prompt should include observed behavior facts");
     Expect(mergePromptDump.find("CHUNK_OBSERVED_ARGUMENT_MARKER") != std::string::npos, "merge prompt should preserve observed argument samples for final synthesis");
     Expect(mergePromptDump.find("CHUNK_OBSERVED_HOTSPOT_MARKER") != std::string::npos, "merge prompt should preserve observed memory hotspots for final synthesis");
+    Expect(mergePromptDump.find("\"stack_pointer\"") != std::string::npos, "merge prompt should include stack pointer facts");
+    Expect(mergePromptDump.find("0x13579B") != std::string::npos, "merge prompt should preserve stack pointer facts for final synthesis");
 
     const decomp::AnalysisFacts stateSwitchFacts = BuildLegitimateStateSwitchFacts();
     Expect(FindHighConfidenceDispatcher(stateSwitchFacts) == nullptr, "ordinary compare-chain state switch should not become a high-confidence flattening dispatcher");
