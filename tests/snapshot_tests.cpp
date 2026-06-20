@@ -2047,6 +2047,8 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("MERGE_DIRECT_CALL_MARKER") != std::string::npos, "merge prompt should preserve direct call facts for final synthesis");
     Expect(mergePromptDump.find("\"indirect_calls\"") != std::string::npos, "merge prompt should include indirect call facts");
     Expect(mergePromptDump.find("MERGE_INDIRECT_CALL_MARKER") != std::string::npos, "merge prompt should preserve indirect call facts for final synthesis");
+    Expect(mergePromptDump.find("\"blocks\"") != std::string::npos, "merge prompt should include block facts");
+    Expect(mergePromptDump.find("bb_outside_important") != std::string::npos, "merge prompt should preserve block facts for final synthesis");
 
     const decomp::AnalysisFacts stateSwitchFacts = BuildLegitimateStateSwitchFacts();
     Expect(FindHighConfidenceDispatcher(stateSwitchFacts) == nullptr, "ordinary compare-chain state switch should not become a high-confidence flattening dispatcher");
