@@ -1009,6 +1009,23 @@ bool ContainsMemorySensitiveSubstitutionMarker(const std::string& text)
         || ContainsInsensitive(text, "alias");
 }
 
+void AppendUniqueClaimContext(
+    std::vector<std::string>& contexts,
+    const std::string& context)
+{
+    const std::string trimmed = TrimCopy(context);
+
+    if (trimmed.empty())
+    {
+        return;
+    }
+
+    if (std::find(contexts.begin(), contexts.end(), trimmed) == contexts.end())
+    {
+        contexts.push_back(trimmed);
+    }
+}
+
 void CollectKeywordContexts(
     const std::string& text,
     const std::string& keyword,
@@ -1029,9 +1046,31 @@ void CollectKeywordContexts(
 
         const size_t contextStart = position > 80 ? position - 80 : 0;
         const size_t contextEnd = (std::min)(text.size(), position + lowerKeyword.size() + 80);
-        contexts.push_back(text.substr(contextStart, contextEnd - contextStart));
+        AppendUniqueClaimContext(contexts, text.substr(contextStart, contextEnd - contextStart));
         position += lowerKeyword.size();
     }
+}
+
+std::string BuildClaimContextEvidence(const std::vector<std::string>& contexts)
+{
+    if (contexts.empty())
+    {
+        return std::string();
+    }
+
+    constexpr size_t kContextEvidenceLimit = 3;
+    std::string evidence = "claim_context_count=" + std::to_string(contexts.size());
+    const size_t limit = (std::min)(contexts.size(), kContextEvidenceLimit);
+
+    for (size_t index = 0; index < limit; ++index)
+    {
+        evidence += " context";
+        evidence += std::to_string(index + 1U);
+        evidence += "=";
+        evidence += contexts[index];
+    }
+
+    return evidence;
 }
 
 std::vector<std::string> CollectOpaqueDeadEdgeClaimContexts(const AnalyzeResponse& response)
@@ -1162,19 +1201,25 @@ bool MentionsSubstitutionSimplificationClaim(const AnalyzeResponse& response)
     return !CollectSubstitutionClaimContexts(response).empty();
 }
 
-bool MentionsMemorySensitiveSubstitutionClaim(const AnalyzeResponse& response)
+std::vector<std::string> CollectMemorySensitiveSubstitutionClaimContexts(const AnalyzeResponse& response)
 {
+    std::vector<std::string> filtered;
     const std::vector<std::string> contexts = CollectSubstitutionClaimContexts(response);
 
     for (const std::string& context : contexts)
     {
         if (ContainsMemorySensitiveSubstitutionMarker(context))
         {
-            return true;
+            AppendUniqueClaimContext(filtered, context);
         }
     }
 
-    return false;
+    return filtered;
+}
+
+bool MentionsMemorySensitiveSubstitutionClaim(const AnalyzeResponse& response)
+{
+    return !CollectMemorySensitiveSubstitutionClaimContexts(response).empty();
 }
 
 void CheckObfuscationClaimSupport(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
@@ -1194,34 +1239,43 @@ void CheckObfuscationClaimSupport(const AnalyzeRequest& request, const AnalyzeRe
             "response claims flattening recovery without a high-confidence dispatcher fact");
     }
 
-    if (MentionsOpaqueDeadEdgeClaim(response) && request.Facts.Obfuscation.OpaquePredicates.empty())
+    const std::vector<std::string> opaqueDeadEdgeClaimContexts = CollectOpaqueDeadEdgeClaimContexts(response);
+
+    if (!opaqueDeadEdgeClaimContexts.empty() && request.Facts.Obfuscation.OpaquePredicates.empty())
     {
         ++report.FactConflicts;
         AddIssue(
             report,
             "obfuscation.dead_edge_claim_without_opaque_predicate",
             "warning",
-            "response claims a dead or bogus edge without an opaque predicate fact");
+            "response claims a dead or bogus edge without an opaque predicate fact",
+            BuildClaimContextEvidence(opaqueDeadEdgeClaimContexts));
     }
 
-    if (MentionsSubstitutionSimplificationClaim(response) && request.Facts.Obfuscation.SubstitutionIdioms.empty())
+    const std::vector<std::string> substitutionClaimContexts = CollectSubstitutionClaimContexts(response);
+
+    if (!substitutionClaimContexts.empty() && request.Facts.Obfuscation.SubstitutionIdioms.empty())
     {
         ++report.FactConflicts;
         AddIssue(
             report,
             "obfuscation.substitution_claim_without_evidence",
             "warning",
-            "response claims instruction-substitution simplification without substitution facts");
+            "response claims instruction-substitution simplification without substitution facts",
+            BuildClaimContextEvidence(substitutionClaimContexts));
     }
 
-    if (MentionsMemorySensitiveSubstitutionClaim(response))
+    const std::vector<std::string> memorySensitiveSubstitutionContexts = CollectMemorySensitiveSubstitutionClaimContexts(response);
+
+    if (!memorySensitiveSubstitutionContexts.empty())
     {
         ++report.FactConflicts;
         AddIssue(
             report,
             "obfuscation.substitution_memory_semantics_claim",
             "warning",
-            "response claims substitution simplification over memory-sensitive semantics; analyzer substitution facts only prove local scalar identities");
+            "response claims substitution simplification over memory-sensitive semantics; analyzer substitution facts only prove local scalar identities",
+            BuildClaimContextEvidence(memorySensitiveSubstitutionContexts));
     }
 }
 

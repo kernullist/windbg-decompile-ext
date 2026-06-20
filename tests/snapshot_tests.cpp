@@ -334,6 +334,22 @@ bool HasIssueCode(const decomp::VerifyReport& report, const std::string& code)
     return false;
 }
 
+bool IssueEvidenceContains(
+    const decomp::VerifyReport& report,
+    const std::string& code,
+    const std::string& expected)
+{
+    for (const decomp::VerificationIssue& issue : report.Issues)
+    {
+        if (issue.Code == code && issue.Evidence.find(expected) != std::string::npos)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 decomp::AnalysisFacts BuildDiamondFacts()
 {
     decomp::ModuleInfo module;
@@ -3101,6 +3117,8 @@ void TestVerifierCoverageSnapshot()
     Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.dispatcher_claim_without_evidence"), "verifier should reject unsupported dispatcher recovery claims");
     Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.dead_edge_claim_without_opaque_predicate"), "verifier should reject unsupported opaque dead-edge claims");
     Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.substitution_claim_without_evidence"), "verifier should reject unsupported substitution claims");
+    Expect(IssueEvidenceContains(unsupportedObfuscationReport, "obfuscation.dead_edge_claim_without_opaque_predicate", "removed opaque predicate dead branch"), "opaque dead-edge issue should include the matched claim context");
+    Expect(IssueEvidenceContains(unsupportedObfuscationReport, "obfuscation.substitution_claim_without_evidence", "applied instruction substitution idiom"), "substitution issue should include the matched claim context");
 
     decomp::AnalyzeResponse obfuscationUncertaintyResponse;
     obfuscationUncertaintyResponse.Status = "ok";
@@ -3134,6 +3152,7 @@ void TestVerifierCoverageSnapshot()
 
     const decomp::VerifyReport memorySubstitutionReport = decomp::VerifyResponse(substitutionRequest, memorySubstitutionResponse);
     Expect(HasIssueCode(memorySubstitutionReport, "obfuscation.substitution_memory_semantics_claim"), "verifier should flag memory-sensitive substitution claims");
+    Expect(IssueEvidenceContains(memorySubstitutionReport, "obfuscation.substitution_memory_semantics_claim", "[rcx] + 0"), "memory-sensitive substitution issue should include the matched rewrite context");
 
     decomp::AnalyzeResponse memoryUncertaintyResponse;
     memoryUncertaintyResponse.Status = "ok";
