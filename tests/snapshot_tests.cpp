@@ -3117,10 +3117,12 @@ void TestVerifierCoverageSnapshot()
     Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.dispatcher_claim_without_evidence"), "verifier should reject unsupported dispatcher recovery claims");
     Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.dead_edge_claim_without_opaque_predicate"), "verifier should reject unsupported opaque dead-edge claims");
     Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.substitution_claim_without_evidence"), "verifier should reject unsupported substitution claims");
+    Expect(IssueEvidenceContains(unsupportedObfuscationReport, "obfuscation.dispatcher_claim_without_evidence", "recovered control-flow flattening dispatcher"), "dispatcher issue should include the matched claim context");
     Expect(IssueEvidenceContains(unsupportedObfuscationReport, "obfuscation.dead_edge_claim_without_opaque_predicate", "removed opaque predicate dead branch"), "opaque dead-edge issue should include the matched claim context");
     Expect(IssueEvidenceContains(unsupportedObfuscationReport, "obfuscation.substitution_claim_without_evidence", "applied instruction substitution idiom"), "substitution issue should include the matched claim context");
     const std::string obfuscationFeedbackPrompt = decomp::BuildDebugVerifierFeedbackPrompt(unsupportedObfuscationReport);
     Expect(obfuscationFeedbackPrompt.find("claim_context_count=") != std::string::npos, "verifier feedback should preserve obfuscation claim context evidence");
+    Expect(obfuscationFeedbackPrompt.find("recovered control-flow flattening dispatcher") != std::string::npos, "verifier feedback should include the dispatcher claim text");
     Expect(obfuscationFeedbackPrompt.find("removed opaque predicate dead branch") != std::string::npos, "verifier feedback should include the opaque dead-edge claim text");
     Expect(obfuscationFeedbackPrompt.find("obfuscation.opaque_predicates") != std::string::npos, "verifier feedback should name opaque predicate grounding facts");
     Expect(obfuscationFeedbackPrompt.find("obfuscation.substitution_idioms") != std::string::npos, "verifier feedback should name substitution grounding facts");
@@ -3128,11 +3130,12 @@ void TestVerifierCoverageSnapshot()
     decomp::AnalyzeResponse obfuscationUncertaintyResponse;
     obfuscationUncertaintyResponse.Status = "ok";
     obfuscationUncertaintyResponse.PseudoC = "void f(void) { return; }";
-    obfuscationUncertaintyResponse.Summary = "opaque predicate evidence was unavailable, so no dead branch pruning was applied; substitution idioms were unavailable";
+    obfuscationUncertaintyResponse.Summary = "dispatcher recovery was unavailable; opaque predicate evidence was unavailable, so no dead branch pruning was applied; substitution idioms were unavailable";
     obfuscationUncertaintyResponse.Uncertainties.push_back("obfuscation evidence unavailable");
     obfuscationUncertaintyResponse.Confidence = 0.72;
 
     const decomp::VerifyReport obfuscationUncertaintyReport = decomp::VerifyResponse(unsupportedObfuscationRequest, obfuscationUncertaintyResponse);
+    Expect(!HasIssueCode(obfuscationUncertaintyReport, "obfuscation.dispatcher_claim_without_evidence"), "verifier should not treat unavailable dispatcher recovery as a recovery claim");
     Expect(!HasIssueCode(obfuscationUncertaintyReport, "obfuscation.dead_edge_claim_without_opaque_predicate"), "verifier should not treat negated opaque-pruning uncertainty as a dead-edge claim");
     Expect(!HasIssueCode(obfuscationUncertaintyReport, "obfuscation.substitution_claim_without_evidence"), "verifier should not treat unavailable substitution evidence as a simplification claim");
 

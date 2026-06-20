@@ -888,18 +888,6 @@ bool HasHighConfidenceDispatcherRecovery(const AnalysisFacts& facts)
     return false;
 }
 
-bool MentionsDispatcherRecoveryClaim(const AnalyzeResponse& response)
-{
-    return ContainsInsensitive(response.Summary, "unflatten")
-        || ContainsInsensitive(response.PseudoC, "unflatten")
-        || ContainsInsensitive(response.Summary, "deobfuscat")
-        || ContainsInsensitive(response.PseudoC, "deobfuscat")
-        || ContainsInsensitive(response.Summary, "control-flow flatten")
-        || ContainsInsensitive(response.PseudoC, "control-flow flatten")
-        || ((ContainsInsensitive(response.Summary, "dispatcher") || ContainsInsensitive(response.PseudoC, "dispatcher"))
-            && (ContainsInsensitive(response.Summary, "recovered") || ContainsInsensitive(response.PseudoC, "recovered")));
-}
-
 bool MentionsRawDispatcherShape(const AnalyzeResponse& response)
 {
     return ContainsInsensitive(response.Summary, "dispatcher")
@@ -1073,6 +1061,87 @@ std::string BuildClaimContextEvidence(const std::vector<std::string>& contexts)
     return evidence;
 }
 
+bool IsNegatedDispatcherRecoveryClaimContext(const std::string& context)
+{
+    const std::vector<std::string> markers = {
+        "no dispatcher",
+        "not dispatcher",
+        "not a dispatcher",
+        "did not recover",
+        "do not recover",
+        "without recovery",
+        "not recovered",
+        "no unflatten",
+        "not unflattened",
+        "unavailable",
+        "unproven",
+        "insufficient",
+        "unknown"
+    };
+
+    return ContainsAnyInsensitive(context, markers);
+}
+
+bool IsDispatcherRecoveryClaimContext(const std::string& context)
+{
+    if (IsNegatedDispatcherRecoveryClaimContext(context))
+    {
+        return false;
+    }
+
+    const std::vector<std::string> dispatcherMarkers = {
+        "dispatcher",
+        "state machine",
+        "control-flow flatten",
+        "control flow flatten",
+        "flattening"
+    };
+    const std::vector<std::string> recoveryMarkers = {
+        "recover",
+        "recovered",
+        "unflatten",
+        "deobfuscat",
+        "reconstruct",
+        "semantic overlay",
+        "semantic control-flow"
+    };
+
+    return ContainsAnyInsensitive(context, dispatcherMarkers)
+        && ContainsAnyInsensitive(context, recoveryMarkers);
+}
+
+std::vector<std::string> CollectDispatcherRecoveryClaimContexts(const AnalyzeResponse& response)
+{
+    std::vector<std::string> contexts;
+    const std::vector<std::string> keywords = {
+        "dispatcher",
+        "state machine",
+        "control-flow flatten",
+        "control flow flatten",
+        "flattening",
+        "unflatten",
+        "deobfuscat"
+    };
+
+    for (const std::string& keyword : keywords)
+    {
+        CollectKeywordContexts(response.Summary, keyword, contexts);
+        CollectKeywordContexts(response.PseudoC, keyword, contexts);
+    }
+
+    std::vector<std::string> filtered;
+
+    for (const std::string& context : contexts)
+    {
+        if (IsDispatcherRecoveryClaimContext(context))
+        {
+            filtered.push_back(context);
+        }
+    }
+
+    return filtered;
+}
+
 std::vector<std::string> CollectOpaqueDeadEdgeClaimContexts(const AnalyzeResponse& response)
 {
     std::vector<std::string> contexts;
@@ -1229,14 +1298,17 @@ void CheckObfuscationClaimSupport(const AnalyzeRequest& request, const AnalyzeRe
         return;
     }
 
-    if (MentionsDispatcherRecoveryClaim(response) && !HasHighConfidenceDispatcherFact(request.Facts))
+    const std::vector<std::string> dispatcherClaimContexts = CollectDispatcherRecoveryClaimContexts(response);
+
+    if (!dispatcherClaimContexts.empty() && !HasHighConfidenceDispatcherFact(request.Facts))
     {
         ++report.FactConflicts;
         AddIssue(
             report,
             "obfuscation.dispatcher_claim_without_evidence",
             "warning",
-            "response claims flattening recovery without a high-confidence dispatcher fact");
+            "response claims flattening recovery without a high-confidence dispatcher fact",
+            BuildClaimContextEvidence(dispatcherClaimContexts));
     }
 
     const std::vector<std::string> opaqueDeadEdgeClaimContexts = CollectOpaqueDeadEdgeClaimContexts(response);
