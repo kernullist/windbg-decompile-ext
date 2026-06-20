@@ -11025,6 +11025,122 @@ void TrySavePersistentAnalyzeArtifact(
 
     OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "artifact saved path=%s", actualPath.c_str());
 }
+
+struct DecompCommandContext
+{
+    DebugApi Api;
+    decomp::DecompOptions Options;
+    std::string Target;
+    std::string Error;
+    uint64_t QueryAddress = 0;
+    uint64_t EntryAddress = 0;
+    decomp::ModuleInfo ModuleInfo;
+    std::vector<decomp::FunctionRegion> Regions;
+    std::vector<FunctionRegionBytes> RegionBytes;
+    std::vector<uint8_t> Bytes;
+    std::vector<decomp::DisassembledInstruction> Instructions;
+    std::vector<DecodedInstructionContext> DecodedContexts;
+    decomp::AnalyzeRequest Request;
+    decomp::AnalyzeResponse Response;
+    decomp::LlmClientConfig DisplayConfig;
+};
+
+HRESULT ResolveCommandTarget(DecompCommandContext& context)
+{
+    if (!ResolveTargetAddress(context.Api.Symbols.Get(), context.Target, context.QueryAddress))
+    {
+        OutputLine(context.Api.Control.Get(), context.Api.Control4.Get(), "error: could not resolve target %s\n", context.Target.c_str());
+        return E_FAIL;
+    }
+
+    OutputVerbose(context.Api.Control.Get(), context.Api.Control4.Get(), context.Options, "resolved target address=%s", decomp::HexU64(context.QueryAddress).c_str());
+
+    if (AbortIfUserInterrupted(context.Api.Control.Get(), context.Api.Control4.Get(), context.Options, "target resolution"))
+    {
+        return E_ABORT;
+    }
+
+    CollectModuleInfo(context.Api.Symbols.Get(), context.QueryAddress, context.ModuleInfo);
+    OutputVerbose(
+        context.Api.Control.Get(),
+        context.Api.Control4.Get(),
+        context.Options,
+        "module=%s base=%s size=%u",
+        context.ModuleInfo.ModuleName.c_str(),
+        decomp::HexU64(context.ModuleInfo.Base).c_str(),
+        context.ModuleInfo.Size);
+
+    std::string resolvedSymbolName;
+    OutputVerbose(context.Api.Control.Get(), context.Api.Control4.Get(), context.Options, "recovering function regions");
+    context.Regions = RecoverFunctionRegions(
+        context.Api.Symbols.Get(),
+        context.Api.Control.Get(),
+        context.QueryAddress,
+        context.ModuleInfo,
+        context.EntryAddress,
+        context.Options.MaxInstructions,
+        &resolvedSymbolName);
+
+    if (!resolvedSymbolName.empty())
+    {
+        context.Target = resolvedSymbolName;
+        OutputVerbose(context.Api.Control.Get(), context.Api.Control4.Get(), context.Options, "resolved symbol=%s", context.Target.c_str());
+    }
+
+    if (context.Regions.empty())
+    {
+        OutputLine(context.Api.Control.Get(), context.Api.Control4.Get(), "error: could not recover function range\n");
+        return E_FAIL;
+    }
+
+    OutputVerbose(
+        context.Api.Control.Get(),
+        context.Api.Control4.Get(),
+        context.Options,
+        "recovered regions=%llu entry=%s",
+        static_cast<unsigned long long>(context.Regions.size()),
+        decomp::HexU64(context.EntryAddress).c_str());
+
+    if (AbortIfUserInterrupted(context.Api.Control.Get(), context.Api.Control4.Get(), context.Options, "function range recovery"))
+    {
+        return E_ABORT;
+    }
+
+    return S_OK;
+}
+
+HRESULT ReadAndDisassembleCommandTarget(DecompCommandContext& context)
+{
+    OutputVerbose(context.Api.Control.Get(), context.Api.Control4.Get(), context.Options, "reading function bytes");
+    context.RegionBytes = ReadFunctionRegionBytes(context.Api.DataSpaces.Get(), context.Regions);
+    context.Bytes = FlattenFunctionRegionBytes(context.RegionBytes);
+    OutputVerbose(context.Api.Control.Get(), context.Api.Control4.Get(), context.Options, "read bytes=%llu", static_cast<unsigned long long>(context.Bytes.size()));
+
+    if (AbortIfUserInterrupted(context.Api.Control.Get(), context.Api.Control4.Get(), context.Options, "function byte read"))
+    {
+        return E_ABORT;
+    }
+
+    OutputVerbose(context.Api.Control.Get(), context.Api.Control4.Get(), context.Options, "disassembling regions");
+    context.Instructions = DisassembleRegions(
+        context.Api.Control.Get(),
+        context.RegionBytes,
+        context.Options.MaxInstructions,
+        context.DecodedContexts);
+    OutputVerbose(
+        context.Api.Control.Get(),
+        context.Api.Control4.Get(),
+        context.Options,
+        "decoded instructions=%llu",
+        static_cast<unsigned long long>(context.Instructions.size()));
+
+    if (AbortIfUserInterrupted(context.Api.Control.Get(), context.Api.Control4.Get(), context.Options, "disassembly"))
+    {
+        return E_ABORT;
+    }
+
+    return S_OK;
+}
 }
 
 extern "C" BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID)
@@ -11053,21 +11169,22 @@ extern "C" void CALLBACK DebugExtensionUninitialize(void)
 
 extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
 {
-    DebugApi api;
-    decomp::DecompOptions options;
-    std::string target;
-    std::string error;
-    uint64_t queryAddress = 0;
-    uint64_t entryAddress = 0;
-    decomp::ModuleInfo moduleInfo;
-    std::vector<decomp::FunctionRegion> regions;
-    std::vector<FunctionRegionBytes> regionBytes;
-    std::vector<uint8_t> bytes;
-    std::vector<decomp::DisassembledInstruction> instructions;
-    std::vector<DecodedInstructionContext> decodedContexts;
-    decomp::AnalyzeRequest request;
-    decomp::AnalyzeResponse response;
-    decomp::LlmClientConfig displayConfig;
+    DecompCommandContext context;
+    DebugApi& api = context.Api;
+    decomp::DecompOptions& options = context.Options;
+    std::string& target = context.Target;
+    std::string& error = context.Error;
+    uint64_t& queryAddress = context.QueryAddress;
+    uint64_t& entryAddress = context.EntryAddress;
+    decomp::ModuleInfo& moduleInfo = context.ModuleInfo;
+    std::vector<decomp::FunctionRegion>& regions = context.Regions;
+    std::vector<FunctionRegionBytes>& regionBytes = context.RegionBytes;
+    std::vector<uint8_t>& bytes = context.Bytes;
+    std::vector<decomp::DisassembledInstruction>& instructions = context.Instructions;
+    std::vector<DecodedInstructionContext>& decodedContexts = context.DecodedContexts;
+    decomp::AnalyzeRequest& request = context.Request;
+    decomp::AnalyzeResponse& response = context.Response;
+    decomp::LlmClientConfig& displayConfig = context.DisplayConfig;
 
     do
     {
@@ -11230,39 +11347,11 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
             return E_ABORT;
         }
 
-        if (!ResolveTargetAddress(api.Symbols.Get(), target, queryAddress))
-        {
-            OutputLine(api.Control.Get(), api.Control4.Get(), "error: could not resolve target %s\n", target.c_str());
-            return E_FAIL;
-        }
-        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "resolved target address=%s", decomp::HexU64(queryAddress).c_str());
-        if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "target resolution"))
-        {
-            return E_ABORT;
-        }
+        const HRESULT targetStatus = ResolveCommandTarget(context);
 
-        CollectModuleInfo(api.Symbols.Get(), queryAddress, moduleInfo);
-        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "module=%s base=%s size=%u", moduleInfo.ModuleName.c_str(), decomp::HexU64(moduleInfo.Base).c_str(), moduleInfo.Size);
-
-        std::string resolvedSymbolName;
-        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "recovering function regions");
-        regions = RecoverFunctionRegions(api.Symbols.Get(), api.Control.Get(), queryAddress, moduleInfo, entryAddress, options.MaxInstructions, &resolvedSymbolName);
-
-        if (!resolvedSymbolName.empty())
+        if (FAILED(targetStatus))
         {
-            target = resolvedSymbolName;
-            OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "resolved symbol=%s", target.c_str());
-        }
-
-        if (regions.empty())
-        {
-            OutputLine(api.Control.Get(), api.Control4.Get(), "error: could not recover function range\n");
-            return E_FAIL;
-        }
-        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "recovered regions=%llu entry=%s", static_cast<unsigned long long>(regions.size()), decomp::HexU64(entryAddress).c_str());
-        if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "function range recovery"))
-        {
-            return E_ABORT;
+            return targetStatus;
         }
 
         const KernelBuildFacts kernelBuild = CollectKernelBuildFacts(api.Control.Get(), api.Control4.Get(), api.DataSpaces.Get());
@@ -11286,21 +11375,11 @@ extern "C" HRESULT CALLBACK DecompCommand(PDEBUG_CLIENT client, PCSTR args)
             return E_FAIL;
         }
 
-        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "reading function bytes");
-        regionBytes = ReadFunctionRegionBytes(api.DataSpaces.Get(), regions);
-        bytes = FlattenFunctionRegionBytes(regionBytes);
-        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "read bytes=%llu", static_cast<unsigned long long>(bytes.size()));
-        if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "function byte read"))
-        {
-            return E_ABORT;
-        }
+        const HRESULT disassemblyStatus = ReadAndDisassembleCommandTarget(context);
 
-        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "disassembling regions");
-        instructions = DisassembleRegions(api.Control.Get(), regionBytes, options.MaxInstructions, decodedContexts);
-        OutputVerbose(api.Control.Get(), api.Control4.Get(), options, "decoded instructions=%llu", static_cast<unsigned long long>(instructions.size()));
-        if (AbortIfUserInterrupted(api.Control.Get(), api.Control4.Get(), options, "disassembly"))
+        if (FAILED(disassemblyStatus))
         {
-            return E_ABORT;
+            return disassemblyStatus;
         }
 
         request.RequestId = decomp::MakeRequestId();
