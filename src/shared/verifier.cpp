@@ -888,16 +888,6 @@ bool HasHighConfidenceDispatcherRecovery(const AnalysisFacts& facts)
     return false;
 }
 
-bool MentionsRawDispatcherShape(const AnalyzeResponse& response)
-{
-    return ContainsInsensitive(response.Summary, "dispatcher")
-        || ContainsInsensitive(response.PseudoC, "dispatcher")
-        || ContainsInsensitive(response.Summary, "state machine")
-        || ContainsInsensitive(response.PseudoC, "state machine")
-        || ContainsInsensitive(response.Summary, "control-flow flatten")
-        || ContainsInsensitive(response.PseudoC, "control-flow flatten");
-}
-
 bool ContainsAnyInsensitive(
     const std::string& text,
     const std::vector<std::string>& needles)
@@ -1142,6 +1132,91 @@ std::vector<std::string> CollectDispatcherRecoveryClaimContexts(const AnalyzeRes
     return filtered;
 }
 
+bool IsNegatedRawDispatcherLoopClaimContext(const std::string& context)
+{
+    const std::vector<std::string> markers = {
+        "not source logic",
+        "not original logic",
+        "not source loop",
+        "not a source loop",
+        "do not present",
+        "did not present",
+        "without presenting",
+        "uncertain",
+        "uncertainty",
+        "fallback",
+        "raw cfg fallback",
+        "unproven",
+        "insufficient",
+        "unknown"
+    };
+
+    return ContainsAnyInsensitive(context, markers);
+}
+
+bool IsRawDispatcherLoopClaimContext(const std::string& context)
+{
+    if (IsNegatedRawDispatcherLoopClaimContext(context))
+    {
+        return false;
+    }
+
+    const std::vector<std::string> dispatcherMarkers = {
+        "dispatcher",
+        "dispatcher_state",
+        "state machine",
+        "control-flow flatten",
+        "control flow flatten",
+        "flattening"
+    };
+    const std::vector<std::string> loopMarkers = {
+        "loop",
+        "while",
+        "for",
+        "do",
+        "source logic",
+        "source loop",
+        "original logic"
+    };
+
+    return ContainsAnyInsensitive(context, dispatcherMarkers)
+        && ContainsAnyInsensitive(context, loopMarkers);
+}
+
+std::vector<std::string> CollectRawDispatcherLoopClaimContexts(const AnalyzeResponse& response)
+{
+    std::vector<std::string> contexts;
+    const std::vector<std::string> keywords = {
+        "dispatcher",
+        "dispatcher_state",
+        "state machine",
+        "control-flow flatten",
+        "control flow flatten",
+        "flattening",
+        "while",
+        "loop",
+        "source logic"
+    };
+
+    for (const std::string& keyword : keywords)
+    {
+        CollectKeywordContexts(response.Summary, keyword, contexts);
+        CollectKeywordContexts(response.PseudoC, keyword, contexts);
+    }
+
+    std::vector<std::string> filtered;
+
+    for (const std::string& context : contexts)
+    {
+        if (IsRawDispatcherLoopClaimContext(context))
+        {
+            filtered.push_back(context);
+        }
+    }
+
+    return filtered;
+}
+
 std::vector<std::string> CollectOpaqueDeadEdgeClaimContexts(const AnalyzeResponse& response)
 {
     std::vector<std::string> contexts;
@@ -1359,6 +1434,7 @@ void CheckDeobfuscationConflictPolicy(const AnalyzeRequest& request, const Analy
     }
 
     const std::vector<ClaimedControlFlowEdge> claimedEdges = CollectClaimedControlFlowEdges(response);
+    const std::vector<std::string> rawDispatcherLoopContexts = CollectRawDispatcherLoopClaimContexts(response);
 
     for (const ClaimedControlFlowEdge& edge : claimedEdges)
     {
@@ -1376,8 +1452,7 @@ void CheckDeobfuscationConflictPolicy(const AnalyzeRequest& request, const Analy
 
     if (response.Confidence > 0.70
         && HasHighConfidenceDispatcherRecovery(request.Facts)
-        && MentionsLoop(response)
-        && MentionsRawDispatcherShape(response)
+        && !rawDispatcherLoopContexts.empty()
         && response.Uncertainties.empty())
     {
         ++report.FactConflicts;
@@ -1385,7 +1460,8 @@ void CheckDeobfuscationConflictPolicy(const AnalyzeRequest& request, const Analy
             report,
             "obfuscation.raw_dispatcher_loop_without_uncertainty",
             "warning",
-            "high-confidence response presents a recovered flattening dispatcher loop as source logic without uncertainty");
+            "high-confidence response presents a recovered flattening dispatcher loop as source logic without uncertainty",
+            BuildClaimContextEvidence(rawDispatcherLoopContexts));
     }
 }
 

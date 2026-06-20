@@ -3311,6 +3311,16 @@ void TestVerifierCoverageSnapshot()
 
     const decomp::VerifyReport rawDispatcherLoopReport = decomp::VerifyResponse(dispatcherConflictRequest, rawDispatcherLoopResponse);
     Expect(HasIssueCode(rawDispatcherLoopReport, "obfuscation.raw_dispatcher_loop_without_uncertainty"), "verifier should flag raw dispatcher loops emitted without uncertainty");
+    Expect(IssueEvidenceContains(rawDispatcherLoopReport, "obfuscation.raw_dispatcher_loop_without_uncertainty", "raw dispatcher state machine loop"), "raw dispatcher loop issue should include the matched claim context");
+    const std::string rawDispatcherFeedbackPrompt = decomp::BuildDebugVerifierFeedbackPrompt(rawDispatcherLoopReport);
+    Expect(rawDispatcherFeedbackPrompt.find("raw dispatcher state machine loop") != std::string::npos, "verifier feedback should include raw dispatcher loop claim text");
+    Expect(rawDispatcherFeedbackPrompt.find("obfuscation.dispatchers.recovered_edges") != std::string::npos, "verifier feedback should name dispatcher recovery fact paths");
+
+    decomp::AnalyzeResponse rawDispatcherLoopUncertaintyResponse = rawDispatcherLoopResponse;
+    rawDispatcherLoopUncertaintyResponse.Uncertainties.push_back("raw dispatcher loop retained as fallback uncertainty");
+
+    const decomp::VerifyReport rawDispatcherLoopUncertaintyReport = decomp::VerifyResponse(dispatcherConflictRequest, rawDispatcherLoopUncertaintyResponse);
+    Expect(!HasIssueCode(rawDispatcherLoopUncertaintyReport, "obfuscation.raw_dispatcher_loop_without_uncertainty"), "verifier should allow raw dispatcher loop text when uncertainty is explicit");
 }
 
 void TestMergeOutputPolicySnapshot()
