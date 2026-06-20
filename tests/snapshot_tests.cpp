@@ -1696,6 +1696,21 @@ void TestObfuscationFactsSnapshot()
     insideChunkStackPointer.Confidence = 0.99;
     chunkScopedRequest.Facts.StackPointer.insert(chunkScopedRequest.Facts.StackPointer.begin(), insideChunkStackPointer);
 
+    decomp::MemoryAccess insideChunkMemoryAccess;
+    insideChunkMemoryAccess.Site = insideChunkSite;
+    insideChunkMemoryAccess.Access = "read";
+    insideChunkMemoryAccess.Kind = "memory";
+    insideChunkMemoryAccess.Size = "qword";
+    insideChunkMemoryAccess.WidthBits = 64;
+    insideChunkMemoryAccess.BaseRegister = "rsp";
+    insideChunkMemoryAccess.Displacement = "0x20";
+    insideChunkMemoryAccess.Semantic = "INSIDE_CHUNK_MEMORY_ACCESS_MARKER";
+    insideChunkMemoryAccess.StackFrameRelative = true;
+    insideChunkMemoryAccess.FrameBase = "rsp";
+    insideChunkMemoryAccess.FrameOffset = 0x20;
+    insideChunkMemoryAccess.StackPointerDelta = 0x13579B;
+    chunkScopedRequest.Facts.MemoryAccesses.insert(chunkScopedRequest.Facts.MemoryAccesses.begin(), insideChunkMemoryAccess);
+
     decomp::StackPointerFact outsideChunkStackPointer;
     outsideChunkStackPointer.Site = 0x77770020;
     outsideChunkStackPointer.DeltaBefore = 0x7ABCDE;
@@ -1994,6 +2009,8 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("CHUNK_OBSERVED_HOTSPOT_MARKER") != std::string::npos, "merge prompt should preserve observed memory hotspots for final synthesis");
     Expect(mergePromptDump.find("\"stack_pointer\"") != std::string::npos, "merge prompt should include stack pointer facts");
     Expect(mergePromptDump.find("0x13579B") != std::string::npos, "merge prompt should preserve stack pointer facts for final synthesis");
+    Expect(mergePromptDump.find("\"memory_accesses\"") != std::string::npos, "merge prompt should include memory access facts");
+    Expect(mergePromptDump.find("INSIDE_CHUNK_MEMORY_ACCESS_MARKER") != std::string::npos, "merge prompt should preserve memory access facts for final synthesis");
 
     const decomp::AnalysisFacts stateSwitchFacts = BuildLegitimateStateSwitchFacts();
     Expect(FindHighConfidenceDispatcher(stateSwitchFacts) == nullptr, "ordinary compare-chain state switch should not become a high-confidence flattening dispatcher");
