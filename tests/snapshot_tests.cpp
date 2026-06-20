@@ -2494,6 +2494,15 @@ void TestObfuscationFactsSnapshot()
     Expect(HasIssueCode(badStateReport, "obfuscation.state_assignment_non_state_value"), "OLLVM-like verifier should flag data reads assigned to a flattened state variable");
     Expect(HasIssueCode(badStateReport, "obfuscation.state_transition_assignment_omitted"), "OLLVM-like verifier should flag omitted recovered state transition values in explicit state-machine pseudo-C");
 
+    decomp::AnalyzeResponse mixedDataStateResponse;
+    mixedDataStateResponse.Status = "ok";
+    mixedDataStateResponse.PseudoC = "uint32_t f(uint8_t* bytes, size_t index) { uint32_t state = 0x0; if (state == 0x0) { state = state ^ bytes[index]; } return state; }";
+    mixedDataStateResponse.Summary = "deobfuscated flattened state update with mixed data";
+    mixedDataStateResponse.Confidence = 0.92;
+
+    const decomp::VerifyReport mixedDataStateReport = decomp::VerifyResponse(ollvmRequest, mixedDataStateResponse);
+    Expect(HasIssueCode(mixedDataStateReport, "obfuscation.state_assignment_non_state_value"), "OLLVM-like verifier should flag data reads mixed into flattened state assignments");
+
     decomp::AnalyzeRequest ollvmDeobfuscationOffRequest = ollvmRequest;
     ollvmDeobfuscationOffRequest.RequestId = "obfuscation_ollvm_like_deobf_off_snapshot";
     ollvmDeobfuscationOffRequest.Facts.DeobfuscationReadiness.Enabled = false;
@@ -2960,6 +2969,15 @@ void TestVerifierCoverageSnapshot()
     const decomp::VerifyReport droppedExpressionCallReport = decomp::VerifyResponse(callExpressionRequest, droppedExpressionCallResponse);
     Expect(!HasIssueCode(droppedExpressionCallReport, "call.recovered_targets_omitted"), "verifier should not misreport a normalized helper call as omitted when checking argument loss");
     Expect(HasIssueCode(droppedExpressionCallReport, "call.argument_expression_omitted"), "verifier should flag recovered helper call argument expression operand loss");
+
+    decomp::AnalyzeResponse changedOperatorCallResponse;
+    changedOperatorCallResponse.Status = "ok";
+    changedOperatorCallResponse.PseudoC = "void f(void) { sample_AddSubstituted(accumulator + shifted, 0x10203041); }";
+    changedOperatorCallResponse.Summary = "calls helper with changed expression operator";
+    changedOperatorCallResponse.Confidence = 0.92;
+
+    const decomp::VerifyReport changedOperatorCallReport = decomp::VerifyResponse(callExpressionRequest, changedOperatorCallResponse);
+    Expect(HasIssueCode(changedOperatorCallReport, "call.argument_expression_omitted"), "verifier should flag recovered helper call argument operator changes");
 
     decomp::AnalyzeRequest prototypeOnlyRequest;
     prototypeOnlyRequest.RequestId = "verifier_prototype_arity_snapshot";

@@ -886,6 +886,34 @@ bool IsExpressionRichEnoughToVerify(const std::string& expression)
         || compact.find(">>") != std::string::npos;
 }
 
+bool PseudoArgumentPreservesExpectedOperators(
+    const std::string& pseudoArgument,
+    const std::string& expectedExpression)
+{
+    const std::string pseudo = LowerNoSpace(pseudoArgument);
+    const std::string expected = LowerNoSpace(expectedExpression);
+    static const char* operators[] = {
+        "<<",
+        ">>",
+        "^",
+        "+",
+        "-",
+        "*",
+        "|",
+        "&"
+    };
+
+    for (const char* value : operators)
+    {
+        if (expected.find(value) != std::string::npos && pseudo.find(value) == std::string::npos)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool PseudoArgumentPreservesExpectedExpression(
     const std::string& pseudoArgument,
     const std::string& expectedExpression)
@@ -901,6 +929,11 @@ bool PseudoArgumentPreservesExpectedExpression(
     if (pseudo.empty() || expected.empty())
     {
         return true;
+    }
+
+    if (!PseudoArgumentPreservesExpectedOperators(pseudoArgument, expectedExpression))
+    {
+        return false;
     }
 
     if (pseudo.find(expected) != std::string::npos)
@@ -2131,6 +2164,28 @@ bool ExpressionContainsKnownStateValue(const std::string& expression, const std:
     return false;
 }
 
+bool ExpressionContainsDataReadLikeTerm(const std::string& expression)
+{
+    const std::string compact = LowerNoSpace(expression);
+
+    if (compact.find('[') != std::string::npos || compact.find(']') != std::string::npos)
+    {
+        return true;
+    }
+
+    const std::vector<std::string> terms = ExtractSignificantExpressionTerms(expression);
+
+    for (const std::string& term : terms)
+    {
+        if (term == "bytes" || term == "buffer" || term == "input" || term == "data")
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool LooksLikeNonStateValueAssignment(const std::string& expression, const std::set<std::string>& knownStateValues)
 {
     const std::string compact = LowerNoSpace(expression);
@@ -2145,17 +2200,17 @@ bool LooksLikeNonStateValueAssignment(const std::string& expression, const std::
         return false;
     }
 
+    if (ExpressionContainsDataReadLikeTerm(expression))
+    {
+        return true;
+    }
+
     if (compact.find("state") != std::string::npos)
     {
         return false;
     }
 
-    return compact.find('[') != std::string::npos
-        || compact.find(']') != std::string::npos
-        || compact.find("bytes") != std::string::npos
-        || compact.find("buffer") != std::string::npos
-        || compact.find("input") != std::string::npos
-        || compact.find('(') != std::string::npos;
+    return compact.find('(') != std::string::npos;
 }
 
 bool ResponseUsesObfuscationStateAssignments(

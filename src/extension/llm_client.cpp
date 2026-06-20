@@ -4178,7 +4178,16 @@ bool AnalyzeWithChunkedLlm(
             }
             else
             {
-                error = "failed to parse chunk JSON for " + plan.Id + ": " + parseError + "; preview: " + BuildPreviewText(chunkJson);
+                error = "failed to parse chunk JSON for " + plan.Id
+                    + ": " + parseError
+                    + "; retry error: " + retryError
+                    + "; preview: " + BuildPreviewText(chunkJson);
+
+                if (!retryJson.empty())
+                {
+                    error += "; retry preview: " + BuildPreviewText(retryJson);
+                }
+
                 LogVerbose(config, "chunk LLM parse failed id=" + plan.Id + " error=" + BuildPreviewText(error));
                 return false;
             }
