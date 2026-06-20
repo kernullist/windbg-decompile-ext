@@ -2011,6 +2011,8 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("0x13579B") != std::string::npos, "merge prompt should preserve stack pointer facts for final synthesis");
     Expect(mergePromptDump.find("\"memory_accesses\"") != std::string::npos, "merge prompt should include memory access facts");
     Expect(mergePromptDump.find("INSIDE_CHUNK_MEMORY_ACCESS_MARKER") != std::string::npos, "merge prompt should preserve memory access facts for final synthesis");
+    Expect(mergePromptDump.find("\"ir_values\"") != std::string::npos, "merge prompt should include IR value facts");
+    Expect(mergePromptDump.find("INSIDE_CHUNK_IR_TARGET_MARKER") != std::string::npos, "merge prompt should preserve IR value facts for final synthesis");
 
     const decomp::AnalysisFacts stateSwitchFacts = BuildLegitimateStateSwitchFacts();
     Expect(FindHighConfidenceDispatcher(stateSwitchFacts) == nullptr, "ordinary compare-chain state switch should not become a high-confidence flattening dispatcher");
