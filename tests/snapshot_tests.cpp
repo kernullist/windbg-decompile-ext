@@ -1933,6 +1933,8 @@ void TestObfuscationFactsSnapshot()
     chunkConfig.ChunkCountLimit = 8;
     const std::string chunkPromptDump = decomp::BuildDebugFirstChunkPromptDump(chunkScopedRequest, chunkConfig);
     Expect(!chunkPromptDump.empty(), "debug chunk prompt dump should expose the first chunk prompt");
+    Expect(chunkPromptDump.find("\"analyzer_skeleton\"") != std::string::npos, "chunk prompt should include the analyzer skeleton");
+    Expect(chunkPromptDump.find("chunk analyzer skeleton") != std::string::npos, "chunk analyzer skeleton should be chunk-local");
     Expect(chunkPromptDump.find("\"scope\":\"chunk\"") != std::string::npos, "chunk prompt obfuscation facts should be marked as chunk-scoped");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_OBF_MARKER") == std::string::npos, "chunk prompt should omit obfuscation facts outside the chunk block set");
     Expect(chunkPromptDump.find("OUTSIDE_CHUNK_SEMANTIC_MARKER") == std::string::npos, "chunk prompt should omit semantic CFG edges outside the chunk block set");

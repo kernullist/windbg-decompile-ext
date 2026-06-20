@@ -4868,6 +4868,239 @@ JsonValue BuildInstructionWindowFromPointers(
     return window;
 }
 
+std::string BuildChunkAnalyzerSkeletonPseudoC(
+    const AnalyzeRequest& request,
+    const ChunkPlan& plan,
+    const std::set<std::string>& blockIds,
+    const std::set<uint64_t>& instructionAddresses)
+{
+    const std::vector<TypedNameConfidence> params = BuildAnalyzerSkeletonParams(request);
+    const std::string functionName = !request.Facts.Pdb.FunctionName.empty()
+        ? SanitizeIdentifier(request.Facts.Pdb.FunctionName)
+        : SanitizeIdentifier(request.Facts.QueryText);
+    const std::string returnType = !request.Facts.Pdb.ReturnType.empty() ? request.Facts.Pdb.ReturnType : "UNKNOWN_TYPE";
+    const std::set<std::string>* selectedBlocks = &blockIds;
+    std::string text;
+
+    text += returnType + " " + functionName + "_chunk(";
+
+    for (size_t index = 0; index < params.size(); ++index)
+    {
+        if (index != 0)
+        {
+            text += ", ";
+        }
+
+        text += params[index].Type + " " + params[index].Name;
+    }
+
+    text += ")\n{\n";
+    text += "    /* chunk analyzer skeleton: refine this chunk, preserve unresolved cross-chunk state */\n";
+    text += "    /* chunk_id=" + plan.Id
+        + ", slot=" + std::to_string(plan.SlotIndex + 1U)
+        + "/" + std::to_string(plan.TotalChunks)
+        + ", blocks=" + std::to_string(plan.BlockIndices.size())
+        + ", instructions=" + std::to_string(instructionAddresses.size())
+        + " */\n";
+
+    size_t emitted = 0;
+
+    for (const ObfuscationDispatcher& dispatcher : request.Facts.Obfuscation.Dispatchers)
+    {
+        if (emitted >= 3)
+        {
+            break;
+        }
+
+        if (dispatcher.Confidence < 0.75 || !IsPromptDispatcherSelected(selectedBlocks, dispatcher))
+        {
+            continue;
+        }
+
+        text += "    /* control-flow flattening dispatcher recovered: "
+            + dispatcher.HeaderBlock
+            + " state "
+            + dispatcher.StateVariable
+            + " */\n";
+        ++emitted;
+    }
+
+    emitted = 0;
+
+    for (const SemanticControlFlowEdge& edge : request.Facts.SemanticControlFlow.Edges)
+    {
+        if (emitted >= 8)
+        {
+            break;
+        }
+
+        if (edge.Confidence < 0.75 || !IsPromptSemanticEdgeSelected(selectedBlocks, edge))
+        {
+            continue;
+        }
+
+        if (edge.Dead)
+        {
+            text += "    /* semantic dead edge pruned: "
+                + edge.SourceBlock
+                + " -> "
+                + edge.TargetBlock
+                + " */\n";
+        }
+        else
+        {
+            text += "    /* semantic edge: "
+                + edge.SourceBlock
+                + " -> "
+                + edge.TargetBlock;
+
+            if (!edge.StateValue.empty())
+            {
+                text += " when state=" + edge.StateValue;
+            }
+            else if (!edge.Condition.empty())
+            {
+                text += " when " + edge.Condition;
+            }
+
+            text += " */\n";
+        }
+
+        ++emitted;
+    }
+
+    emitted = 0;
+
+    for (const OpaquePredicateFact& predicate : request.Facts.Obfuscation.OpaquePredicates)
+    {
+        if (emitted >= 4)
+        {
+            break;
+        }
+
+        if (predicate.Confidence < 0.75 || !IsPromptOpaquePredicateSelected(request, selectedBlocks, predicate))
+        {
+            continue;
+        }
+
+        text += "    /* opaque predicate: block="
+            + predicate.BlockId
+            + " result="
+            + predicate.ConstantResult
+            + " live="
+            + predicate.LiveTargetBlock
+            + " dead="
+            + predicate.DeadTargetBlock
+            + " */\n";
+        ++emitted;
+    }
+
+    emitted = 0;
+
+    for (const SubstitutionIdiomFact& idiom : request.Facts.Obfuscation.SubstitutionIdioms)
+    {
+        if (emitted >= 4)
+        {
+            break;
+        }
+
+        if (idiom.Confidence < 0.75 || !IsPromptSubstitutionIdiomSelected(request, selectedBlocks, idiom))
+        {
+            continue;
+        }
+
+        text += "    /* substitution: " + idiom.OriginalExpression + " => " + idiom.SimplifiedExpression + " */\n";
+        ++emitted;
+    }
+
+    emitted = 0;
+
+    for (const ControlFlowRegion& region : request.Facts.ControlFlow)
+    {
+        if (emitted >= 6)
+        {
+            break;
+        }
+
+        if (!IsPromptControlFlowRegionSelected(selectedBlocks, region))
+        {
+            continue;
+        }
+
+        text += "    /* region " + region.Kind + " header=" + region.HeaderBlock;
+
+        if (!region.Condition.empty())
+        {
+            text += " condition=" + region.Condition;
+        }
+
+        text += " */\n";
+        ++emitted;
+    }
+
+    emitted = 0;
+
+    for (const NormalizedCondition& condition : request.Facts.NormalizedConditions)
+    {
+        if (emitted >= 6)
+        {
+            break;
+        }
+
+        if (!IsPromptBlockSelected(selectedBlocks, condition.BlockId)
+            && !IsPromptBlockSelected(selectedBlocks, condition.TrueTargetBlock)
+            && !IsPromptBlockSelected(selectedBlocks, condition.FalseTargetBlock))
+        {
+            continue;
+        }
+
+        text += "    /* if (" + condition.Expression + ") goto " + condition.TrueTargetBlock
+            + " else " + condition.FalseTargetBlock + " */\n";
+        ++emitted;
+    }
+
+    emitted = 0;
+
+    for (const IdiomPattern& idiom : request.Facts.Idioms)
+    {
+        if (emitted >= 4)
+        {
+            break;
+        }
+
+        if (!IsPromptSiteSelected(request, selectedBlocks, idiom.Site))
+        {
+            continue;
+        }
+
+        text += "    /* idiom " + idiom.Name + ": " + idiom.Replacement + " */\n";
+        ++emitted;
+    }
+
+    emitted = 0;
+
+    for (const CalleeSummary& summary : request.Facts.CalleeSummaries)
+    {
+        if (emitted >= 4)
+        {
+            break;
+        }
+
+        if (!IsPromptSiteSelected(request, selectedBlocks, summary.Site))
+        {
+            continue;
+        }
+
+        text += "    /* call " + summary.Callee + ": returns " + summary.ReturnType
+            + ", effects=" + summary.SideEffects + " */\n";
+        ++emitted;
+    }
+
+    text += "    return CHUNK_UNKNOWN_VALUE;\n";
+    text += "}\n";
+    return text;
+}
+
 void CollectChunkAddressMetadata(
     const AnalyzeRequest& request,
     const ChunkPlan& plan,
@@ -5705,6 +5938,7 @@ JsonValue BuildChunkFactsJson(
 
     root.Set("function_overview", functionOverview);
     root.Set("chunk", chunk);
+    root.Set("analyzer_skeleton", JsonValue::MakeString(BuildChunkAnalyzerSkeletonPseudoC(request, plan, blockIds, instructionAddresses)));
     root.Set("graph_summary", BuildGraphSummaryJsonForBlocks(request, blockIds));
     root.Set("global_instruction_window_head", BuildInstructionWindowJson(request, false));
     root.Set("global_instruction_window_middle", globalMiddleInstructionIndex.has_value() ? BuildInstructionWindowJson(request, globalMiddleInstructionIndex.value()) : JsonValue::MakeArray());
@@ -6218,7 +6452,8 @@ std::string BuildChunkSystemPrompt(const AnalyzeRequest& request)
         "Write summary_localized and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_steps, state_updates, observed_calls, observed_memory, identifiers, and API names in English or C-style. "
         "Do not invent external call targets that are not present in the input. "
-        "Use recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, block_value_states, normalized_conditions, control_flow, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, data_references, call_targets, type_hints, idioms, callee_summaries, evidence_graph, and pdb facts as high-signal semantic hints when present. "
+        "Use analyzer_skeleton, recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, block_value_states, normalized_conditions, control_flow, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, data_references, call_targets, type_hints, idioms, callee_summaries, evidence_graph, and pdb facts as high-signal semantic hints when present. "
+        "Treat analyzer_skeleton as a chunk-local refinement scaffold, not as finished source. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Use control_flow loop, branch, and switch region metadata as structure evidence without inventing unsupported regions. "
         "Use abi facts for Microsoft x64 stack home slots, tail-call, thunk, no-return, and frame-base hints. "
@@ -6249,7 +6484,7 @@ std::string BuildChunkUserPrompt(
     prompt += ".\n";
     prompt += "3. Keep pseudo_steps and state_updates concrete and operation-focused.\n";
     prompt += "4. Preserve visible reads, writes, comparisons, and branches instead of replacing them with generic comments.\n";
-    prompt += "5. Use recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, block_value_states, normalized_conditions, control_flow, abi, session_policy, observed_behavior, data_references, call_targets, type_hints, idioms, callee_summaries, and pdb facts when they improve naming, stack-frame context, reaching-value state, region structure, calling convention, session constraints, observed runtime state, expression simplification, or type/side-effect hints.\n";
+    prompt += "5. Use analyzer_skeleton, recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, block_value_states, normalized_conditions, control_flow, abi, session_policy, observed_behavior, data_references, call_targets, type_hints, idioms, callee_summaries, and pdb facts when they improve naming, stack-frame context, reaching-value state, region structure, calling convention, session constraints, observed runtime state, expression simplification, or type/side-effect hints.\n";
     prompt += "6. If the chunk is partial, say what is missing, but still describe the concrete work visible in this chunk.\n";
     prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
     prompt += "8. evidence.blocks must reference only block ids present in this chunk.\n";
