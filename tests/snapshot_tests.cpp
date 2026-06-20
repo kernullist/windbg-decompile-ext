@@ -3229,6 +3229,10 @@ void TestVerifierCoverageSnapshot()
 
     const decomp::VerifyReport unsupportedEdgeReport = decomp::VerifyResponse(request, unsupportedEdgeResponse);
     Expect(HasIssueCode(unsupportedEdgeReport, "control_flow.edge_claim_without_evidence"), "verifier should reject concrete edge claims missing from raw and semantic CFG evidence");
+    const std::string unsupportedEdgeFeedbackPrompt = decomp::BuildDebugVerifierFeedbackPrompt(unsupportedEdgeReport);
+    Expect(unsupportedEdgeFeedbackPrompt.find("raw CFG successors") != std::string::npos, "verifier feedback should name raw CFG edge grounding");
+    Expect(unsupportedEdgeFeedbackPrompt.find("semantic_control_flow") != std::string::npos, "verifier feedback should name semantic CFG edge grounding");
+    Expect(unsupportedEdgeFeedbackPrompt.find("obfuscation.dispatchers.recovered_edges") != std::string::npos, "verifier feedback should name dispatcher recovered edge grounding");
 
     decomp::AnalyzeResponse unsupportedDeadEdgeResponse;
     unsupportedDeadEdgeResponse.Status = "ok";

@@ -8444,6 +8444,11 @@ std::string BuildVerifierIssueCorrectionHint(const VerificationIssue& issue)
         return "Use obfuscation.dispatchers.recovered_edges or semantic_control_flow edges for recovered structure; do not present a raw dispatcher loop as source logic unless uncertainty is explicit.";
     }
 
+    if (issue.Code == "control_flow.edge_claim_without_evidence")
+    {
+        return "Remove invented control-flow edges unless they are present in raw CFG successors, semantic_control_flow edges, or obfuscation.dispatchers.recovered_edges; otherwise lower confidence and list the missing edge as uncertainty.";
+    }
+
     if (StartsWithInsensitive(issue.Code, "obfuscation."))
     {
         return "Revise the obfuscation claim using only grounded obfuscation and semantic_control_flow facts, or lower confidence and move the claim to uncertainties.";
