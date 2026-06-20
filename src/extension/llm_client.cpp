@@ -4269,6 +4269,7 @@ JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
 
     module.Set("module_name", JsonValue::MakeString(request.Facts.Module.ModuleName));
     module.Set("image_name", JsonValue::MakeString(request.Facts.Module.ImageName));
+    module.Set("loaded_image_name", JsonValue::MakeString(request.Facts.Module.LoadedImageName));
     module.Set("base", JsonValue::MakeString(HexU64(request.Facts.Module.Base)));
     module.Set("size", JsonValue::MakeNumber(static_cast<double>(request.Facts.Module.Size)));
     module.Set("symbol_type", JsonValue::MakeNumber(static_cast<double>(request.Facts.Module.SymbolType)));
@@ -5895,8 +5896,10 @@ JsonValue BuildChunkFactsJson(
 
     module.Set("module_name", JsonValue::MakeString(request.Facts.Module.ModuleName));
     module.Set("image_name", JsonValue::MakeString(request.Facts.Module.ImageName));
+    module.Set("loaded_image_name", JsonValue::MakeString(request.Facts.Module.LoadedImageName));
     module.Set("base", JsonValue::MakeString(HexU64(request.Facts.Module.Base)));
     module.Set("size", JsonValue::MakeNumber(static_cast<double>(request.Facts.Module.Size)));
+    module.Set("symbol_type", JsonValue::MakeNumber(static_cast<double>(request.Facts.Module.SymbolType)));
 
     naturalLanguage.Set("tag", JsonValue::MakeString(request.Facts.PreferredNaturalLanguageTag));
     naturalLanguage.Set("name", JsonValue::MakeString(request.Facts.PreferredNaturalLanguageName));
@@ -6393,8 +6396,10 @@ JsonValue BuildMergeFactsJson(
 
     module.Set("module_name", JsonValue::MakeString(request.Facts.Module.ModuleName));
     module.Set("image_name", JsonValue::MakeString(request.Facts.Module.ImageName));
+    module.Set("loaded_image_name", JsonValue::MakeString(request.Facts.Module.LoadedImageName));
     module.Set("base", JsonValue::MakeString(HexU64(request.Facts.Module.Base)));
     module.Set("size", JsonValue::MakeNumber(static_cast<double>(request.Facts.Module.Size)));
+    module.Set("symbol_type", JsonValue::MakeNumber(static_cast<double>(request.Facts.Module.SymbolType)));
 
     naturalLanguage.Set("tag", JsonValue::MakeString(request.Facts.PreferredNaturalLanguageTag));
     naturalLanguage.Set("name", JsonValue::MakeString(request.Facts.PreferredNaturalLanguageName));

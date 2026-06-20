@@ -1594,6 +1594,8 @@ void TestObfuscationFactsSnapshot()
     chunkScopedRequest.Facts = facts;
     chunkScopedRequest.Facts.Arch = "MERGE_ARCH_MARKER";
     chunkScopedRequest.Facts.Mode = decomp::AnalysisMode::LiveMemory;
+    chunkScopedRequest.Facts.Module.LoadedImageName = "CHUNK_MERGE_LOADED_IMAGE_MARKER.sys";
+    chunkScopedRequest.Facts.Module.SymbolType = 424242;
     chunkScopedRequest.Facts.Abi.FrameBase = "CHUNK_ABI_FRAME_BASE_MARKER";
     chunkScopedRequest.Facts.Abi.HomeSlots.push_back("CHUNK_ABI_HOME_SLOT_MARKER");
     chunkScopedRequest.Facts.Abi.NoReturnCalls.push_back("CHUNK_ABI_NO_RETURN_MARKER");
@@ -1985,6 +1987,10 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("\"selection\"") != std::string::npos, "chunk prompt should include prompt selection metadata");
     Expect(chunkPromptDump.find("\"chunk_strategy\"") != std::string::npos, "chunk prompt should describe chunk selection strategy");
     Expect(chunkPromptDump.find("chunk-scoped facts + global fact carryover + spread sampling") != std::string::npos, "chunk prompt should preserve chunk fact selection strategy");
+    Expect(chunkPromptDump.find("\"loaded_image_name\"") != std::string::npos, "chunk prompt should include loaded image provenance");
+    Expect(chunkPromptDump.find("CHUNK_MERGE_LOADED_IMAGE_MARKER.sys") != std::string::npos, "chunk prompt should preserve loaded image provenance");
+    Expect(chunkPromptDump.find("\"symbol_type\"") != std::string::npos, "chunk prompt should include symbol type provenance");
+    Expect(chunkPromptDump.find("424242") != std::string::npos, "chunk prompt should preserve symbol type provenance");
     Expect(chunkPromptDump.find("\"analyzer_skeleton\"") != std::string::npos, "chunk prompt should include the analyzer skeleton");
     Expect(chunkPromptDump.find("chunk analyzer skeleton") != std::string::npos, "chunk analyzer skeleton should be chunk-local");
     Expect(chunkPromptDump.find("\"scope\":\"chunk\"") != std::string::npos, "chunk prompt obfuscation facts should be marked as chunk-scoped");
@@ -2036,6 +2042,10 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("\"selection\"") != std::string::npos, "merge prompt should include prompt selection metadata");
     Expect(mergePromptDump.find("\"fact_strategy\"") != std::string::npos, "merge prompt should describe fact selection strategy");
     Expect(mergePromptDump.find("ranked high-signal facts + spread sampling") != std::string::npos, "merge prompt should preserve fact selection strategy");
+    Expect(mergePromptDump.find("\"loaded_image_name\"") != std::string::npos, "merge prompt should include loaded image provenance");
+    Expect(mergePromptDump.find("CHUNK_MERGE_LOADED_IMAGE_MARKER.sys") != std::string::npos, "merge prompt should preserve loaded image provenance");
+    Expect(mergePromptDump.find("\"symbol_type\"") != std::string::npos, "merge prompt should include symbol type provenance");
+    Expect(mergePromptDump.find("424242") != std::string::npos, "merge prompt should preserve symbol type provenance");
     Expect(mergePromptDump.find("\"type_hints\"") != std::string::npos, "merge prompt should include type hints");
     Expect(mergePromptDump.find("INSIDE_CHUNK_TYPE_HINT_MARKER") != std::string::npos, "merge prompt should preserve type hints for final synthesis");
     Expect(mergePromptDump.find("\"idioms\"") != std::string::npos, "merge prompt should include idiom facts");
