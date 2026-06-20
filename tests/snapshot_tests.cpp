@@ -2095,6 +2095,11 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("\"required_evidence_keys\"") != std::string::npos, "merge prompt should include required evidence keys");
     Expect(mergePromptDump.find("\"blocked_merge_rules\"") != std::string::npos, "merge prompt should include blocked merge output rules");
     Expect(mergePromptDump.find("\"confidence_policy_path\"") != std::string::npos, "merge prompt should include confidence policy reference path");
+    Expect(mergePromptDump.find("\"merge_traceability_matrix\"") != std::string::npos, "merge prompt should include merge traceability matrix");
+    Expect(mergePromptDump.find("\"fact_paths\"") != std::string::npos, "merge prompt should include traceability fact paths");
+    Expect(mergePromptDump.find("\"chunk_paths\"") != std::string::npos, "merge prompt should include traceability chunk paths");
+    Expect(mergePromptDump.find("\"validation_checks\"") != std::string::npos, "merge prompt should include traceability validation checks");
+    Expect(mergePromptDump.find("\"requires_source_path_review\"") != std::string::npos, "merge prompt should include source-path review requirement");
     Expect(mergePromptDump.find("\"first_block\"") != std::string::npos, "merge prompt should include chunk first-block provenance");
     Expect(mergePromptDump.find("\"last_block\"") != std::string::npos, "merge prompt should include chunk last-block provenance");
     Expect(mergePromptDump.find("\"block_ids\"") != std::string::npos, "merge prompt should include chunk block ids");

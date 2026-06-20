@@ -7563,6 +7563,125 @@ JsonValue BuildMergeChunkOutputContractJson()
     return object;
 }
 
+void AppendMergeTraceabilityTarget(
+    JsonValue& targets,
+    const std::string& outputKey,
+    const std::vector<std::string>& factPaths,
+    const std::vector<std::string>& chunkPaths,
+    const std::vector<std::string>& validationChecks)
+{
+    JsonValue item = JsonValue::MakeObject();
+    item.Set("output_key", JsonValue::MakeString(outputKey));
+    item.Set("fact_paths", BuildStringArray(factPaths, 16, nullptr));
+    item.Set("chunk_paths", BuildStringArray(chunkPaths, 16, nullptr));
+    item.Set("validation_checks", BuildStringArray(validationChecks, 16, nullptr));
+    targets.PushBack(item);
+}
+
+JsonValue BuildMergeChunkTraceabilityMatrixJson()
+{
+    JsonValue object = JsonValue::MakeObject();
+    JsonValue targets = JsonValue::MakeArray();
+    std::vector<std::string> factPaths;
+    std::vector<std::string> chunkPaths;
+    std::vector<std::string> validationChecks;
+
+    factPaths.push_back("analyzer_skeleton");
+    factPaths.push_back("blocks");
+    factPaths.push_back("control_flow");
+    factPaths.push_back("semantic_control_flow");
+    factPaths.push_back("obfuscation");
+    chunkPaths.push_back("chunk_summaries.pseudo_steps");
+    chunkPaths.push_back("chunk_summaries.state_updates");
+    chunkPaths.push_back("chunking.chunk_plans.block_ids");
+    validationChecks.push_back("preserve_visible_operations");
+    validationChecks.push_back("prefer_semantic_control_flow_when_grounded");
+    validationChecks.push_back("do_not_invent_uncovered_operations");
+    AppendMergeTraceabilityTarget(targets, "pseudo_c", factPaths, chunkPaths, validationChecks);
+
+    factPaths.clear();
+    chunkPaths.clear();
+    validationChecks.clear();
+    factPaths.push_back("natural_language");
+    factPaths.push_back("global_facts");
+    factPaths.push_back("observed_behavior");
+    chunkPaths.push_back("chunk_summaries.summary_localized");
+    chunkPaths.push_back("chunking.summary_alignment");
+    validationChecks.push_back("use_configured_language");
+    validationChecks.push_back("mention_partial_coverage_when_present");
+    AppendMergeTraceabilityTarget(targets, "summary", factPaths, chunkPaths, validationChecks);
+
+    factPaths.clear();
+    chunkPaths.clear();
+    validationChecks.clear();
+    factPaths.push_back("recovered_arguments");
+    factPaths.push_back("call_arguments");
+    factPaths.push_back("pdb");
+    factPaths.push_back("abi");
+    chunkPaths.push_back("chunk_summaries.observed_calls");
+    chunkPaths.push_back("chunking.merge_risk_details");
+    validationChecks.push_back("prefer_named_pdb_or_recovered_arguments");
+    validationChecks.push_back("carry_low_confidence_arguments_to_uncertainties");
+    AppendMergeTraceabilityTarget(targets, "params", factPaths, chunkPaths, validationChecks);
+
+    factPaths.clear();
+    chunkPaths.clear();
+    validationChecks.clear();
+    factPaths.push_back("recovered_locals");
+    factPaths.push_back("stack_pointer");
+    factPaths.push_back("memory_accesses");
+    factPaths.push_back("pdb");
+    chunkPaths.push_back("chunk_summaries.observed_memory");
+    chunkPaths.push_back("chunk_summaries.state_updates");
+    validationChecks.push_back("preserve_stack_frame_context");
+    validationChecks.push_back("avoid_unbacked_local_names");
+    AppendMergeTraceabilityTarget(targets, "locals", factPaths, chunkPaths, validationChecks);
+
+    factPaths.clear();
+    chunkPaths.clear();
+    validationChecks.clear();
+    factPaths.push_back("global_uncertainties");
+    factPaths.push_back("session_policy");
+    factPaths.push_back("observed_behavior");
+    chunkPaths.push_back("chunk_summaries.uncertainties");
+    chunkPaths.push_back("chunking.merge_acceptance_checks.blocking_issues");
+    chunkPaths.push_back("chunking.merge_confidence_policy.ceiling_reasons");
+    validationChecks.push_back("emit_uncertainty_for_each_blocker");
+    validationChecks.push_back("preserve_chunk_uncertainties");
+    AppendMergeTraceabilityTarget(targets, "uncertainties", factPaths, chunkPaths, validationChecks);
+
+    factPaths.clear();
+    chunkPaths.clear();
+    validationChecks.clear();
+    factPaths.push_back("evidence_graph");
+    factPaths.push_back("blocks");
+    factPaths.push_back("semantic_control_flow");
+    chunkPaths.push_back("chunk_summaries.evidence");
+    chunkPaths.push_back("chunking.summary_evidence");
+    chunkPaths.push_back("chunking.merge_risk_details");
+    validationChecks.push_back("ground_claims_to_chunk_blocks");
+    validationChecks.push_back("drop_or_rewrite_ungrounded_evidence");
+    AppendMergeTraceabilityTarget(targets, "evidence", factPaths, chunkPaths, validationChecks);
+
+    factPaths.clear();
+    chunkPaths.clear();
+    validationChecks.clear();
+    factPaths.push_back("pre_llm_confidence");
+    chunkPaths.push_back("chunking.merge_confidence_policy");
+    chunkPaths.push_back("chunking.merge_acceptance_checks");
+    chunkPaths.push_back("chunking.merge_risk");
+    validationChecks.push_back("cap_confidence_at_recommended_ceiling");
+    validationChecks.push_back("avoid_high_confidence_when_blocked");
+    AppendMergeTraceabilityTarget(targets, "confidence", factPaths, chunkPaths, validationChecks);
+
+    object.Set("target_count", JsonValue::MakeNumber(static_cast<double>(targets.GetArray().size())));
+    object.Set("targets", targets);
+    object.Set("requires_source_path_review", JsonValue::MakeBoolean(true));
+    object.Set("requires_chunk_summary_linkage", JsonValue::MakeBoolean(true));
+    object.Set("requires_evidence_graph_crosscheck", JsonValue::MakeBoolean(true));
+    return object;
+}
+
 JsonValue BuildMergeFactsJson(
     const AnalyzeRequest& request,
     const std::vector<ChunkPlan>& chunkPlans,
@@ -7656,6 +7775,7 @@ JsonValue BuildMergeFactsJson(
     chunking.Set("merge_confidence_policy", BuildMergeChunkConfidencePolicyJson(request, chunkPlans, chunkAnalyses, uncoveredBlockCount));
     chunking.Set("merge_acceptance_checks", BuildMergeChunkAcceptanceChecksJson(request, chunkPlans, chunkAnalyses, uncoveredBlockCount));
     chunking.Set("merge_output_contract", BuildMergeChunkOutputContractJson());
+    chunking.Set("merge_traceability_matrix", BuildMergeChunkTraceabilityMatrixJson());
 
     root.Set("arch", JsonValue::MakeString(request.Facts.Arch));
     root.Set("mode", JsonValue::MakeString(request.Facts.Mode == AnalysisMode::LiveMemory ? "live" : "file"));
@@ -7797,7 +7917,7 @@ std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
         "Return only a JSON object with these keys: status, pseudo_c, summary, params, locals, uncertainties, evidence, confidence. "
         "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style. "
-        "Use the chunk plans, coverage metadata, summary alignment, quality, evidence, risk metadata, per-chunk risk details, merge review plan, confidence policy, acceptance checks, and output contract, and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
+        "Use the chunk plans, coverage metadata, summary alignment, quality, evidence, risk metadata, per-chunk risk details, merge review plan, confidence policy, acceptance checks, output contract, and traceability matrix, and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
         "Use selection, blocks, direct_calls, indirect_calls, recovered_arguments, recovered_locals, call_arguments, stack_pointer, memory_accesses, ir_values, switches, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, control_flow, type_hints, idioms, callee_summaries, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, and pdb facts to preserve semantic names, prompt coverage limits, block grounding, call-site grounding, stack-frame context, reaching-value state, memory side effects, switch dispatch intent, control-flow intent, debugger-session constraints, and observed runtime context. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
@@ -7828,11 +7948,12 @@ std::string BuildMergeUserPrompt(
     prompt += "6. If chunks disagree or coverage remains partial, explain that in uncertainties, but still keep the visible operations explicit.\n";
     prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
     prompt += "8. evidence.blocks must reference block ids that appear in the chunk summaries.\n";
-    prompt += "9. Use chunking.coverage_complete, chunking.uncovered_block_ids, chunking.chunk_plans, chunking.summary_alignment, chunking.summary_quality, chunking.summary_evidence, chunking.merge_risk, chunking.merge_risk_details, chunking.merge_review_plan, chunking.merge_confidence_policy, chunking.merge_acceptance_checks, and chunking.merge_output_contract to detect omitted, duplicated, orphaned, low-confidence, weak-evidence, ungrounded, or risk-coded chunks before trusting a short chunk summary.\n";
+    prompt += "9. Use chunking.coverage_complete, chunking.uncovered_block_ids, chunking.chunk_plans, chunking.summary_alignment, chunking.summary_quality, chunking.summary_evidence, chunking.merge_risk, chunking.merge_risk_details, chunking.merge_review_plan, chunking.merge_confidence_policy, chunking.merge_acceptance_checks, chunking.merge_output_contract, and chunking.merge_traceability_matrix to detect omitted, duplicated, orphaned, low-confidence, weak-evidence, ungrounded, or risk-coded chunks before trusting a short chunk summary.\n";
     prompt += "10. Respect chunking.merge_confidence_policy.recommended_confidence_ceiling when setting confidence, and carry required uncertainty into uncertainties.\n";
     prompt += "11. Satisfy chunking.merge_acceptance_checks before reporting a clean merge; if blocking_issues is non-empty, reflect that in uncertainties and confidence.\n";
     prompt += "12. Follow chunking.merge_output_contract for required keys, evidence shape, grounding, language, and blocked-merge behavior.\n";
-    prompt += "13. Treat the analyzer skeleton and graph-derived facts as a draft to refine; do not invent unsupported loops, switches, or calls during merge.\n";
+    prompt += "13. Use chunking.merge_traceability_matrix to map each output field back to source fact paths and chunk metadata before finalizing the JSON.\n";
+    prompt += "14. Treat the analyzer skeleton and graph-derived facts as a draft to refine; do not invent unsupported loops, switches, or calls during merge.\n";
     return prompt;
 }
 
