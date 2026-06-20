@@ -8423,6 +8423,35 @@ bool ShouldRetryWithVerifierFeedback(const VerifyReport& report)
     return report.FactConflicts != 0 || report.MissingEvidence > 1;
 }
 
+std::string BuildVerifierIssueCorrectionHint(const VerificationIssue& issue)
+{
+    if (issue.Code == "obfuscation.dead_edge_claim_without_opaque_predicate"
+        || issue.Code == "obfuscation.dead_edge_claim_without_matching_evidence"
+        || issue.Code == "obfuscation.dead_edge_rendered_as_live")
+    {
+        return "Do not prune or render a dead edge unless it is grounded by obfuscation.opaque_predicates or a semantic_control_flow dead edge; otherwise keep the branch visible or list uncertainty.";
+    }
+
+    if (issue.Code == "obfuscation.substitution_claim_without_evidence"
+        || issue.Code == "obfuscation.substitution_memory_semantics_claim")
+    {
+        return "Remove unsupported substitution rewrites; use obfuscation.substitution_idioms only for local scalar simplifications and keep pointer, load, store, volatile, or alias-sensitive expressions uncertain.";
+    }
+
+    if (issue.Code == "obfuscation.dispatcher_claim_without_evidence"
+        || issue.Code == "obfuscation.raw_dispatcher_loop_without_uncertainty")
+    {
+        return "Use obfuscation.dispatchers.recovered_edges or semantic_control_flow edges for recovered structure; do not present a raw dispatcher loop as source logic unless uncertainty is explicit.";
+    }
+
+    if (StartsWithInsensitive(issue.Code, "obfuscation."))
+    {
+        return "Revise the obfuscation claim using only grounded obfuscation and semantic_control_flow facts, or lower confidence and move the claim to uncertainties.";
+    }
+
+    return std::string();
+}
+
 std::string BuildVerifierFeedbackPrompt(const VerifyReport& report)
 {
     std::string prompt;
@@ -8444,6 +8473,14 @@ std::string BuildVerifierFeedbackPrompt(const VerifyReport& report)
         {
             prompt += " evidence: ";
             prompt += issue.Evidence;
+        }
+
+        const std::string correctionHint = BuildVerifierIssueCorrectionHint(issue);
+
+        if (!correctionHint.empty())
+        {
+            prompt += " correction: ";
+            prompt += correctionHint;
         }
 
         prompt += "\n";
@@ -10488,6 +10525,11 @@ std::string BuildDebugMergePromptDump(
     dump += SerializeJson(BuildMergeFactsJson(request, chunkPlans, chunkAnalyses), true);
     dump += "\n";
     return dump;
+}
+
+std::string BuildDebugVerifierFeedbackPrompt(const VerifyReport& report)
+{
+    return BuildVerifierFeedbackPrompt(report);
 }
 
 void ApplyDebugMergeOutputPolicy(

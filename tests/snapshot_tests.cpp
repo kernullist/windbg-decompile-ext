@@ -3119,6 +3119,11 @@ void TestVerifierCoverageSnapshot()
     Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.substitution_claim_without_evidence"), "verifier should reject unsupported substitution claims");
     Expect(IssueEvidenceContains(unsupportedObfuscationReport, "obfuscation.dead_edge_claim_without_opaque_predicate", "removed opaque predicate dead branch"), "opaque dead-edge issue should include the matched claim context");
     Expect(IssueEvidenceContains(unsupportedObfuscationReport, "obfuscation.substitution_claim_without_evidence", "applied instruction substitution idiom"), "substitution issue should include the matched claim context");
+    const std::string obfuscationFeedbackPrompt = decomp::BuildDebugVerifierFeedbackPrompt(unsupportedObfuscationReport);
+    Expect(obfuscationFeedbackPrompt.find("claim_context_count=") != std::string::npos, "verifier feedback should preserve obfuscation claim context evidence");
+    Expect(obfuscationFeedbackPrompt.find("removed opaque predicate dead branch") != std::string::npos, "verifier feedback should include the opaque dead-edge claim text");
+    Expect(obfuscationFeedbackPrompt.find("obfuscation.opaque_predicates") != std::string::npos, "verifier feedback should name opaque predicate grounding facts");
+    Expect(obfuscationFeedbackPrompt.find("obfuscation.substitution_idioms") != std::string::npos, "verifier feedback should name substitution grounding facts");
 
     decomp::AnalyzeResponse obfuscationUncertaintyResponse;
     obfuscationUncertaintyResponse.Status = "ok";
@@ -3153,6 +3158,8 @@ void TestVerifierCoverageSnapshot()
     const decomp::VerifyReport memorySubstitutionReport = decomp::VerifyResponse(substitutionRequest, memorySubstitutionResponse);
     Expect(HasIssueCode(memorySubstitutionReport, "obfuscation.substitution_memory_semantics_claim"), "verifier should flag memory-sensitive substitution claims");
     Expect(IssueEvidenceContains(memorySubstitutionReport, "obfuscation.substitution_memory_semantics_claim", "[rcx] + 0"), "memory-sensitive substitution issue should include the matched rewrite context");
+    const std::string substitutionFeedbackPrompt = decomp::BuildDebugVerifierFeedbackPrompt(memorySubstitutionReport);
+    Expect(substitutionFeedbackPrompt.find("pointer, load, store") != std::string::npos, "verifier feedback should instruct memory-sensitive substitution uncertainty");
 
     decomp::AnalyzeResponse memoryUncertaintyResponse;
     memoryUncertaintyResponse.Status = "ok";
