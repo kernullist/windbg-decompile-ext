@@ -2048,6 +2048,10 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("\"selection\"") != std::string::npos, "merge prompt should include prompt selection metadata");
     Expect(mergePromptDump.find("\"fact_strategy\"") != std::string::npos, "merge prompt should describe fact selection strategy");
     Expect(mergePromptDump.find("ranked high-signal facts + spread sampling") != std::string::npos, "merge prompt should preserve fact selection strategy");
+    Expect(mergePromptDump.find("\"chunk_plans\"") != std::string::npos, "merge prompt should include deterministic chunk plans");
+    Expect(mergePromptDump.find("\"first_block\"") != std::string::npos, "merge prompt should include chunk first-block provenance");
+    Expect(mergePromptDump.find("\"last_block\"") != std::string::npos, "merge prompt should include chunk last-block provenance");
+    Expect(mergePromptDump.find("\"block_ids\"") != std::string::npos, "merge prompt should include chunk block ids");
     Expect(mergePromptDump.find("\"loaded_image_name\"") != std::string::npos, "merge prompt should include loaded image provenance");
     Expect(mergePromptDump.find("CHUNK_MERGE_LOADED_IMAGE_MARKER.sys") != std::string::npos, "merge prompt should preserve loaded image provenance");
     Expect(mergePromptDump.find("\"symbol_type\"") != std::string::npos, "merge prompt should include symbol type provenance");

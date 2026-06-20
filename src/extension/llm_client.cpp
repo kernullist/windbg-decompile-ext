@@ -6354,6 +6354,48 @@ JsonValue BuildChunkSummariesJson(
     return array;
 }
 
+JsonValue BuildMergeChunkPlansJson(
+    const AnalyzeRequest& request,
+    const std::vector<ChunkPlan>& chunkPlans)
+{
+    JsonValue array = JsonValue::MakeArray();
+
+    for (const ChunkPlan& plan : chunkPlans)
+    {
+        JsonValue item = JsonValue::MakeObject();
+        JsonValue blockIds = JsonValue::MakeArray();
+        std::set<uint64_t> instructionAddresses;
+        std::set<std::string> selectedBlockIds;
+        uint64_t startAddress = 0;
+        uint64_t endAddress = 0;
+
+        CollectChunkAddressMetadata(request, plan, instructionAddresses, selectedBlockIds, startAddress, endAddress);
+
+        for (const std::string& blockId : selectedBlockIds)
+        {
+            blockIds.PushBack(JsonValue::MakeString(blockId));
+        }
+
+        item.Set("chunk_id", JsonValue::MakeString(plan.Id));
+        item.Set("slot_index", JsonValue::MakeNumber(static_cast<double>(plan.SlotIndex)));
+        item.Set("total_chunks", JsonValue::MakeNumber(static_cast<double>(plan.TotalChunks)));
+        item.Set("block_count", JsonValue::MakeNumber(static_cast<double>(plan.BlockIndices.size())));
+        item.Set("start", JsonValue::MakeString(HexU64(startAddress)));
+        item.Set("end", JsonValue::MakeString(HexU64(endAddress)));
+        item.Set("block_ids", blockIds);
+
+        if (!plan.BlockIndices.empty())
+        {
+            item.Set("first_block", JsonValue::MakeString(request.Facts.Blocks[plan.BlockIndices.front()].Id));
+            item.Set("last_block", JsonValue::MakeString(request.Facts.Blocks[plan.BlockIndices.back()].Id));
+        }
+
+        array.PushBack(item);
+    }
+
+    return array;
+}
+
 JsonValue BuildMergeFactsJson(
     const AnalyzeRequest& request,
     const std::vector<ChunkPlan>& chunkPlans,
@@ -6428,6 +6470,7 @@ JsonValue BuildMergeFactsJson(
     chunking.Set("chunk_summaries_count", JsonValue::MakeNumber(static_cast<double>(chunkAnalyses.size())));
     chunking.Set("covered_block_count", JsonValue::MakeNumber(static_cast<double>(coveredBlocks.size())));
     chunking.Set("coverage_ratio", JsonValue::MakeNumber(request.Facts.Blocks.empty() ? 0.0 : static_cast<double>(coveredBlocks.size()) / static_cast<double>(request.Facts.Blocks.size())));
+    chunking.Set("chunk_plans", BuildMergeChunkPlansJson(request, chunkPlans));
 
     root.Set("arch", JsonValue::MakeString(request.Facts.Arch));
     root.Set("mode", JsonValue::MakeString(request.Facts.Mode == AnalysisMode::LiveMemory ? "live" : "file"));
@@ -6569,7 +6612,7 @@ std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
         "Return only a JSON object with these keys: status, pseudo_c, summary, params, locals, uncertainties, evidence, confidence. "
         "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style. "
-        "Use the chunk summaries to produce a fuller function-level pseudocode than a single-pass summary. "
+        "Use the chunk plans and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
         "Use selection, blocks, direct_calls, indirect_calls, recovered_arguments, recovered_locals, call_arguments, stack_pointer, memory_accesses, ir_values, switches, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, control_flow, type_hints, idioms, callee_summaries, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, and pdb facts to preserve semantic names, prompt coverage limits, block grounding, call-site grounding, stack-frame context, reaching-value state, memory side effects, switch dispatch intent, control-flow intent, debugger-session constraints, and observed runtime context. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
@@ -6600,7 +6643,8 @@ std::string BuildMergeUserPrompt(
     prompt += "6. If chunks disagree or coverage remains partial, explain that in uncertainties, but still keep the visible operations explicit.\n";
     prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
     prompt += "8. evidence.blocks must reference block ids that appear in the chunk summaries.\n";
-    prompt += "9. Treat the analyzer skeleton and graph-derived facts as a draft to refine; do not invent unsupported loops, switches, or calls during merge.\n";
+    prompt += "9. Use chunking.chunk_plans to detect omitted or duplicated block coverage before trusting a short chunk summary.\n";
+    prompt += "10. Treat the analyzer skeleton and graph-derived facts as a draft to refine; do not invent unsupported loops, switches, or calls during merge.\n";
     return prompt;
 }
 
