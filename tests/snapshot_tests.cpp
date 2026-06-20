@@ -1,10 +1,12 @@
 #include "decomp/analyzer.h"
+#include "decomp/json.h"
 #include "decomp/llm_client.h"
 #include "decomp/protocol.h"
 #include "decomp/string_utils.h"
 #include "decomp/verifier.h"
 
 #include <algorithm>
+#include <initializer_list>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -58,6 +60,161 @@ decomp::DisassembledInstruction MakeBranch(
 bool ContainsString(const std::vector<std::string>& values, const std::string& value)
 {
     return std::find(values.begin(), values.end(), value) != values.end();
+}
+
+const decomp::JsonValue* FindJsonPath(
+    const decomp::JsonValue& root,
+    std::initializer_list<std::string> path)
+{
+    const decomp::JsonValue* value = &root;
+
+    for (const std::string& segment : path)
+    {
+        if (value == nullptr || !value->IsObject())
+        {
+            return nullptr;
+        }
+
+        value = value->Find(segment);
+    }
+
+    return value;
+}
+
+const decomp::JsonValue* ExpectJsonObjectPath(
+    const decomp::JsonValue& root,
+    std::initializer_list<std::string> path,
+    const std::string& message)
+{
+    const decomp::JsonValue* value = FindJsonPath(root, path);
+    Expect(value != nullptr && value->IsObject(), message);
+
+    if (value == nullptr || !value->IsObject())
+    {
+        return nullptr;
+    }
+
+    return value;
+}
+
+const decomp::JsonValue* ExpectJsonArrayPath(
+    const decomp::JsonValue& root,
+    std::initializer_list<std::string> path,
+    const std::string& message)
+{
+    const decomp::JsonValue* value = FindJsonPath(root, path);
+    Expect(value != nullptr && value->IsArray(), message);
+
+    if (value == nullptr || !value->IsArray())
+    {
+        return nullptr;
+    }
+
+    return value;
+}
+
+const decomp::JsonValue* ExpectJsonBooleanPath(
+    const decomp::JsonValue& root,
+    std::initializer_list<std::string> path,
+    const std::string& message)
+{
+    const decomp::JsonValue* value = FindJsonPath(root, path);
+    Expect(value != nullptr && value->IsBoolean(), message);
+
+    if (value == nullptr || !value->IsBoolean())
+    {
+        return nullptr;
+    }
+
+    return value;
+}
+
+const decomp::JsonValue* ExpectJsonNumberPath(
+    const decomp::JsonValue& root,
+    std::initializer_list<std::string> path,
+    const std::string& message)
+{
+    const decomp::JsonValue* value = FindJsonPath(root, path);
+    Expect(value != nullptr && value->IsNumber(), message);
+
+    if (value == nullptr || !value->IsNumber())
+    {
+        return nullptr;
+    }
+
+    return value;
+}
+
+bool JsonStringArrayContains(const decomp::JsonValue* value, const std::string& expected)
+{
+    if (value == nullptr || !value->IsArray())
+    {
+        return false;
+    }
+
+    for (const decomp::JsonValue& item : value->GetArray())
+    {
+        if (item.IsString() && item.GetString() == expected)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void ExpectJsonBooleanValue(
+    const decomp::JsonValue& root,
+    std::initializer_list<std::string> path,
+    bool expected,
+    const std::string& message)
+{
+    const decomp::JsonValue* value = ExpectJsonBooleanPath(root, path, message + " should be boolean");
+    Expect(value != nullptr && value->GetBoolean() == expected, message);
+}
+
+void ExpectJsonNumberAtMost(
+    const decomp::JsonValue& root,
+    std::initializer_list<std::string> path,
+    double maximum,
+    const std::string& message)
+{
+    const decomp::JsonValue* value = ExpectJsonNumberPath(root, path, message + " should be numeric");
+    Expect(value != nullptr && value->GetNumber() <= maximum, message);
+}
+
+void ExpectJsonStringArrayContains(
+    const decomp::JsonValue& root,
+    std::initializer_list<std::string> path,
+    const std::string& expected,
+    const std::string& message)
+{
+    const decomp::JsonValue* value = ExpectJsonArrayPath(root, path, message + " should be an array");
+    Expect(JsonStringArrayContains(value, expected), message);
+}
+
+decomp::JsonValue ParseDebugMergeFactsJson(const std::string& mergePromptDump)
+{
+    const std::string marker = "merge_facts_json:\n";
+    const size_t markerOffset = mergePromptDump.find(marker);
+    Expect(markerOffset != std::string::npos, "debug merge prompt dump should include merge facts JSON marker");
+
+    if (markerOffset == std::string::npos)
+    {
+        return decomp::JsonValue::MakeObject();
+    }
+
+    const std::string factsJson = mergePromptDump.substr(markerOffset + marker.size());
+    const decomp::JsonParseResult parsed = decomp::ParseJson(factsJson);
+    Expect(parsed.Success, "debug merge facts JSON should parse: " + parsed.Error);
+    Expect(parsed.Value.IsObject(), "debug merge facts JSON should be an object");
+
+    if (!parsed.Success || !parsed.Value.IsObject())
+    {
+        return decomp::JsonValue::MakeObject();
+    }
+
+    return parsed.Value;
 }
 
 bool ContainsFactSubstring(const decomp::AnalysisFacts& facts, const std::string& needle)
@@ -2048,78 +2205,113 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("\"selection\"") != std::string::npos, "merge prompt should include prompt selection metadata");
     Expect(mergePromptDump.find("\"fact_strategy\"") != std::string::npos, "merge prompt should describe fact selection strategy");
     Expect(mergePromptDump.find("ranked high-signal facts + spread sampling") != std::string::npos, "merge prompt should preserve fact selection strategy");
-    Expect(mergePromptDump.find("\"total_block_count\"") != std::string::npos, "merge prompt should include total block count");
-    Expect(mergePromptDump.find("\"uncovered_block_count\"") != std::string::npos, "merge prompt should include uncovered block count");
-    Expect(mergePromptDump.find("\"coverage_complete\"") != std::string::npos, "merge prompt should include chunk coverage completeness");
-    Expect(mergePromptDump.find("\"uncovered_block_ids\"") != std::string::npos, "merge prompt should include uncovered block ids");
-    Expect(mergePromptDump.find("\"chunk_plans\"") != std::string::npos, "merge prompt should include deterministic chunk plans");
-    Expect(mergePromptDump.find("\"summary_alignment\"") != std::string::npos, "merge prompt should include chunk summary alignment metadata");
-    Expect(mergePromptDump.find("\"missing_summary_chunk_ids\"") != std::string::npos, "merge prompt should include missing chunk summary ids");
-    Expect(mergePromptDump.find("\"orphan_summary_chunk_ids\"") != std::string::npos, "merge prompt should include orphan chunk summary ids");
-    Expect(mergePromptDump.find("\"duplicate_summary_chunk_ids\"") != std::string::npos, "merge prompt should include duplicate chunk summary ids");
-    Expect(mergePromptDump.find("\"summary_quality\"") != std::string::npos, "merge prompt should include chunk summary quality metadata");
-    Expect(mergePromptDump.find("\"average_confidence\"") != std::string::npos, "merge prompt should include average chunk confidence");
-    Expect(mergePromptDump.find("\"low_confidence_chunk_ids\"") != std::string::npos, "merge prompt should include low-confidence chunk ids");
-    Expect(mergePromptDump.find("\"empty_evidence_chunk_ids\"") != std::string::npos, "merge prompt should include chunks with empty evidence");
-    Expect(mergePromptDump.find("\"summary_evidence\"") != std::string::npos, "merge prompt should include chunk summary evidence metadata");
-    Expect(mergePromptDump.find("\"evidence_block_coverage_ratio\"") != std::string::npos, "merge prompt should include summary evidence block coverage");
-    Expect(mergePromptDump.find("\"chunks_without_block_evidence\"") != std::string::npos, "merge prompt should include chunks without block evidence");
-    Expect(mergePromptDump.find("\"evidence_blocks_outside_chunk_plans\"") != std::string::npos, "merge prompt should include ungrounded summary evidence blocks");
-    Expect(mergePromptDump.find("\"merge_risk\"") != std::string::npos, "merge prompt should include chunk merge risk metadata");
-    Expect(mergePromptDump.find("\"risk_codes\"") != std::string::npos, "merge prompt should include chunk merge risk codes");
-    Expect(mergePromptDump.find("\"has_low_confidence_chunks\"") != std::string::npos, "merge prompt should include low-confidence chunk risk flag");
-    Expect(mergePromptDump.find("\"has_empty_evidence_chunks\"") != std::string::npos, "merge prompt should include empty-evidence chunk risk flag");
-    Expect(mergePromptDump.find("\"has_ungrounded_evidence_blocks\"") != std::string::npos, "merge prompt should include ungrounded evidence risk flag");
-    Expect(mergePromptDump.find("\"merge_risk_details\"") != std::string::npos, "merge prompt should include per-chunk risk details");
-    Expect(mergePromptDump.find("\"risked_chunks\"") != std::string::npos, "merge prompt should include risked chunk details");
-    Expect(mergePromptDump.find("\"risked_chunk_count\"") != std::string::npos, "merge prompt should include risked chunk count");
-    Expect(mergePromptDump.find("\"has_missing_summary\"") != std::string::npos, "merge prompt should include missing-summary chunk risk flag");
-    Expect(mergePromptDump.find("\"has_duplicate_summaries\"") != std::string::npos, "merge prompt should include duplicate-summary chunk risk flag");
-    Expect(mergePromptDump.find("\"merge_review_plan\"") != std::string::npos, "merge prompt should include chunk merge review plan");
-    Expect(mergePromptDump.find("\"review_actions\"") != std::string::npos, "merge prompt should include merge review actions");
-    Expect(mergePromptDump.find("\"priority_chunk_ids\"") != std::string::npos, "merge prompt should include priority chunk ids");
-    Expect(mergePromptDump.find("\"requires_summary_reconciliation\"") != std::string::npos, "merge prompt should include summary reconciliation review flag");
-    Expect(mergePromptDump.find("\"requires_evidence_review\"") != std::string::npos, "merge prompt should include evidence review flag");
-    Expect(mergePromptDump.find("\"merge_confidence_policy\"") != std::string::npos, "merge prompt should include merge confidence policy");
-    Expect(mergePromptDump.find("\"recommended_confidence_ceiling\"") != std::string::npos, "merge prompt should include recommended confidence ceiling");
-    Expect(mergePromptDump.find("\"ceiling_reasons\"") != std::string::npos, "merge prompt should include confidence ceiling reasons");
-    Expect(mergePromptDump.find("\"requires_uncertainty\"") != std::string::npos, "merge prompt should include required uncertainty flag");
-    Expect(mergePromptDump.find("\"can_report_high_confidence\"") != std::string::npos, "merge prompt should include high-confidence eligibility flag");
-    Expect(mergePromptDump.find("\"merge_acceptance_checks\"") != std::string::npos, "merge prompt should include merge acceptance checks");
-    Expect(mergePromptDump.find("\"acceptance_checks\"") != std::string::npos, "merge prompt should include required acceptance checks");
-    Expect(mergePromptDump.find("\"blocking_issues\"") != std::string::npos, "merge prompt should include merge blocking issues");
-    Expect(mergePromptDump.find("\"must_bound_confidence\"") != std::string::npos, "merge prompt should include confidence bound requirement");
-    Expect(mergePromptDump.find("\"ready_for_high_confidence_merge\"") != std::string::npos, "merge prompt should include high-confidence merge readiness");
-    Expect(mergePromptDump.find("\"merge_output_contract\"") != std::string::npos, "merge prompt should include merge output contract");
-    Expect(mergePromptDump.find("\"required_top_level_keys\"") != std::string::npos, "merge prompt should include required output keys");
-    Expect(mergePromptDump.find("\"required_evidence_keys\"") != std::string::npos, "merge prompt should include required evidence keys");
-    Expect(mergePromptDump.find("\"blocked_merge_rules\"") != std::string::npos, "merge prompt should include blocked merge output rules");
-    Expect(mergePromptDump.find("\"confidence_policy_path\"") != std::string::npos, "merge prompt should include confidence policy reference path");
-    Expect(mergePromptDump.find("\"merge_traceability_matrix\"") != std::string::npos, "merge prompt should include merge traceability matrix");
-    Expect(mergePromptDump.find("\"fact_paths\"") != std::string::npos, "merge prompt should include traceability fact paths");
-    Expect(mergePromptDump.find("\"chunk_paths\"") != std::string::npos, "merge prompt should include traceability chunk paths");
-    Expect(mergePromptDump.find("\"validation_checks\"") != std::string::npos, "merge prompt should include traceability validation checks");
-    Expect(mergePromptDump.find("\"requires_source_path_review\"") != std::string::npos, "merge prompt should include source-path review requirement");
-    Expect(mergePromptDump.find("\"merge_obfuscation_policy\"") != std::string::npos, "merge prompt should include merge obfuscation policy");
-    Expect(mergePromptDump.find("\"has_flattening_dispatcher\"") != std::string::npos, "merge prompt should include flattening dispatcher policy flag");
-    Expect(mergePromptDump.find("\"obfuscation_rewrite_rules\"") != std::string::npos, "merge prompt should include obfuscation rewrite rules");
-    Expect(mergePromptDump.find("\"obfuscation_uncertainty_rules\"") != std::string::npos, "merge prompt should include obfuscation uncertainty rules");
-    Expect(mergePromptDump.find("\"semantic_overlay_confidence_threshold\"") != std::string::npos, "merge prompt should include semantic overlay confidence threshold");
-    Expect(mergePromptDump.find("\"merge_deobfuscation_plan\"") != std::string::npos, "merge prompt should include merge deobfuscation plan");
-    Expect(mergePromptDump.find("\"deobfuscation_actions\"") != std::string::npos, "merge prompt should include deobfuscation actions");
-    Expect(mergePromptDump.find("\"priority_fact_paths\"") != std::string::npos, "merge prompt should include deobfuscation priority fact paths");
-    Expect(mergePromptDump.find("\"blocked_assumptions\"") != std::string::npos, "merge prompt should include blocked deobfuscation assumptions");
-    Expect(mergePromptDump.find("\"safe_to_rewrite_obfuscated_cfg\"") != std::string::npos, "merge prompt should include obfuscated CFG rewrite safety flag");
-    Expect(mergePromptDump.find("\"merge_deobfuscation_output_contract\"") != std::string::npos, "merge prompt should include deobfuscation output contract");
-    Expect(mergePromptDump.find("\"requires_pseudo_c_deobfuscation_review\"") != std::string::npos, "merge prompt should include pseudo-C deobfuscation review flag");
-    Expect(mergePromptDump.find("\"requires_deobfuscation_uncertainty\"") != std::string::npos, "merge prompt should include deobfuscation uncertainty flag");
-    Expect(mergePromptDump.find("\"requires_rewrite_evidence\"") != std::string::npos, "merge prompt should include deobfuscation rewrite evidence flag");
-    Expect(mergePromptDump.find("\"safe_to_emit_deobfuscated_structure\"") != std::string::npos, "merge prompt should include deobfuscated structure safety flag");
-    Expect(mergePromptDump.find("\"merge_deobfuscation_conflict_policy\"") != std::string::npos, "merge prompt should include deobfuscation conflict policy");
-    Expect(mergePromptDump.find("\"priority_order\"") != std::string::npos, "merge prompt should include deobfuscation conflict priority order");
-    Expect(mergePromptDump.find("\"conflict_checks\"") != std::string::npos, "merge prompt should include deobfuscation conflict checks");
-    Expect(mergePromptDump.find("\"confidence_downgrade_reasons\"") != std::string::npos, "merge prompt should include deobfuscation confidence downgrade reasons");
-    Expect(mergePromptDump.find("\"requires_uncertainty_on_conflict\"") != std::string::npos, "merge prompt should include conflict uncertainty requirement");
+    const decomp::JsonValue mergeFactsJson = ParseDebugMergeFactsJson(mergePromptDump);
+    ExpectJsonObjectPath(mergeFactsJson, { "chunking" }, "merge facts should include chunking object");
+    ExpectJsonNumberPath(mergeFactsJson, { "chunking", "total_block_count" }, "chunking.total_block_count should be numeric");
+    ExpectJsonNumberPath(mergeFactsJson, { "chunking", "uncovered_block_count" }, "chunking.uncovered_block_count should be numeric");
+    ExpectJsonBooleanPath(mergeFactsJson, { "chunking", "coverage_complete" }, "chunking.coverage_complete should be boolean");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "uncovered_block_ids" }, "chunking.uncovered_block_ids should be an array");
+
+    const decomp::JsonValue* mergeChunkPlans = ExpectJsonArrayPath(mergeFactsJson, { "chunking", "chunk_plans" }, "chunking.chunk_plans should be an array");
+    Expect(mergeChunkPlans != nullptr && !mergeChunkPlans->GetArray().empty(), "chunking.chunk_plans should not be empty");
+
+    ExpectJsonObjectPath(mergeFactsJson, { "chunking", "summary_alignment" }, "chunking.summary_alignment should be an object");
+    ExpectJsonBooleanPath(mergeFactsJson, { "chunking", "summary_alignment", "alignment_complete" }, "summary alignment completion should be boolean");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "summary_alignment", "missing_summary_chunk_ids" }, "missing summary chunk ids should be an array");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "summary_alignment", "orphan_summary_chunk_ids" }, "orphan summary chunk ids should be an array");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "summary_alignment", "duplicate_summary_chunk_ids" }, "duplicate summary chunk ids should be an array");
+
+    ExpectJsonObjectPath(mergeFactsJson, { "chunking", "summary_quality" }, "chunking.summary_quality should be an object");
+    ExpectJsonNumberPath(mergeFactsJson, { "chunking", "summary_quality", "average_confidence" }, "summary average confidence should be numeric");
+    ExpectJsonNumberPath(mergeFactsJson, { "chunking", "summary_quality", "low_confidence_threshold" }, "summary low-confidence threshold should be numeric");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "summary_quality", "low_confidence_chunk_ids" }, "low-confidence chunk ids should be an array");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "summary_quality", "empty_evidence_chunk_ids" }, "empty-evidence chunk ids should be an array");
+
+    ExpectJsonObjectPath(mergeFactsJson, { "chunking", "summary_evidence" }, "chunking.summary_evidence should be an object");
+    ExpectJsonNumberPath(mergeFactsJson, { "chunking", "summary_evidence", "evidence_block_coverage_ratio" }, "summary evidence block coverage should be numeric");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "summary_evidence", "chunks_without_block_evidence" }, "chunks without block evidence should be an array");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "summary_evidence", "evidence_blocks_outside_chunk_plans" }, "ungrounded summary evidence blocks should be an array");
+
+    ExpectJsonObjectPath(mergeFactsJson, { "chunking", "merge_risk" }, "chunking.merge_risk should be an object");
+    ExpectJsonNumberPath(mergeFactsJson, { "chunking", "merge_risk", "risk_count" }, "merge risk count should be numeric");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_risk", "risk_codes" }, "merge risk codes should be an array");
+    ExpectJsonBooleanValue(mergeFactsJson, { "chunking", "merge_risk", "has_low_confidence_chunks" }, true, "merge risk should flag low-confidence chunks");
+    ExpectJsonBooleanValue(mergeFactsJson, { "chunking", "merge_risk", "has_empty_evidence_chunks" }, true, "merge risk should flag empty-evidence chunks");
+    ExpectJsonBooleanPath(mergeFactsJson, { "chunking", "merge_risk", "has_ungrounded_evidence_blocks" }, "merge risk ungrounded evidence flag should be boolean");
+    ExpectJsonStringArrayContains(mergeFactsJson, { "chunking", "merge_risk", "risk_codes" }, "low_confidence_chunks", "merge risk codes should include low-confidence chunks");
+    ExpectJsonStringArrayContains(mergeFactsJson, { "chunking", "merge_risk", "risk_codes" }, "empty_evidence_chunks", "merge risk codes should include empty evidence chunks");
+
+    ExpectJsonObjectPath(mergeFactsJson, { "chunking", "merge_risk_details" }, "chunking.merge_risk_details should be an object");
+    const decomp::JsonValue* riskedChunks = ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_risk_details", "risked_chunks" }, "risked chunks should be an array");
+    Expect(riskedChunks != nullptr && !riskedChunks->GetArray().empty(), "risked chunks should not be empty for debug low-confidence summaries");
+    ExpectJsonNumberPath(mergeFactsJson, { "chunking", "merge_risk_details", "risked_chunk_count" }, "risked chunk count should be numeric");
+    ExpectJsonBooleanPath(mergeFactsJson, { "chunking", "merge_risk_details", "risked_chunks_truncated" }, "risked chunk truncation flag should be boolean");
+
+    ExpectJsonObjectPath(mergeFactsJson, { "chunking", "merge_review_plan" }, "chunking.merge_review_plan should be an object");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_review_plan", "review_actions" }, "merge review actions should be an array");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_review_plan", "priority_chunk_ids" }, "merge review priority chunk ids should be an array");
+    ExpectJsonBooleanPath(mergeFactsJson, { "chunking", "merge_review_plan", "requires_summary_reconciliation" }, "summary reconciliation review flag should be boolean");
+    ExpectJsonBooleanValue(mergeFactsJson, { "chunking", "merge_review_plan", "requires_evidence_review" }, true, "merge review should require evidence review");
+    ExpectJsonStringArrayContains(mergeFactsJson, { "chunking", "merge_review_plan", "review_actions" }, "recheck_low_confidence_chunks", "merge review actions should include low-confidence recheck");
+    ExpectJsonStringArrayContains(mergeFactsJson, { "chunking", "merge_review_plan", "review_actions" }, "require_chunk_block_evidence", "merge review actions should require chunk block evidence");
+
+    ExpectJsonObjectPath(mergeFactsJson, { "chunking", "merge_confidence_policy" }, "chunking.merge_confidence_policy should be an object");
+    ExpectJsonNumberAtMost(mergeFactsJson, { "chunking", "merge_confidence_policy", "recommended_confidence_ceiling" }, 0.58, "merge confidence ceiling should be capped by weak debug chunks");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_confidence_policy", "ceiling_reasons" }, "confidence ceiling reasons should be an array");
+    ExpectJsonBooleanValue(mergeFactsJson, { "chunking", "merge_confidence_policy", "requires_uncertainty" }, true, "merge confidence policy should require uncertainty");
+    ExpectJsonBooleanValue(mergeFactsJson, { "chunking", "merge_confidence_policy", "can_report_high_confidence" }, false, "merge confidence policy should block high confidence");
+    ExpectJsonStringArrayContains(mergeFactsJson, { "chunking", "merge_confidence_policy", "ceiling_reasons" }, "low_confidence_chunk_summary", "confidence ceiling reasons should include low-confidence chunk summary");
+    ExpectJsonStringArrayContains(mergeFactsJson, { "chunking", "merge_confidence_policy", "ceiling_reasons" }, "weak_chunk_evidence", "confidence ceiling reasons should include weak chunk evidence");
+
+    ExpectJsonObjectPath(mergeFactsJson, { "chunking", "merge_acceptance_checks" }, "chunking.merge_acceptance_checks should be an object");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_acceptance_checks", "acceptance_checks" }, "merge acceptance checks should be an array");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_acceptance_checks", "blocking_issues" }, "merge blocking issues should be an array");
+    ExpectJsonBooleanValue(mergeFactsJson, { "chunking", "merge_acceptance_checks", "must_bound_confidence" }, true, "merge acceptance checks should require confidence bounding");
+    ExpectJsonBooleanValue(mergeFactsJson, { "chunking", "merge_acceptance_checks", "ready_for_high_confidence_merge" }, false, "merge acceptance checks should block high-confidence merge");
+    ExpectJsonStringArrayContains(mergeFactsJson, { "chunking", "merge_acceptance_checks", "blocking_issues" }, "uncertain_or_low_confidence_summary", "merge blocking issues should include low-confidence summary");
+    ExpectJsonStringArrayContains(mergeFactsJson, { "chunking", "merge_acceptance_checks", "blocking_issues" }, "weak_chunk_evidence", "merge blocking issues should include weak chunk evidence");
+
+    ExpectJsonObjectPath(mergeFactsJson, { "chunking", "merge_output_contract" }, "chunking.merge_output_contract should be an object");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_output_contract", "required_top_level_keys" }, "merge required top-level keys should be an array");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_output_contract", "required_evidence_keys" }, "merge required evidence keys should be an array");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_output_contract", "blocked_merge_rules" }, "merge blocked output rules should be an array");
+    ExpectJsonStringArrayContains(mergeFactsJson, { "chunking", "merge_output_contract", "required_top_level_keys" }, "pseudo_c", "merge output contract should require pseudo_c");
+    ExpectJsonStringArrayContains(mergeFactsJson, { "chunking", "merge_output_contract", "required_top_level_keys" }, "confidence", "merge output contract should require confidence");
+
+    ExpectJsonObjectPath(mergeFactsJson, { "chunking", "merge_traceability_matrix" }, "chunking.merge_traceability_matrix should be an object");
+    ExpectJsonNumberPath(mergeFactsJson, { "chunking", "merge_traceability_matrix", "target_count" }, "traceability target count should be numeric");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_traceability_matrix", "targets" }, "traceability targets should be an array");
+    ExpectJsonBooleanValue(mergeFactsJson, { "chunking", "merge_traceability_matrix", "requires_source_path_review" }, true, "traceability matrix should require source path review");
+
+    ExpectJsonObjectPath(mergeFactsJson, { "chunking", "merge_obfuscation_policy" }, "chunking.merge_obfuscation_policy should be an object");
+    ExpectJsonBooleanValue(mergeFactsJson, { "chunking", "merge_obfuscation_policy", "has_flattening_dispatcher" }, true, "merge obfuscation policy should flag flattening dispatcher");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_obfuscation_policy", "obfuscation_rewrite_rules" }, "obfuscation rewrite rules should be an array");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_obfuscation_policy", "obfuscation_uncertainty_rules" }, "obfuscation uncertainty rules should be an array");
+    ExpectJsonNumberPath(mergeFactsJson, { "chunking", "merge_obfuscation_policy", "semantic_overlay_confidence_threshold" }, "semantic overlay confidence threshold should be numeric");
+    ExpectJsonStringArrayContains(mergeFactsJson, { "chunking", "merge_obfuscation_policy", "obfuscation_rewrite_rules" }, "prefer_semantic_overlay_edges", "obfuscation rewrite rules should prefer semantic overlay edges");
+
+    ExpectJsonObjectPath(mergeFactsJson, { "chunking", "merge_deobfuscation_plan" }, "chunking.merge_deobfuscation_plan should be an object");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_deobfuscation_plan", "deobfuscation_actions" }, "deobfuscation actions should be an array");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_deobfuscation_plan", "priority_fact_paths" }, "deobfuscation priority fact paths should be an array");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_deobfuscation_plan", "blocked_assumptions" }, "blocked deobfuscation assumptions should be an array");
+    ExpectJsonBooleanPath(mergeFactsJson, { "chunking", "merge_deobfuscation_plan", "safe_to_rewrite_obfuscated_cfg" }, "obfuscated CFG rewrite safety flag should be boolean");
+    ExpectJsonStringArrayContains(mergeFactsJson, { "chunking", "merge_deobfuscation_plan", "deobfuscation_actions" }, "apply_semantic_control_flow_overlay", "deobfuscation plan should apply semantic CFG overlay");
+    ExpectJsonStringArrayContains(mergeFactsJson, { "chunking", "merge_deobfuscation_plan", "blocked_assumptions" }, "raw_dispatcher_loop_is_source_loop", "deobfuscation plan should block raw dispatcher loop assumption");
+
+    ExpectJsonObjectPath(mergeFactsJson, { "chunking", "merge_deobfuscation_output_contract" }, "chunking.merge_deobfuscation_output_contract should be an object");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_deobfuscation_output_contract", "output_rules" }, "deobfuscation output rules should be an array");
+    ExpectJsonBooleanValue(mergeFactsJson, { "chunking", "merge_deobfuscation_output_contract", "requires_pseudo_c_deobfuscation_review" }, true, "deobfuscation output contract should require pseudo-C review");
+    ExpectJsonBooleanValue(mergeFactsJson, { "chunking", "merge_deobfuscation_output_contract", "requires_rewrite_evidence" }, true, "deobfuscation output contract should require rewrite evidence");
+    ExpectJsonBooleanPath(mergeFactsJson, { "chunking", "merge_deobfuscation_output_contract", "safe_to_emit_deobfuscated_structure" }, "deobfuscated structure safety flag should be boolean");
+
+    ExpectJsonObjectPath(mergeFactsJson, { "chunking", "merge_deobfuscation_conflict_policy" }, "chunking.merge_deobfuscation_conflict_policy should be an object");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_deobfuscation_conflict_policy", "priority_order" }, "deobfuscation conflict priority order should be an array");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_deobfuscation_conflict_policy", "conflict_checks" }, "deobfuscation conflict checks should be an array");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_deobfuscation_conflict_policy", "confidence_downgrade_reasons" }, "deobfuscation confidence downgrade reasons should be an array");
+    ExpectJsonArrayPath(mergeFactsJson, { "chunking", "merge_deobfuscation_conflict_policy", "required_evidence_paths" }, "deobfuscation conflict evidence paths should be an array");
+    ExpectJsonBooleanValue(mergeFactsJson, { "chunking", "merge_deobfuscation_conflict_policy", "requires_uncertainty_on_conflict" }, true, "deobfuscation conflict policy should require uncertainty on conflict");
+    ExpectJsonStringArrayContains(mergeFactsJson, { "chunking", "merge_deobfuscation_conflict_policy", "priority_order" }, "high_confidence_semantic_overlay", "deobfuscation conflict priority should prefer high-confidence semantic overlay");
+    ExpectJsonStringArrayContains(mergeFactsJson, { "chunking", "merge_deobfuscation_conflict_policy", "conflict_checks" }, "semantic_overlay_vs_raw_successors", "deobfuscation conflict checks should compare semantic overlay with raw successors");
     Expect(mergePromptDump.find("\"first_block\"") != std::string::npos, "merge prompt should include chunk first-block provenance");
     Expect(mergePromptDump.find("\"last_block\"") != std::string::npos, "merge prompt should include chunk last-block provenance");
     Expect(mergePromptDump.find("\"block_ids\"") != std::string::npos, "merge prompt should include chunk block ids");
