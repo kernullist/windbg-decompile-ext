@@ -7571,12 +7571,14 @@ bool IsLocalScalarSubstitutionIdiom(const SubstitutionIdiomFact& idiom)
 
 DeobfuscationReadiness BuildDeobfuscationReadiness(
     const ObfuscationFacts& obfuscation,
-    const SemanticControlFlowOverlay& semanticControlFlow)
+    const SemanticControlFlowOverlay& semanticControlFlow,
+    bool deobfuscationEnabled)
 {
     DeobfuscationReadiness readiness;
     uint32_t highConfidenceRecoveredEdges = 0;
     uint32_t highConfidenceSemanticLiveEdges = 0;
 
+    readiness.Enabled = deobfuscationEnabled;
     readiness.DispatcherCount = static_cast<uint32_t>(obfuscation.Dispatchers.size());
     readiness.HasObfuscationFacts = !obfuscation.Dispatchers.empty()
         || !obfuscation.StateVariables.empty()
@@ -7633,10 +7635,30 @@ DeobfuscationReadiness BuildDeobfuscationReadiness(
     readiness.HasHighConfidenceDispatcherEdges = highConfidenceRecoveredEdges != 0;
     readiness.HasOpaqueDeadEdges = readiness.OpaqueDeadEdgeCount != 0;
     readiness.HasSubstitutionIdioms = readiness.SubstitutionIdiomCount != 0;
-    readiness.SafeToRewriteControlFlow = readiness.HasFlatteningDispatcher
+    const bool safeToRewriteControlFlow = readiness.HasFlatteningDispatcher
         && readiness.HasHighConfidenceDispatcherEdges
         && highConfidenceSemanticLiveEdges != 0;
-    readiness.RequiresRawCfgFallbackUncertainty = readiness.HasFlatteningDispatcher && !readiness.SafeToRewriteControlFlow;
+    readiness.SafeToRewriteControlFlow = deobfuscationEnabled && safeToRewriteControlFlow;
+    readiness.RequiresRawCfgFallbackUncertainty = deobfuscationEnabled
+        && readiness.HasFlatteningDispatcher
+        && !safeToRewriteControlFlow;
+
+    if (!deobfuscationEnabled)
+    {
+        if (readiness.HasObfuscationFacts)
+        {
+            AppendUniqueString(readiness.BlockedAssumptions, "deobfuscation_disabled_by_option");
+            AppendUniqueString(readiness.PriorityFactPaths, "control_flow");
+            AppendUniqueString(readiness.PriorityFactPaths, "blocks");
+        }
+        else
+        {
+            AppendUniqueString(readiness.BlockedAssumptions, "deobfuscation_without_obfuscation_facts");
+        }
+
+        readiness.Confidence = 0.0;
+        return readiness;
+    }
 
     if (readiness.HasHighConfidenceDispatcherEdges)
     {
@@ -10479,9 +10501,21 @@ void RefreshDerivedAnalysisFacts(AnalysisFacts& facts)
         facts.Switches);
     AppendSubstitutionIdioms(facts.Obfuscation, substitutionIdioms);
     facts.SemanticControlFlow = BuildSemanticControlFlowOverlay(facts.Obfuscation);
-    facts.DeobfuscationReadiness = BuildDeobfuscationReadiness(facts.Obfuscation, facts.SemanticControlFlow);
-    const std::vector<BasicBlock> semanticBlocks = BuildBlocksWithSemanticControlFlow(facts.Blocks, facts.SemanticControlFlow);
-    facts.ControlFlow = AnalyzeControlFlow(facts.Instructions, semanticBlocks, facts.NormalizedConditions, facts.Switches);
+    facts.DeobfuscationReadiness = BuildDeobfuscationReadiness(
+        facts.Obfuscation,
+        facts.SemanticControlFlow,
+        facts.DeobfuscationReadiness.Enabled);
+    std::vector<BasicBlock> controlFlowBlocks;
+    if (facts.DeobfuscationReadiness.Enabled)
+    {
+        controlFlowBlocks = BuildBlocksWithSemanticControlFlow(facts.Blocks, facts.SemanticControlFlow);
+    }
+    else
+    {
+        controlFlowBlocks = facts.Blocks;
+    }
+
+    facts.ControlFlow = AnalyzeControlFlow(facts.Instructions, controlFlowBlocks, facts.NormalizedConditions, facts.Switches);
     RefreshEvidenceGraph(facts);
 }
 
@@ -10774,7 +10808,9 @@ void AppendAnalysisFactSummaries(AnalysisFacts& facts)
     if (facts.DeobfuscationReadiness.HasObfuscationFacts)
     {
         facts.Facts.push_back(
-            "deobfuscation readiness: safe_actions="
+            "deobfuscation readiness: mode="
+            + std::string(facts.DeobfuscationReadiness.Enabled ? "on" : "off")
+            + ", safe_actions="
             + JoinStrings(facts.DeobfuscationReadiness.SafeActions, ",")
             + ", blocked_assumptions="
             + JoinStrings(facts.DeobfuscationReadiness.BlockedAssumptions, ",")
@@ -10921,9 +10957,21 @@ AnalysisFacts BuildAnalysisFacts(
         facts.Switches);
     AppendSubstitutionIdioms(facts.Obfuscation, substitutionIdioms);
     facts.SemanticControlFlow = BuildSemanticControlFlowOverlay(facts.Obfuscation);
-    facts.DeobfuscationReadiness = BuildDeobfuscationReadiness(facts.Obfuscation, facts.SemanticControlFlow);
-    const std::vector<BasicBlock> semanticBlocks = BuildBlocksWithSemanticControlFlow(facts.Blocks, facts.SemanticControlFlow);
-    facts.ControlFlow = AnalyzeControlFlow(facts.Instructions, semanticBlocks, facts.NormalizedConditions, facts.Switches);
+    facts.DeobfuscationReadiness = BuildDeobfuscationReadiness(
+        facts.Obfuscation,
+        facts.SemanticControlFlow,
+        options.DeobfuscationEnabled);
+    std::vector<BasicBlock> controlFlowBlocks;
+    if (facts.DeobfuscationReadiness.Enabled)
+    {
+        controlFlowBlocks = BuildBlocksWithSemanticControlFlow(facts.Blocks, facts.SemanticControlFlow);
+    }
+    else
+    {
+        controlFlowBlocks = facts.Blocks;
+    }
+
+    facts.ControlFlow = AnalyzeControlFlow(facts.Instructions, controlFlowBlocks, facts.NormalizedConditions, facts.Switches);
     facts.Abi = AnalyzeAbiFacts(instructions, facts.MemoryAccesses, facts.StackFrame, entryAddress);
     facts.TypeHints = CollectTypeRecoveryHints(instructions, facts.MemoryAccesses, facts.RecoveredArguments, facts.RecoveredLocals);
     facts.Idioms = CollectIdiomPatterns(instructions, facts.Calls, facts.MemoryAccesses, facts.Abi);

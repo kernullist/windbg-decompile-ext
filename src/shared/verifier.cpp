@@ -1428,6 +1428,11 @@ void CheckObfuscationClaimSupport(const AnalyzeRequest& request, const AnalyzeRe
 
 void CheckDeobfuscationConflictPolicy(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
 {
+    if (!request.Facts.DeobfuscationReadiness.Enabled)
+    {
+        return;
+    }
+
     if (response.Confidence <= 0.60)
     {
         return;

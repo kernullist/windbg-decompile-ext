@@ -35,6 +35,7 @@ struct DecompOptions
     bool LastDataModelOutput = false;
     bool LastDebugPromptOutput = false;
     bool DisableLlm = false;
+    bool DeobfuscationEnabled = true;
     bool PlanOutput = false;
     bool DoctorOutput = false;
     bool DoctorNetwork = false;
@@ -585,6 +586,7 @@ struct EvidenceGraphFacts
 
 struct DeobfuscationReadiness
 {
+    bool Enabled = true;
     bool HasObfuscationFacts = false;
     bool HasFlatteningDispatcher = false;
     bool HasHighConfidenceDispatcherEdges = false;

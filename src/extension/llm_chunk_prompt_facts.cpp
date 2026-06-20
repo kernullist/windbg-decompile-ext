@@ -2094,6 +2094,7 @@ JsonValue BuildMergeChunkObfuscationPolicyJson(const AnalyzeRequest& request)
     std::vector<std::string> uncertaintyRules;
     size_t highConfidenceSemanticEdgeCount = 0;
     size_t deadSemanticEdgeCount = 0;
+    const bool deobfuscationEnabled = request.Facts.DeobfuscationReadiness.Enabled;
 
     for (const SemanticControlFlowEdge& edge : request.Facts.SemanticControlFlow.Edges)
     {
@@ -2108,17 +2109,31 @@ JsonValue BuildMergeChunkObfuscationPolicyJson(const AnalyzeRequest& request)
         }
     }
 
-    rewriteRules.push_back("prefer_semantic_overlay_edges");
-    rewriteRules.push_back("avoid_raw_dispatcher_loop_as_source_structure");
-    rewriteRules.push_back("prune_only_proven_dead_edges");
-    rewriteRules.push_back("simplify_substitution_idioms_locally");
-    rewriteRules.push_back("fall_back_to_raw_blocks_when_semantic_overlay_is_missing");
+    if (deobfuscationEnabled)
+    {
+        rewriteRules.push_back("prefer_semantic_overlay_edges");
+        rewriteRules.push_back("avoid_raw_dispatcher_loop_as_source_structure");
+        rewriteRules.push_back("prune_only_proven_dead_edges");
+        rewriteRules.push_back("simplify_substitution_idioms_locally");
+        rewriteRules.push_back("fall_back_to_raw_blocks_when_semantic_overlay_is_missing");
+    }
+    else
+    {
+        rewriteRules.push_back("preserve_raw_obfuscated_structure");
+    }
 
     uncertaintyRules.push_back("preserve_unresolved_state_transitions");
     uncertaintyRules.push_back("mark_low_confidence_recovered_edges_uncertain");
     uncertaintyRules.push_back("do_not_infer_dead_edges_without_opaque_predicate_facts");
     uncertaintyRules.push_back("do_not_promote_substitution_idioms_to_source_intent");
 
+    if (!deobfuscationEnabled)
+    {
+        uncertaintyRules.push_back("deobfuscation_disabled_by_option");
+    }
+
+    object.Set("enabled", JsonValue::MakeBoolean(deobfuscationEnabled));
+    object.Set("mode", JsonValue::MakeString(deobfuscationEnabled ? "on" : "off"));
     object.Set("has_obfuscation_facts", JsonValue::MakeBoolean(
         !request.Facts.Obfuscation.Dispatchers.empty()
         || !request.Facts.Obfuscation.OpaquePredicates.empty()
@@ -2127,7 +2142,7 @@ JsonValue BuildMergeChunkObfuscationPolicyJson(const AnalyzeRequest& request)
     object.Set("has_opaque_predicates", JsonValue::MakeBoolean(!request.Facts.Obfuscation.OpaquePredicates.empty()));
     object.Set("has_substitution_idioms", JsonValue::MakeBoolean(!request.Facts.Obfuscation.SubstitutionIdioms.empty()));
     object.Set("has_semantic_overlay", JsonValue::MakeBoolean(!request.Facts.SemanticControlFlow.Edges.empty()));
-    object.Set("can_prefer_semantic_cfg", JsonValue::MakeBoolean(highConfidenceSemanticEdgeCount != 0));
+    object.Set("can_prefer_semantic_cfg", JsonValue::MakeBoolean(deobfuscationEnabled && highConfidenceSemanticEdgeCount != 0));
     object.Set("dispatcher_count", JsonValue::MakeNumber(static_cast<double>(request.Facts.Obfuscation.Dispatchers.size())));
     object.Set("opaque_predicate_count", JsonValue::MakeNumber(static_cast<double>(request.Facts.Obfuscation.OpaquePredicates.size())));
     object.Set("substitution_idiom_count", JsonValue::MakeNumber(static_cast<double>(request.Facts.Obfuscation.SubstitutionIdioms.size())));
@@ -2152,6 +2167,7 @@ JsonValue BuildMergeChunkDeobfuscationPlanJson(const AnalyzeRequest& request)
     const bool hasSubstitutionIdioms = !request.Facts.Obfuscation.SubstitutionIdioms.empty();
     const bool hasSemanticOverlay = !request.Facts.SemanticControlFlow.Edges.empty();
     const bool hasObfuscationFacts = hasDispatchers || hasOpaquePredicates || hasSubstitutionIdioms;
+    const bool deobfuscationEnabled = request.Facts.DeobfuscationReadiness.Enabled;
 
     for (const SemanticControlFlowEdge& edge : request.Facts.SemanticControlFlow.Edges)
     {
@@ -2161,59 +2177,80 @@ JsonValue BuildMergeChunkDeobfuscationPlanJson(const AnalyzeRequest& request)
         }
     }
 
-    if (hasSemanticOverlay)
+    if (deobfuscationEnabled)
     {
-        AppendMergeReviewAction(deobfuscationActions, "apply_semantic_control_flow_overlay");
-        AppendMergeReviewAction(priorityFactPaths, "semantic_control_flow.edges");
+        if (hasSemanticOverlay)
+        {
+            AppendMergeReviewAction(deobfuscationActions, "apply_semantic_control_flow_overlay");
+            AppendMergeReviewAction(priorityFactPaths, "semantic_control_flow.edges");
+        }
+
+        if (hasDispatchers)
+        {
+            AppendMergeReviewAction(deobfuscationActions, "recover_dispatcher_edges");
+            AppendMergeReviewAction(deobfuscationActions, "suppress_dispatcher_loop_shape");
+            AppendMergeReviewAction(priorityFactPaths, "obfuscation.dispatchers.recovered_edges");
+            AppendMergeReviewAction(priorityFactPaths, "obfuscation.dispatchers.state_variable");
+        }
+
+        if (hasOpaquePredicates)
+        {
+            AppendMergeReviewAction(deobfuscationActions, "prune_proven_opaque_dead_edges");
+            AppendMergeReviewAction(priorityFactPaths, "obfuscation.opaque_predicates");
+        }
+
+        if (hasSubstitutionIdioms)
+        {
+            AppendMergeReviewAction(deobfuscationActions, "apply_local_substitution_simplifications");
+            AppendMergeReviewAction(priorityFactPaths, "obfuscation.substitution_idioms");
+        }
+
+        if (hasObfuscationFacts && !hasSemanticOverlay)
+        {
+            AppendMergeReviewAction(deobfuscationActions, "preserve_raw_cfg_fallback_uncertainty");
+            AppendMergeReviewAction(priorityFactPaths, "control_flow");
+            AppendMergeReviewAction(priorityFactPaths, "blocks");
+        }
+
+        if (!hasObfuscationFacts)
+        {
+            AppendMergeReviewAction(deobfuscationActions, "no_deobfuscation_rewrite_required");
+        }
+
+        blockedAssumptions.push_back("raw_dispatcher_loop_is_source_loop");
+        blockedAssumptions.push_back("opaque_branch_is_dead_without_fact");
+        blockedAssumptions.push_back("substitution_idiom_is_source_intent");
+        blockedAssumptions.push_back("low_confidence_semantic_edge_is_structural_truth");
+    }
+    else
+    {
+        if (hasObfuscationFacts)
+        {
+            AppendMergeReviewAction(deobfuscationActions, "preserve_raw_obfuscated_structure");
+            AppendMergeReviewAction(priorityFactPaths, "obfuscation");
+            AppendMergeReviewAction(priorityFactPaths, "control_flow");
+            AppendMergeReviewAction(priorityFactPaths, "blocks");
+        }
+        else
+        {
+            AppendMergeReviewAction(deobfuscationActions, "no_deobfuscation_rewrite_required");
+        }
+
+        blockedAssumptions.push_back("deobfuscation_disabled_by_option");
     }
 
-    if (hasDispatchers)
-    {
-        AppendMergeReviewAction(deobfuscationActions, "recover_dispatcher_edges");
-        AppendMergeReviewAction(deobfuscationActions, "suppress_dispatcher_loop_shape");
-        AppendMergeReviewAction(priorityFactPaths, "obfuscation.dispatchers.recovered_edges");
-        AppendMergeReviewAction(priorityFactPaths, "obfuscation.dispatchers.state_variable");
-    }
-
-    if (hasOpaquePredicates)
-    {
-        AppendMergeReviewAction(deobfuscationActions, "prune_proven_opaque_dead_edges");
-        AppendMergeReviewAction(priorityFactPaths, "obfuscation.opaque_predicates");
-    }
-
-    if (hasSubstitutionIdioms)
-    {
-        AppendMergeReviewAction(deobfuscationActions, "apply_local_substitution_simplifications");
-        AppendMergeReviewAction(priorityFactPaths, "obfuscation.substitution_idioms");
-    }
-
-    if (hasObfuscationFacts && !hasSemanticOverlay)
-    {
-        AppendMergeReviewAction(deobfuscationActions, "preserve_raw_cfg_fallback_uncertainty");
-        AppendMergeReviewAction(priorityFactPaths, "control_flow");
-        AppendMergeReviewAction(priorityFactPaths, "blocks");
-    }
-
-    if (!hasObfuscationFacts)
-    {
-        AppendMergeReviewAction(deobfuscationActions, "no_deobfuscation_rewrite_required");
-    }
-
-    blockedAssumptions.push_back("raw_dispatcher_loop_is_source_loop");
-    blockedAssumptions.push_back("opaque_branch_is_dead_without_fact");
-    blockedAssumptions.push_back("substitution_idiom_is_source_intent");
-    blockedAssumptions.push_back("low_confidence_semantic_edge_is_structural_truth");
-
+    object.Set("enabled", JsonValue::MakeBoolean(deobfuscationEnabled));
+    object.Set("mode", JsonValue::MakeString(deobfuscationEnabled ? "on" : "off"));
     object.Set("deobfuscation_action_count", JsonValue::MakeNumber(static_cast<double>(deobfuscationActions.size())));
     object.Set("deobfuscation_actions", BuildStringArray(deobfuscationActions, 16, nullptr));
     object.Set("priority_fact_paths", BuildStringArray(priorityFactPaths, 16, nullptr));
     object.Set("blocked_assumptions", BuildStringArray(blockedAssumptions, 16, nullptr));
-    object.Set("requires_dispatcher_edge_reconciliation", JsonValue::MakeBoolean(hasDispatchers));
-    object.Set("requires_opaque_dead_edge_pruning", JsonValue::MakeBoolean(hasOpaquePredicates));
-    object.Set("requires_substitution_simplification", JsonValue::MakeBoolean(hasSubstitutionIdioms));
-    object.Set("requires_semantic_overlay_review", JsonValue::MakeBoolean(hasSemanticOverlay));
-    object.Set("requires_raw_cfg_fallback_uncertainty", JsonValue::MakeBoolean(hasObfuscationFacts && !hasSemanticOverlay));
-    object.Set("safe_to_rewrite_obfuscated_cfg", JsonValue::MakeBoolean(!hasObfuscationFacts || highConfidenceSemanticEdgeCount != 0));
+    object.Set("requires_dispatcher_edge_reconciliation", JsonValue::MakeBoolean(deobfuscationEnabled && hasDispatchers));
+    object.Set("requires_opaque_dead_edge_pruning", JsonValue::MakeBoolean(deobfuscationEnabled && hasOpaquePredicates));
+    object.Set("requires_substitution_simplification", JsonValue::MakeBoolean(deobfuscationEnabled && hasSubstitutionIdioms));
+    object.Set("requires_semantic_overlay_review", JsonValue::MakeBoolean(deobfuscationEnabled && hasSemanticOverlay));
+    object.Set("requires_raw_cfg_fallback_uncertainty", JsonValue::MakeBoolean(deobfuscationEnabled && hasObfuscationFacts && !hasSemanticOverlay));
+    object.Set("safe_to_rewrite_obfuscated_cfg", JsonValue::MakeBoolean(deobfuscationEnabled && (!hasObfuscationFacts || highConfidenceSemanticEdgeCount != 0)));
     object.Set("high_confidence_semantic_edge_count", JsonValue::MakeNumber(static_cast<double>(highConfidenceSemanticEdgeCount)));
     object.Set("semantic_overlay_confidence_threshold", JsonValue::MakeNumber(0.75));
     return object;
@@ -2244,6 +2281,7 @@ JsonValue BuildMergeChunkDeobfuscationOutputContractJson(const AnalyzeRequest& r
     const bool hasSubstitutionIdioms = !request.Facts.Obfuscation.SubstitutionIdioms.empty();
     const bool hasSemanticOverlay = !request.Facts.SemanticControlFlow.Edges.empty();
     const bool hasObfuscationFacts = hasDispatchers || hasOpaquePredicates || hasSubstitutionIdioms;
+    const bool deobfuscationEnabled = request.Facts.DeobfuscationReadiness.Enabled;
 
     for (const SemanticControlFlowEdge& edge : request.Facts.SemanticControlFlow.Edges)
     {
@@ -2253,12 +2291,22 @@ JsonValue BuildMergeChunkDeobfuscationOutputContractJson(const AnalyzeRequest& r
         }
     }
 
-    const bool safeToRewriteObfuscatedCfg = !hasObfuscationFacts || highConfidenceSemanticEdgeCount != 0;
+    const bool safeToRewriteObfuscatedCfg = deobfuscationEnabled && (!hasObfuscationFacts || highConfidenceSemanticEdgeCount != 0);
 
-    requirements.push_back(hasSemanticOverlay ? "prefer_semantic_overlay_structure" : "preserve_raw_cfg_fallback_uncertainty");
-    requirements.push_back(hasDispatchers ? "suppress_dispatcher_loop_shape" : "no_dispatcher_rewrite_required");
-    requirements.push_back(hasOpaquePredicates ? "prune_only_proven_opaque_dead_edges" : "no_opaque_edge_pruning_required");
-    requirements.push_back(hasSubstitutionIdioms ? "apply_local_substitution_simplifications" : "no_substitution_simplification_required");
+    if (deobfuscationEnabled)
+    {
+        requirements.push_back(hasSemanticOverlay ? "prefer_semantic_overlay_structure" : "preserve_raw_cfg_fallback_uncertainty");
+        requirements.push_back(hasDispatchers ? "suppress_dispatcher_loop_shape" : "no_dispatcher_rewrite_required");
+        requirements.push_back(hasOpaquePredicates ? "prune_only_proven_opaque_dead_edges" : "no_opaque_edge_pruning_required");
+        requirements.push_back(hasSubstitutionIdioms ? "apply_local_substitution_simplifications" : "no_substitution_simplification_required");
+    }
+    else
+    {
+        requirements.push_back("preserve_raw_obfuscated_structure");
+        requirements.push_back("do_not_emit_deobfuscated_rewrite");
+        requirements.push_back("treat_obfuscation_facts_as_observations_only");
+    }
+
     evidencePaths.push_back("semantic_control_flow.edges");
     evidencePaths.push_back("obfuscation.dispatchers.recovered_edges");
     evidencePaths.push_back("obfuscation.opaque_predicates");
@@ -2267,8 +2315,17 @@ JsonValue BuildMergeChunkDeobfuscationOutputContractJson(const AnalyzeRequest& r
 
     requirements.clear();
     evidencePaths.clear();
-    requirements.push_back("summarize_deobfuscated_structure_when_applied");
-    requirements.push_back("mention_raw_cfg_fallback_when_rewrite_is_unsafe");
+    if (deobfuscationEnabled)
+    {
+        requirements.push_back("summarize_deobfuscated_structure_when_applied");
+        requirements.push_back("mention_raw_cfg_fallback_when_rewrite_is_unsafe");
+    }
+    else
+    {
+        requirements.push_back("summarize_raw_obfuscated_structure_when_relevant");
+        requirements.push_back("mention_deobfuscation_disabled_when_obfuscation_facts_exist");
+    }
+
     evidencePaths.push_back("chunking.merge_deobfuscation_plan.deobfuscation_actions");
     evidencePaths.push_back("chunking.merge_obfuscation_policy.obfuscation_rewrite_rules");
     AppendMergeDeobfuscationOutputRule(outputRules, "summary", requirements, evidencePaths);
@@ -2278,14 +2335,28 @@ JsonValue BuildMergeChunkDeobfuscationOutputContractJson(const AnalyzeRequest& r
     requirements.push_back("carry_unresolved_state_transitions");
     requirements.push_back("carry_low_confidence_semantic_edges");
     requirements.push_back("carry_blocked_deobfuscation_assumptions");
+    if (!deobfuscationEnabled)
+    {
+        requirements.push_back("carry_deobfuscation_disabled_policy");
+    }
+
     evidencePaths.push_back("chunking.merge_deobfuscation_plan.blocked_assumptions");
     evidencePaths.push_back("chunking.merge_obfuscation_policy.obfuscation_uncertainty_rules");
     AppendMergeDeobfuscationOutputRule(outputRules, "uncertainties", requirements, evidencePaths);
 
     requirements.clear();
     evidencePaths.clear();
-    requirements.push_back("cite_obfuscation_or_semantic_overlay_facts_for_rewrites");
-    requirements.push_back("drop_evidence_for_blocked_assumptions");
+    if (deobfuscationEnabled)
+    {
+        requirements.push_back("cite_obfuscation_or_semantic_overlay_facts_for_rewrites");
+        requirements.push_back("drop_evidence_for_blocked_assumptions");
+    }
+    else
+    {
+        requirements.push_back("cite_obfuscation_facts_as_observations_only");
+        requirements.push_back("avoid_rewrite_evidence_claims");
+    }
+
     evidencePaths.push_back("evidence_graph");
     evidencePaths.push_back("semantic_control_flow.edges");
     evidencePaths.push_back("obfuscation.dispatchers");
@@ -2295,17 +2366,28 @@ JsonValue BuildMergeChunkDeobfuscationOutputContractJson(const AnalyzeRequest& r
 
     requirements.clear();
     evidencePaths.clear();
-    requirements.push_back("cap_confidence_when_deobfuscation_rewrite_is_unsafe");
-    requirements.push_back("avoid_high_confidence_for_raw_cfg_fallback");
+    if (deobfuscationEnabled)
+    {
+        requirements.push_back("cap_confidence_when_deobfuscation_rewrite_is_unsafe");
+        requirements.push_back("avoid_high_confidence_for_raw_cfg_fallback");
+    }
+    else
+    {
+        requirements.push_back("avoid_confidence_boost_from_deobfuscation");
+        requirements.push_back("treat_raw_cfg_preservation_as_policy");
+    }
+
     evidencePaths.push_back("chunking.merge_confidence_policy");
     evidencePaths.push_back("chunking.merge_deobfuscation_plan.safe_to_rewrite_obfuscated_cfg");
     AppendMergeDeobfuscationOutputRule(outputRules, "confidence", requirements, evidencePaths);
 
+    object.Set("enabled", JsonValue::MakeBoolean(deobfuscationEnabled));
+    object.Set("mode", JsonValue::MakeString(deobfuscationEnabled ? "on" : "off"));
     object.Set("output_rule_count", JsonValue::MakeNumber(static_cast<double>(outputRules.GetArray().size())));
     object.Set("output_rules", outputRules);
-    object.Set("requires_pseudo_c_deobfuscation_review", JsonValue::MakeBoolean(hasObfuscationFacts));
-    object.Set("requires_deobfuscation_uncertainty", JsonValue::MakeBoolean(hasObfuscationFacts && !safeToRewriteObfuscatedCfg));
-    object.Set("requires_rewrite_evidence", JsonValue::MakeBoolean(hasObfuscationFacts));
+    object.Set("requires_pseudo_c_deobfuscation_review", JsonValue::MakeBoolean(deobfuscationEnabled && hasObfuscationFacts));
+    object.Set("requires_deobfuscation_uncertainty", JsonValue::MakeBoolean(deobfuscationEnabled && hasObfuscationFacts && !safeToRewriteObfuscatedCfg));
+    object.Set("requires_rewrite_evidence", JsonValue::MakeBoolean(deobfuscationEnabled && hasObfuscationFacts));
     object.Set("safe_to_emit_deobfuscated_structure", JsonValue::MakeBoolean(safeToRewriteObfuscatedCfg));
     object.Set("has_semantic_overlay_evidence", JsonValue::MakeBoolean(hasSemanticOverlay));
     object.Set("high_confidence_semantic_edge_count", JsonValue::MakeNumber(static_cast<double>(highConfidenceSemanticEdgeCount)));
@@ -2328,6 +2410,7 @@ JsonValue BuildMergeChunkDeobfuscationConflictPolicyJson(const AnalyzeRequest& r
     const bool hasSubstitutionIdioms = !request.Facts.Obfuscation.SubstitutionIdioms.empty();
     const bool hasSemanticOverlay = !request.Facts.SemanticControlFlow.Edges.empty();
     const bool hasObfuscationFacts = hasDispatchers || hasOpaquePredicates || hasSubstitutionIdioms;
+    const bool deobfuscationEnabled = request.Facts.DeobfuscationReadiness.Enabled;
 
     for (const SemanticControlFlowEdge& edge : request.Facts.SemanticControlFlow.Edges)
     {
@@ -2346,35 +2429,54 @@ JsonValue BuildMergeChunkDeobfuscationConflictPolicyJson(const AnalyzeRequest& r
         }
     }
 
-    priorityOrder.push_back("pdb_and_runtime_observations");
-    priorityOrder.push_back("high_confidence_semantic_overlay");
-    priorityOrder.push_back("obfuscation_recovered_edges");
-    priorityOrder.push_back("grounded_chunk_summaries");
-    priorityOrder.push_back("raw_control_flow_fallback");
+    if (deobfuscationEnabled)
+    {
+        priorityOrder.push_back("pdb_and_runtime_observations");
+        priorityOrder.push_back("high_confidence_semantic_overlay");
+        priorityOrder.push_back("obfuscation_recovered_edges");
+        priorityOrder.push_back("grounded_chunk_summaries");
+        priorityOrder.push_back("raw_control_flow_fallback");
 
-    conflictChecks.push_back("semantic_overlay_vs_raw_successors");
-    conflictChecks.push_back("dispatcher_recovered_edges_vs_dispatcher_loop");
-    conflictChecks.push_back("opaque_dead_edges_vs_visible_branch_paths");
-    conflictChecks.push_back("substitution_simplification_vs_original_expression");
-    conflictChecks.push_back("chunk_summary_claims_vs_fact_paths");
+        conflictChecks.push_back("semantic_overlay_vs_raw_successors");
+        conflictChecks.push_back("dispatcher_recovered_edges_vs_dispatcher_loop");
+        conflictChecks.push_back("opaque_dead_edges_vs_visible_branch_paths");
+        conflictChecks.push_back("substitution_simplification_vs_original_expression");
+        conflictChecks.push_back("chunk_summary_claims_vs_fact_paths");
 
-    downgradeReasons.push_back("semantic_overlay_missing");
-    downgradeReasons.push_back("semantic_overlay_low_confidence");
-    downgradeReasons.push_back("dispatcher_edges_unresolved");
-    downgradeReasons.push_back("opaque_dead_edge_unproven");
-    downgradeReasons.push_back("chunk_summary_conflicts_with_facts");
+        downgradeReasons.push_back("semantic_overlay_missing");
+        downgradeReasons.push_back("semantic_overlay_low_confidence");
+        downgradeReasons.push_back("dispatcher_edges_unresolved");
+        downgradeReasons.push_back("opaque_dead_edge_unproven");
+        downgradeReasons.push_back("chunk_summary_conflicts_with_facts");
 
-    requiredEvidencePaths.push_back("semantic_control_flow.edges");
-    requiredEvidencePaths.push_back("obfuscation.dispatchers.recovered_edges");
-    requiredEvidencePaths.push_back("obfuscation.opaque_predicates");
-    requiredEvidencePaths.push_back("obfuscation.substitution_idioms");
-    requiredEvidencePaths.push_back("chunking.merge_traceability_matrix");
-    requiredEvidencePaths.push_back("chunking.merge_deobfuscation_output_contract");
+        requiredEvidencePaths.push_back("semantic_control_flow.edges");
+        requiredEvidencePaths.push_back("obfuscation.dispatchers.recovered_edges");
+        requiredEvidencePaths.push_back("obfuscation.opaque_predicates");
+        requiredEvidencePaths.push_back("obfuscation.substitution_idioms");
+        requiredEvidencePaths.push_back("chunking.merge_traceability_matrix");
+        requiredEvidencePaths.push_back("chunking.merge_deobfuscation_output_contract");
+    }
+    else
+    {
+        priorityOrder.push_back("raw_control_flow_fallback");
+        priorityOrder.push_back("obfuscation_facts_as_observations");
+        priorityOrder.push_back("grounded_chunk_summaries");
 
-    object.Set("requires_conflict_resolution", JsonValue::MakeBoolean(hasObfuscationFacts || hasSemanticOverlay));
-    object.Set("safe_to_prefer_semantic_overlay", JsonValue::MakeBoolean(highConfidenceSemanticEdgeCount != 0));
-    object.Set("requires_raw_cfg_fallback", JsonValue::MakeBoolean(hasObfuscationFacts && highConfidenceSemanticEdgeCount == 0));
-    object.Set("requires_uncertainty_on_conflict", JsonValue::MakeBoolean(hasObfuscationFacts || lowConfidenceSemanticEdgeCount != 0));
+        conflictChecks.push_back("deobfuscation_disabled_policy");
+
+        downgradeReasons.push_back("deobfuscation_disabled_by_option");
+
+        requiredEvidencePaths.push_back("deobfuscation_readiness");
+        requiredEvidencePaths.push_back("obfuscation");
+        requiredEvidencePaths.push_back("control_flow");
+    }
+
+    object.Set("enabled", JsonValue::MakeBoolean(deobfuscationEnabled));
+    object.Set("mode", JsonValue::MakeString(deobfuscationEnabled ? "on" : "off"));
+    object.Set("requires_conflict_resolution", JsonValue::MakeBoolean(deobfuscationEnabled && (hasObfuscationFacts || hasSemanticOverlay)));
+    object.Set("safe_to_prefer_semantic_overlay", JsonValue::MakeBoolean(deobfuscationEnabled && highConfidenceSemanticEdgeCount != 0));
+    object.Set("requires_raw_cfg_fallback", JsonValue::MakeBoolean(deobfuscationEnabled && hasObfuscationFacts && highConfidenceSemanticEdgeCount == 0));
+    object.Set("requires_uncertainty_on_conflict", JsonValue::MakeBoolean(deobfuscationEnabled && (hasObfuscationFacts || lowConfidenceSemanticEdgeCount != 0)));
     object.Set("priority_order", BuildStringArray(priorityOrder, 16, nullptr));
     object.Set("conflict_checks", BuildStringArray(conflictChecks, 16, nullptr));
     object.Set("confidence_downgrade_reasons", BuildStringArray(downgradeReasons, 16, nullptr));

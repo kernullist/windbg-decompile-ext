@@ -948,6 +948,7 @@ JsonValue ToJson(const DeobfuscationReadiness& readiness)
         priorityFactPaths.PushBack(JsonValue::MakeString(path));
     }
 
+    object.Set("enabled", JsonValue::MakeBoolean(readiness.Enabled));
     object.Set("has_obfuscation_facts", JsonValue::MakeBoolean(readiness.HasObfuscationFacts));
     object.Set("has_flattening_dispatcher", JsonValue::MakeBoolean(readiness.HasFlatteningDispatcher));
     object.Set("has_high_confidence_dispatcher_edges", JsonValue::MakeBoolean(readiness.HasHighConfidenceDispatcherEdges));
@@ -1622,6 +1623,7 @@ bool ParseSemanticControlFlowOverlay(const JsonValue& object, SemanticControlFlo
 
 bool ParseDeobfuscationReadiness(const JsonValue& object, DeobfuscationReadiness& readiness)
 {
+    TryGetBool(object, "enabled", readiness.Enabled);
     TryGetBool(object, "has_obfuscation_facts", readiness.HasObfuscationFacts);
     TryGetBool(object, "has_flattening_dispatcher", readiness.HasFlatteningDispatcher);
     TryGetBool(object, "has_high_confidence_dispatcher_edges", readiness.HasHighConfidenceDispatcherEdges);

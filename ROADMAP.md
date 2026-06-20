@@ -24,6 +24,8 @@
 - SIMD/FP ABI 인자 복구와 vector zero-idiom false-positive 억제
 - indirect/virtual call target 후보와 vtable offset metadata
 - PDB 기반 함수/파라미터/로컬/필드/enum/source 힌트
+- OLLVM-style flattening/opaque predicate/substitution facts, semantic CFG overlay, deobfuscation readiness
+- `/deobf:on|off` 기반 난독화 해제 rewrite guidance 제어
 - LLM 단일 패스 + chunked multi-pass 분석
 - ranked fact selection과 spread sampling 기반 prompt 압축
 - loop/switch/no-return/call-argument/evidence grounding을 포함한 verifier 기반 후처리 검증
@@ -113,6 +115,8 @@ P0 분석 코어의 초기 구현은 들어갔지만, 다음 영역은 아직 �
 - 추가 dataflow facts: `block_value_states` live-in/live-out reaching definitions
 - 새 graph facts: high-signal analyzer/PDB/observed facts를 node/edge로 연결하는 `evidence_graph`
 - 새 no-return override: `DECOMP_NORETURN_OVERRIDES`
+- 새 obfuscation facts: flattening dispatcher, state variable, recovered edge, opaque predicate, substitution idiom
+- 새 deobfuscation readiness: safe actions, blocked assumptions, priority fact paths, `/deobf:on|off` mode
 - 새 verifier check: loop/switch/no-return/call argument/evidence grounding claim과 analyzer evidence 대조
 - 새 verifier check: `evidence_graph` node block grounding, edge endpoint consistency, `block_value_states` block/IR reference, unconverged dataflow uncertainty 점검
 - README, ROADMAP, snapshot regression test 반영 완료
@@ -716,6 +720,7 @@ P0 분석 코어의 초기 구현은 들어갔지만, 다음 영역은 아직 �
 - analyzer facts JSON snapshot
 - `ir_values`, `control_flow`, `abi` snapshot
 - `type_hints`, `idioms`, `callee_summaries` snapshot
+- OLLVM-style obfuscation facts, semantic CFG overlay, deobfuscation readiness, `/deobf:off` raw-CFG preservation snapshot
 - `analyzer_skeleton`, `graph_summary` snapshot
 - verifier score snapshot
 - recovered call arguments, SIMD/FP ABI, switch metadata, virtual-call metadata snapshot

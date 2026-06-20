@@ -729,7 +729,7 @@ decomp::AnalysisFacts BuildKnownApiCallFacts()
         instructions);
 }
 
-decomp::AnalysisFacts BuildFlattenedDispatcherFacts()
+decomp::AnalysisFacts BuildFlattenedDispatcherFacts(const decomp::DecompOptions& options)
 {
     decomp::ModuleInfo module;
     module.ModuleName = "snapshot";
@@ -757,7 +757,6 @@ decomp::AnalysisFacts BuildFlattenedDispatcherFacts()
     instructions.push_back(MakeBranch(0x1304D, 0x1304F, "je", 0x13030));
     instructions.push_back(MakeInstruction(0x1304F, 0x13050, "ret"));
 
-    decomp::DecompOptions options;
     return decomp::BuildAnalysisFacts(
         "snapshot!FlattenedDispatcher",
         module,
@@ -768,6 +767,12 @@ decomp::AnalysisFacts BuildFlattenedDispatcherFacts()
         regions,
         bytes,
         instructions);
+}
+
+decomp::AnalysisFacts BuildFlattenedDispatcherFacts()
+{
+    decomp::DecompOptions options;
+    return BuildFlattenedDispatcherFacts(options);
 }
 
 decomp::AnalysisFacts BuildLegitimateStateSwitchFacts()
@@ -1567,12 +1572,13 @@ void TestObfuscationFactsSnapshot()
     Expect(ContainsFactSubstring(facts, "obfuscation state variable: name=rax"), "deterministic facts should describe dispatcher state variable evidence");
     Expect(ContainsFactSubstring(facts, "obfuscation recovered edge: source="), "deterministic facts should describe recovered edge evidence");
     Expect(ContainsFactSubstring(facts, "semantic control-flow overlay: live_edges="), "deterministic facts should summarize semantic CFG overlay evidence");
+    Expect(facts.DeobfuscationReadiness.Enabled, "deobfuscation readiness should default to enabled");
     Expect(facts.DeobfuscationReadiness.HasFlatteningDispatcher, "deobfuscation readiness should flag the flattening dispatcher");
     Expect(facts.DeobfuscationReadiness.HasHighConfidenceDispatcherEdges, "deobfuscation readiness should see high-confidence dispatcher edges");
     Expect(facts.DeobfuscationReadiness.SafeToRewriteControlFlow, "deobfuscation readiness should allow semantic CFG rewrite for recovered flattened flow");
     Expect(ContainsString(facts.DeobfuscationReadiness.SafeActions, "recover_dispatcher_edges"), "deobfuscation readiness should expose dispatcher recovery action");
     Expect(ContainsString(facts.DeobfuscationReadiness.SafeActions, "apply_semantic_control_flow_overlay"), "deobfuscation readiness should expose semantic overlay action");
-    Expect(ContainsFactSubstring(facts, "deobfuscation readiness: safe_actions="), "deterministic facts should summarize deobfuscation readiness");
+    Expect(ContainsFactSubstring(facts, "deobfuscation readiness: mode=on"), "deterministic facts should summarize deobfuscation readiness mode");
     Expect(HasEvidenceNodeKind(facts, "obfuscation.dispatcher"), "evidence graph should expose obfuscation dispatcher nodes");
     Expect(HasEvidenceNodeKind(facts, "obfuscation.state_variable"), "evidence graph should expose obfuscation state-variable nodes");
     Expect(HasEvidenceNodeKind(facts, "obfuscation.recovered_edge"), "evidence graph should expose recovered obfuscation edges");
@@ -1595,6 +1601,7 @@ void TestObfuscationFactsSnapshot()
     Expect(!parsed.Facts.Obfuscation.Dispatchers.empty(), "obfuscation dispatchers should round-trip through protocol JSON");
     Expect(!parsed.Facts.Obfuscation.Dispatchers.empty() && parsed.Facts.Obfuscation.Dispatchers.front().RecoveredEdges.size() >= 2, "recovered obfuscation edges should round-trip through protocol JSON");
     Expect(parsed.Facts.SemanticControlFlow.Edges.size() >= 2, "semantic CFG overlay should round-trip through protocol JSON");
+    Expect(parsed.Facts.DeobfuscationReadiness.Enabled, "deobfuscation readiness enabled flag should round-trip through protocol JSON");
     Expect(parsed.Facts.DeobfuscationReadiness.SafeToRewriteControlFlow, "deobfuscation readiness should round-trip through protocol JSON");
     Expect(ContainsString(parsed.Facts.DeobfuscationReadiness.SafeActions, "recover_dispatcher_edges"), "deobfuscation readiness safe actions should round-trip");
 
@@ -1605,6 +1612,49 @@ void TestObfuscationFactsSnapshot()
     Expect(promptDump.find("\"safe_actions\"") != std::string::npos, "prompt dump should include deobfuscation readiness actions");
     Expect(promptDump.find("semantic edge:") != std::string::npos, "analyzer skeleton should render semantic CFG comments");
     Expect(promptDump.find("\"usage_guidance\"") != std::string::npos, "prompt dump should include obfuscation usage guidance");
+
+    decomp::DecompOptions deobfuscationOffOptions;
+    deobfuscationOffOptions.DeobfuscationEnabled = false;
+    const decomp::AnalysisFacts deobfuscationOffFacts = BuildFlattenedDispatcherFacts(deobfuscationOffOptions);
+    Expect(!deobfuscationOffFacts.DeobfuscationReadiness.Enabled, "deobfuscation readiness should honor disabled option");
+    Expect(deobfuscationOffFacts.DeobfuscationReadiness.HasFlatteningDispatcher, "deobfuscation disabled mode should still detect flattening facts");
+    Expect(deobfuscationOffFacts.DeobfuscationReadiness.HasHighConfidenceDispatcherEdges, "deobfuscation disabled mode should still detect dispatcher edges");
+    Expect(!deobfuscationOffFacts.DeobfuscationReadiness.SafeToRewriteControlFlow, "deobfuscation disabled mode should block control-flow rewrite");
+    Expect(deobfuscationOffFacts.DeobfuscationReadiness.SafeActions.empty(), "deobfuscation disabled mode should not expose rewrite safe actions");
+    Expect(ContainsString(deobfuscationOffFacts.DeobfuscationReadiness.BlockedAssumptions, "deobfuscation_disabled_by_option"), "deobfuscation disabled mode should expose disabled policy");
+
+    decomp::AnalyzeRequest deobfuscationOffRequest;
+    deobfuscationOffRequest.RequestId = "obfuscation_deobf_off_snapshot";
+    deobfuscationOffRequest.Facts = deobfuscationOffFacts;
+
+    const std::string deobfuscationOffSerialized = decomp::SerializeAnalyzeRequest(deobfuscationOffRequest, true);
+    decomp::AnalyzeRequest parsedDeobfuscationOff;
+    Expect(decomp::ParseAnalyzeRequest(deobfuscationOffSerialized, parsedDeobfuscationOff, error), "deobfuscation disabled request should parse after serialization");
+    Expect(!parsedDeobfuscationOff.Facts.DeobfuscationReadiness.Enabled, "deobfuscation disabled flag should round-trip through protocol JSON");
+    Expect(parsedDeobfuscationOff.Facts.DeobfuscationReadiness.HasFlatteningDispatcher, "deobfuscation disabled mode should keep flattening facts after round-trip");
+
+    const std::string deobfuscationOffPromptDump = decomp::BuildDebugPromptDump(deobfuscationOffRequest);
+    Expect(deobfuscationOffPromptDump.find("\"mode\": \"off\"") != std::string::npos, "deobfuscation disabled prompt should expose off mode");
+    Expect(deobfuscationOffPromptDump.find("Deobfuscation is disabled by command option") != std::string::npos, "deobfuscation disabled prompt should explain raw CFG preservation");
+
+    decomp::LlmClientConfig deobfuscationOffChunkConfig;
+    deobfuscationOffChunkConfig.ChunkBlockLimit = 4;
+    deobfuscationOffChunkConfig.ChunkCountLimit = 8;
+
+    const std::string deobfuscationOffMergePromptDump = decomp::BuildDebugMergePromptDump(deobfuscationOffRequest, deobfuscationOffChunkConfig);
+    Expect(!deobfuscationOffMergePromptDump.empty(), "deobfuscation disabled debug merge prompt dump should be available");
+
+    const decomp::JsonValue deobfuscationOffMergeFactsJson = ParseDebugMergeFactsJson(deobfuscationOffMergePromptDump);
+    ExpectJsonBooleanValue(deobfuscationOffMergeFactsJson, { "chunking", "merge_obfuscation_policy", "enabled" }, false, "deobfuscation disabled merge obfuscation policy should expose disabled state");
+    ExpectJsonBooleanValue(deobfuscationOffMergeFactsJson, { "chunking", "merge_obfuscation_policy", "has_flattening_dispatcher" }, true, "deobfuscation disabled merge policy should keep flattening facts visible");
+    ExpectJsonStringArrayContains(deobfuscationOffMergeFactsJson, { "chunking", "merge_obfuscation_policy", "obfuscation_rewrite_rules" }, "preserve_raw_obfuscated_structure", "deobfuscation disabled merge policy should preserve raw obfuscated structure");
+    ExpectJsonStringArrayContains(deobfuscationOffMergeFactsJson, { "chunking", "merge_obfuscation_policy", "obfuscation_uncertainty_rules" }, "deobfuscation_disabled_by_option", "deobfuscation disabled merge policy should expose disabled uncertainty");
+    ExpectJsonBooleanValue(deobfuscationOffMergeFactsJson, { "chunking", "merge_deobfuscation_plan", "enabled" }, false, "deobfuscation disabled merge plan should expose disabled state");
+    ExpectJsonBooleanValue(deobfuscationOffMergeFactsJson, { "chunking", "merge_deobfuscation_plan", "safe_to_rewrite_obfuscated_cfg" }, false, "deobfuscation disabled merge plan should block obfuscated CFG rewrites");
+    ExpectJsonStringArrayContains(deobfuscationOffMergeFactsJson, { "chunking", "merge_deobfuscation_plan", "deobfuscation_actions" }, "preserve_raw_obfuscated_structure", "deobfuscation disabled plan should preserve raw structure");
+    ExpectJsonBooleanValue(deobfuscationOffMergeFactsJson, { "chunking", "merge_deobfuscation_output_contract", "requires_pseudo_c_deobfuscation_review" }, false, "deobfuscation disabled output contract should not require pseudo-C deobfuscation review");
+    ExpectJsonBooleanValue(deobfuscationOffMergeFactsJson, { "chunking", "merge_deobfuscation_output_contract", "safe_to_emit_deobfuscated_structure" }, false, "deobfuscation disabled output contract should block deobfuscated structure");
+    ExpectJsonBooleanValue(deobfuscationOffMergeFactsJson, { "chunking", "merge_deobfuscation_conflict_policy", "requires_conflict_resolution" }, false, "deobfuscation disabled conflict policy should not require rewrite conflict resolution");
 
     const decomp::AnalysisFacts negativeStateSwitchFacts = BuildLegitimateStateSwitchFacts();
     Expect(!negativeStateSwitchFacts.DeobfuscationReadiness.SafeToRewriteControlFlow, "negative state-machine fixture should not mark CFG rewrite safe");

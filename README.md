@@ -29,6 +29,8 @@ This project is a Windows x64 WinDbg extension skeleton that resolves a function
 - type recovery hints for pointer-like values, stack locals, field offsets, scaled-index arrays, enum-like compares, bitflag tests, and vtable candidates
 - idiom and library-pattern facts for memory/string helpers, security cookies, stack probes, allocators, aggregate initializers, and RIP-relative global/import loads
 - call-target facts for direct calls, register/memory indirect calls, virtual-call/vtable-offset candidates, return type, parameter model, side effects, memory effects, ownership hints, and confidence
+- OLLVM-style obfuscation facts for control-flow flattening dispatchers, recovered semantic edges, opaque-predicate dead edges, and scalar instruction-substitution idioms
+- deobfuscation readiness facts plus `/deobf:on|off` control over whether recovered obfuscation facts may guide pseudo-C rewrite
 - evidence graph facts that link high-signal analyzer, PDB, and observed behavior facts back to instruction/block grounding
 - refine-first prompting with an analyzer-generated pseudocode skeleton, graph-aware summaries for CFG regions, conditions, and important blocks, ranked high-signal fact selection, and spread sampling for large fact sets
 - WinDbg DML links for entry/basic-block/evidence/call-target navigation when the output callback supports DML
@@ -147,6 +149,19 @@ Large functions:
 - LLM chunking is controlled by `decomp.llm.json`; the command-line instruction cap controls how much local code the extension attempts to recover before prompting.
 - Legacy `/deep`, `/huge`, and `/maxinsn:N` remain supported.
 
+Obfuscation-aware decompilation:
+
+```text
+!decomp /deobf:on module!FlattenedFunction
+!decomp /deobf:off module!FlattenedFunction
+!decomp /view:facts /deobf:off module!FlattenedFunction
+```
+
+- `/deobf:on` is the default. The analyzer still emits raw facts, but high-confidence OLLVM-style dispatcher recovery, opaque dead-edge proof, substitution idioms, and semantic CFG overlays may guide prompt facts, merge policy, verifier conflict policy, and structured pseudo-C recovery.
+- `/deobf:off` keeps `obfuscation`, `semantic_control_flow`, and `deobfuscation_readiness` facts visible, but disables rewrite safe actions, keeps control-flow structuring on the raw CFG, and tells prompt/merge/verifier paths to preserve the raw obfuscated shape.
+- Use `/deobf:off` when you want to inspect the dispatcher, bogus branch, or substitution surface directly instead of asking the extension to recover a deobfuscated structure.
+- `/deobfuscation:on|off` is accepted as a longer alias.
+
 Cache and replay helpers:
 
 ```text
@@ -244,6 +259,9 @@ Recent analyzer facts are intentionally carried through `/view:json`, `/view:fac
 - `pdb.prototype_parameters` records structured prototype parameter names, types, ordinals, ABI locations, and source confidence.
 - `control_flow` includes loop induction variables, initial values, steps, bounds, direction, switch table address, case targets, default target, range bounds, signedness, and index expression when recovered.
 - `callee_summaries` and call-target facts include direct, indirect, and virtual-call/vtable candidates plus known Win32/NT/Rtl memory, allocation, release, and status semantics.
+- `obfuscation` exposes OLLVM-style flattening dispatcher candidates, state variables, recovered semantic edges, opaque predicates, and scalar substitution idioms.
+- `semantic_control_flow` exposes recovered live/dead edges that are derived from obfuscation facts and remain available for inspection even when `/deobf:off` is used.
+- `deobfuscation_readiness` exposes `enabled`, safe rewrite actions, blocked assumptions, priority fact paths, counts, and confidence. When disabled, it records the policy decision and blocks deobfuscated control-flow rewrite.
 - Prompt fact selection ranks high-signal entries first, then preserves distribution with spread sampling so large functions do not lose all low-frequency evidence.
 
 ## Recommended dbgeng Setup
@@ -327,7 +345,7 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-`decomp_snapshot_tests` covers the analyzer/protocol/verifier contracts for recovered stack arguments, SIMD/FP ABI inputs, vector zero-idiom suppression, loop induction preference, switch metadata, virtual-call metadata, known API summaries, prompt fact selection, and verifier grounding checks.
+`decomp_snapshot_tests` covers the analyzer/protocol/verifier contracts for recovered stack arguments, SIMD/FP ABI inputs, vector zero-idiom suppression, loop induction preference, switch metadata, virtual-call metadata, OLLVM-style obfuscation facts, `/deobf:off` policy, known API summaries, prompt fact selection, and verifier grounding checks.
 
 ### Legacy dbgeng build
 
@@ -733,6 +751,7 @@ Example `/view:json` response details:
 - Prompt facts include `analyzer_skeleton` and `graph_summary` so the model refines an evidence-backed draft instead of starting from a blank page.
 - `graph_summary` provides entry block, control-flow regions, normalized conditions, and representative high-signal blocks with an explicit truncation policy. Prompt fact selection now ranks high-signal entries and uses spread sampling to keep large fact sets representative.
 - `evidence_graph` exposes high-signal fact nodes and provenance edges so IR values, block value states, memory accesses, call targets, type hints, PDB hints, and observed behavior can be traced back to instruction and block evidence.
+- `obfuscation`, `semantic_control_flow`, and `deobfuscation_readiness` expose OLLVM-style recovery facts and whether deobfuscation rewrite guidance is enabled for the current command.
 - The verifier response includes legacy `warnings` plus structured `issues` entries. Each issue carries `severity`, `code`, `message`, and optional `evidence` so tools can filter errors such as `branch.true_target_not_successor` separately from lower-risk warnings.
 - Verifier checks now compare normalized branch true/false targets against CFG successors, compare pseudo-code branch density against recovered conditional branches, cross-check direct callee summaries against pseudo-code call effects, validate evidence-graph node/edge grounding, and check block value state references back to recovered blocks and IR values.
 - Normal and explain output may include a concise `suggested fixes` section. These are conservative `/fix:*` commands derived from verifier issues, PDB-backed rename opportunities, or repeated observed memory hotspots. DML-aware output renders immediately applicable suggestions as clickable rerun links for the same target; placeholder field-type suggestions remain plain text until `TYPE` is replaced.

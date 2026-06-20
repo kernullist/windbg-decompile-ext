@@ -2003,6 +2003,8 @@ JsonValue BuildDeobfuscationReadinessJson(const AnalyzeRequest& request)
 {
     const DeobfuscationReadiness& readiness = request.Facts.DeobfuscationReadiness;
     JsonValue object = JsonValue::MakeObject();
+    object.Set("enabled", JsonValue::MakeBoolean(readiness.Enabled));
+    object.Set("mode", JsonValue::MakeString(readiness.Enabled ? "on" : "off"));
     object.Set("has_obfuscation_facts", JsonValue::MakeBoolean(readiness.HasObfuscationFacts));
     object.Set("has_flattening_dispatcher", JsonValue::MakeBoolean(readiness.HasFlatteningDispatcher));
     object.Set("has_high_confidence_dispatcher_edges", JsonValue::MakeBoolean(readiness.HasHighConfidenceDispatcherEdges));
@@ -2018,9 +2020,19 @@ JsonValue BuildDeobfuscationReadinessJson(const AnalyzeRequest& request)
     object.Set("blocked_assumptions", BuildStringArray(readiness.BlockedAssumptions, 16, nullptr));
     object.Set("priority_fact_paths", BuildStringArray(readiness.PriorityFactPaths, 16, nullptr));
     object.Set("confidence", JsonValue::MakeNumber(readiness.Confidence));
-    object.Set(
-        "usage_guidance",
-        JsonValue::MakeString("Use safe_actions only when the corresponding priority_fact_paths are present; keep blocked_assumptions as uncertainty instead of inventing deobfuscated control flow."));
+    if (readiness.Enabled)
+    {
+        object.Set(
+            "usage_guidance",
+            JsonValue::MakeString("Use safe_actions only when the corresponding priority_fact_paths are present; keep blocked_assumptions as uncertainty instead of inventing deobfuscated control flow."));
+    }
+    else
+    {
+        object.Set(
+            "usage_guidance",
+            JsonValue::MakeString("Deobfuscation is disabled by command option; keep obfuscation facts as evidence, preserve raw CFG shape, and do not apply safe_actions as rewrites."));
+    }
+
     return object;
 }
 

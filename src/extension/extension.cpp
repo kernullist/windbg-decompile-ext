@@ -1286,6 +1286,26 @@ bool ApplyLimitOption(const std::string& rawValue, decomp::DecompOptions& option
     return false;
 }
 
+bool ApplyDeobfuscationOption(const std::string& rawValue, decomp::DecompOptions& options, std::string& error)
+{
+    const std::string value = decomp::ToLowerAscii(decomp::TrimCopy(rawValue));
+
+    if (value == "on")
+    {
+        options.DeobfuscationEnabled = true;
+        return true;
+    }
+
+    if (value == "off")
+    {
+        options.DeobfuscationEnabled = false;
+        return true;
+    }
+
+    error = "invalid deobf value: use on or off";
+    return false;
+}
+
 bool ApplyFixOption(const std::string& rawValue, decomp::DecompOptions& options, std::string& error)
 {
     const size_t separator = rawValue.find(':');
@@ -1615,6 +1635,20 @@ bool ParseCommandLine(const char* args, decomp::DecompOptions& options, std::str
             else if (decomp::StartsWithInsensitive(option, "limit:"))
             {
                 if (!ApplyLimitOption(rawOption.substr(6), options, error))
+                {
+                    break;
+                }
+            }
+            else if (decomp::StartsWithInsensitive(option, "deobf:"))
+            {
+                if (!ApplyDeobfuscationOption(rawOption.substr(6), options, error))
+                {
+                    break;
+                }
+            }
+            else if (decomp::StartsWithInsensitive(option, "deobfuscation:"))
+            {
+                if (!ApplyDeobfuscationOption(rawOption.substr(14), options, error))
                 {
                     break;
                 }
@@ -7136,9 +7170,10 @@ void PrintAnalyzeHistory(IDebugControl* control, IDebugControl4* control4)
 
 void PrintUsage(IDebugControl* control, IDebugControl4* control4)
 {
-    OutputLine(control, control4, "usage: !decomp [/verbose] [/doctor] [/history] [/view:brief|explain|json|facts|prompt|data|window|analyzer|plan] [/last[:N]:explain|facts|json|data|prompt] [/limit:deep|huge|N] [/timeout:N] <addr|module!symbol>\n");
+    OutputLine(control, control4, "usage: !decomp [/verbose] [/doctor] [/history] [/view:brief|explain|json|facts|prompt|data|window|analyzer|plan] [/last[:N]:explain|facts|json|data|prompt] [/limit:deep|huge|N] [/deobf:on|off] [/timeout:N] <addr|module!symbol>\n");
     OutputLine(control, control4, "view : !decomp /view:window opens cached analyzed functions when no target is supplied; /view:window /history does the same explicitly\n");
     OutputLine(control, control4, "fix  : /fix:noreturn:name /fix:type:expr=TYPE /fix:field:expr=TYPE /fix:rename:old=new /fix:clear\n");
+    OutputLine(control, control4, "deobf: /deobf:on enables obfuscation-aware rewrite guidance; /deobf:off keeps facts visible but preserves raw CFG shape\n");
     OutputLine(control, control4, "file : successful LLM results are saved automatically beside decomp.dll under artifact\\ and replayed automatically for the same target and kernel_build\n");
     OutputLine(control, control4, "compat: legacy switches such as /brief, /json, /facts-only, /debug-prompt, /data-model, /last-json, /deep, and /noreturn: still work\n");
     OutputLine(control, control4, "cfg  : decomp.llm.json beside decomp.dll\n");
