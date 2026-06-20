@@ -1975,6 +1975,11 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("bb_other_outside_chunk") == std::string::npos, "chunk graph summary should omit semantic edge targets outside the chunk block set");
     Expect(chunkPromptDump.find("bb_outside_important") == std::string::npos, "chunk graph summary should omit important blocks outside the chunk block set");
 
+    const std::string mergePromptDump = decomp::BuildDebugMergePromptDump(chunkScopedRequest, chunkConfig);
+    Expect(!mergePromptDump.empty(), "debug merge prompt dump should expose merge facts");
+    Expect(mergePromptDump.find("\"type_hints\"") != std::string::npos, "merge prompt should include type hints");
+    Expect(mergePromptDump.find("INSIDE_CHUNK_TYPE_HINT_MARKER") != std::string::npos, "merge prompt should preserve type hints for final synthesis");
+
     const decomp::AnalysisFacts stateSwitchFacts = BuildLegitimateStateSwitchFacts();
     Expect(FindHighConfidenceDispatcher(stateSwitchFacts) == nullptr, "ordinary compare-chain state switch should not become a high-confidence flattening dispatcher");
 
