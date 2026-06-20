@@ -6355,6 +6355,7 @@ JsonValue BuildMergeFactsJson(
     bool obfuscationTruncated = false;
     bool semanticControlFlowTruncated = false;
     bool controlFlowTruncated = false;
+    bool abiTruncated = false;
     bool typeHintsTruncated = false;
     bool idiomsTruncated = false;
     bool calleeSummariesTruncated = false;
@@ -6417,6 +6418,7 @@ JsonValue BuildMergeFactsJson(
     root.Set("obfuscation", BuildObfuscationJson(request, &obfuscationTruncated));
     root.Set("semantic_control_flow", BuildSemanticControlFlowJson(request, &semanticControlFlowTruncated));
     root.Set("control_flow", BuildControlFlowJson(request, &controlFlowTruncated));
+    root.Set("abi", BuildAbiJson(request, &abiTruncated));
     root.Set("type_hints", BuildTypeHintsJson(request, &typeHintsTruncated));
     root.Set("idioms", BuildIdiomsJson(request, &idiomsTruncated));
     root.Set("callee_summaries", BuildCalleeSummariesJson(request, &calleeSummariesTruncated));
@@ -6442,6 +6444,7 @@ JsonValue BuildMergeFactsJson(
     truncation.Set("obfuscation", JsonValue::MakeBoolean(obfuscationTruncated));
     truncation.Set("semantic_control_flow", JsonValue::MakeBoolean(semanticControlFlowTruncated));
     truncation.Set("control_flow", JsonValue::MakeBoolean(controlFlowTruncated));
+    truncation.Set("abi", JsonValue::MakeBoolean(abiTruncated));
     truncation.Set("type_hints", JsonValue::MakeBoolean(typeHintsTruncated));
     truncation.Set("idioms", JsonValue::MakeBoolean(idiomsTruncated));
     truncation.Set("callee_summaries", JsonValue::MakeBoolean(calleeSummariesTruncated));
@@ -6513,7 +6516,7 @@ std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
         "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style. "
         "Use the chunk summaries to produce a fuller function-level pseudocode than a single-pass summary. "
-        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, control_flow, type_hints, idioms, callee_summaries, obfuscation, semantic_control_flow, and pdb facts to preserve semantic names and control-flow intent. "
+        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, control_flow, type_hints, idioms, callee_summaries, abi, obfuscation, semantic_control_flow, and pdb facts to preserve semantic names and control-flow intent. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
         "Prefer reconstructing concrete reads, writes, branches, and helper interactions when the chunk evidence supports them. "
