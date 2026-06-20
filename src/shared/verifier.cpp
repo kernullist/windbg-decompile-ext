@@ -875,6 +875,19 @@ bool HasHighConfidenceDispatcherFact(const AnalysisFacts& facts)
     return false;
 }
 
+bool HasHighConfidenceDispatcherRecovery(const AnalysisFacts& facts)
+{
+    for (const ObfuscationDispatcher& dispatcher : facts.Obfuscation.Dispatchers)
+    {
+        if (dispatcher.Confidence >= 0.75 && !dispatcher.RecoveredEdges.empty())
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool MentionsDispatcherRecoveryClaim(const AnalyzeResponse& response)
 {
     return ContainsInsensitive(response.Summary, "unflatten")
@@ -885,6 +898,16 @@ bool MentionsDispatcherRecoveryClaim(const AnalyzeResponse& response)
         || ContainsInsensitive(response.PseudoC, "control-flow flatten")
         || ((ContainsInsensitive(response.Summary, "dispatcher") || ContainsInsensitive(response.PseudoC, "dispatcher"))
             && (ContainsInsensitive(response.Summary, "recovered") || ContainsInsensitive(response.PseudoC, "recovered")));
+}
+
+bool MentionsRawDispatcherShape(const AnalyzeResponse& response)
+{
+    return ContainsInsensitive(response.Summary, "dispatcher")
+        || ContainsInsensitive(response.PseudoC, "dispatcher")
+        || ContainsInsensitive(response.Summary, "state machine")
+        || ContainsInsensitive(response.PseudoC, "state machine")
+        || ContainsInsensitive(response.Summary, "control-flow flatten")
+        || ContainsInsensitive(response.PseudoC, "control-flow flatten");
 }
 
 bool MentionsOpaqueDeadEdgeClaim(const AnalyzeResponse& response)
@@ -1036,6 +1059,44 @@ void CheckObfuscationClaimSupport(const AnalyzeRequest& request, const AnalyzeRe
             "obfuscation.substitution_memory_semantics_claim",
             "warning",
             "response claims substitution simplification over memory-sensitive semantics; analyzer substitution facts only prove local scalar identities");
+    }
+}
+
+void CheckDeobfuscationConflictPolicy(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
+{
+    if (response.Confidence <= 0.60)
+    {
+        return;
+    }
+
+    const std::vector<ClaimedControlFlowEdge> claimedEdges = CollectClaimedControlFlowEdges(response);
+
+    for (const ClaimedControlFlowEdge& edge : claimedEdges)
+    {
+        if (!edge.Dead && HasOpaqueDeadEdgeEvidence(request.Facts, edge.SourceBlock, edge.TargetBlock))
+        {
+            ++report.FactConflicts;
+            AddIssue(
+                report,
+                "obfuscation.dead_edge_rendered_as_live",
+                "error",
+                "response renders an opaque-predicate-proven dead edge as a live control-flow path",
+                edge.SourceBlock + " -> " + edge.TargetBlock + " in " + edge.Evidence);
+        }
+    }
+
+    if (response.Confidence > 0.70
+        && HasHighConfidenceDispatcherRecovery(request.Facts)
+        && MentionsLoop(response)
+        && MentionsRawDispatcherShape(response)
+        && response.Uncertainties.empty())
+    {
+        ++report.FactConflicts;
+        AddIssue(
+            report,
+            "obfuscation.raw_dispatcher_loop_without_uncertainty",
+            "warning",
+            "high-confidence response presents a recovered flattening dispatcher loop as source logic without uncertainty");
     }
 }
 
@@ -2001,6 +2062,7 @@ VerifyReport VerifyResponse(const AnalyzeRequest& request, AnalyzeResponse& resp
     CheckPseudoBranchDensity(request, response, report);
     CheckSwitchEvidenceConsistency(request, response, report);
     CheckObfuscationClaimSupport(request, response, report);
+    CheckDeobfuscationConflictPolicy(request, response, report);
     CheckClaimedControlFlowEdgeSupport(request, response, report);
     CheckCalleeSummaryConsistency(request, response, report);
     CheckRecoveredCallCoverage(request, response, report);

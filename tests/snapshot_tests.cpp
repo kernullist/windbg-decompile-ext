@@ -3218,6 +3218,49 @@ void TestVerifierCoverageSnapshot()
         const decomp::VerifyReport supportedSemanticEdgeReport = decomp::VerifyResponse(semanticRequest, supportedSemanticEdgeResponse);
         Expect(!HasIssueCode(supportedSemanticEdgeReport, "control_flow.edge_claim_without_evidence"), "verifier should allow recovered semantic CFG edge claims");
     }
+
+    const decomp::AnalysisFacts opaqueFacts = BuildOpaquePredicateFacts();
+    const decomp::SemanticControlFlowEdge* deadSemanticEdge = nullptr;
+
+    for (const decomp::SemanticControlFlowEdge& edge : opaqueFacts.SemanticControlFlow.Edges)
+    {
+        if (edge.Dead && edge.Confidence >= 0.75)
+        {
+            deadSemanticEdge = &edge;
+            break;
+        }
+    }
+
+    Expect(deadSemanticEdge != nullptr, "opaque predicate fixture should expose a high-confidence dead semantic CFG edge");
+
+    if (deadSemanticEdge != nullptr)
+    {
+        decomp::AnalyzeRequest opaqueConflictRequest;
+        opaqueConflictRequest.RequestId = "verifier_dead_edge_live_conflict_snapshot";
+        opaqueConflictRequest.Facts = opaqueFacts;
+
+        decomp::AnalyzeResponse liveDeadEdgeResponse;
+        liveDeadEdgeResponse.Status = "ok";
+        liveDeadEdgeResponse.PseudoC = "void f(void) { /* semantic edge: " + deadSemanticEdge->SourceBlock + " -> " + deadSemanticEdge->TargetBlock + " */ return; }";
+        liveDeadEdgeResponse.Summary = "renders the visible branch path";
+        liveDeadEdgeResponse.Confidence = 0.91;
+
+        const decomp::VerifyReport liveDeadEdgeReport = decomp::VerifyResponse(opaqueConflictRequest, liveDeadEdgeResponse);
+        Expect(HasIssueCode(liveDeadEdgeReport, "obfuscation.dead_edge_rendered_as_live"), "verifier should reject opaque-proven dead edges rendered as live paths");
+    }
+
+    decomp::AnalyzeRequest dispatcherConflictRequest;
+    dispatcherConflictRequest.RequestId = "verifier_raw_dispatcher_loop_snapshot";
+    dispatcherConflictRequest.Facts = flattenedFacts;
+
+    decomp::AnalyzeResponse rawDispatcherLoopResponse;
+    rawDispatcherLoopResponse.Status = "ok";
+    rawDispatcherLoopResponse.PseudoC = "void f(void) { while (dispatcher_state != 3) { dispatcher_state = dispatcher_state + 1; } }";
+    rawDispatcherLoopResponse.Summary = "raw dispatcher state machine loop is the recovered source logic";
+    rawDispatcherLoopResponse.Confidence = 0.91;
+
+    const decomp::VerifyReport rawDispatcherLoopReport = decomp::VerifyResponse(dispatcherConflictRequest, rawDispatcherLoopResponse);
+    Expect(HasIssueCode(rawDispatcherLoopReport, "obfuscation.raw_dispatcher_loop_without_uncertainty"), "verifier should flag raw dispatcher loops emitted without uncertainty");
 }
 
 void TestMergeOutputPolicySnapshot()
