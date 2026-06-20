@@ -216,6 +216,7 @@ add_library(
     SHARED
     src/extension/extension.cpp
     src/extension/llm_client.cpp
+    src/extension/llm_prompt_facts.cpp
     src/extension/llm_verifier_feedback.cpp
     src/extension/decomp.def
     ${DECOMP_VERSION_RESOURCE}
@@ -257,6 +258,7 @@ add_executable(
     decomp_snapshot_tests
     tests/snapshot_tests.cpp
     src/extension/llm_client.cpp
+    src/extension/llm_prompt_facts.cpp
     src/extension/llm_verifier_feedback.cpp
 )
 
