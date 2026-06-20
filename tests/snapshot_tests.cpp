@@ -1987,6 +1987,8 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("INSIDE_CHUNK_CONTROL_FLOW_MARKER") != std::string::npos, "merge prompt should preserve control-flow regions for final synthesis");
     Expect(mergePromptDump.find("\"abi\"") != std::string::npos, "merge prompt should include ABI facts");
     Expect(mergePromptDump.find("CHUNK_ABI_HOME_SLOT_MARKER") != std::string::npos, "merge prompt should preserve ABI facts for final synthesis");
+    Expect(mergePromptDump.find("\"session_policy\"") != std::string::npos, "merge prompt should include session policy facts");
+    Expect(mergePromptDump.find("CHUNK_SESSION_EXECUTION_MARKER") != std::string::npos, "merge prompt should preserve session policy facts for final synthesis");
 
     const decomp::AnalysisFacts stateSwitchFacts = BuildLegitimateStateSwitchFacts();
     Expect(FindHighConfidenceDispatcher(stateSwitchFacts) == nullptr, "ordinary compare-chain state switch should not become a high-confidence flattening dispatcher");
