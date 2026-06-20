@@ -2053,6 +2053,10 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("\"coverage_complete\"") != std::string::npos, "merge prompt should include chunk coverage completeness");
     Expect(mergePromptDump.find("\"uncovered_block_ids\"") != std::string::npos, "merge prompt should include uncovered block ids");
     Expect(mergePromptDump.find("\"chunk_plans\"") != std::string::npos, "merge prompt should include deterministic chunk plans");
+    Expect(mergePromptDump.find("\"summary_alignment\"") != std::string::npos, "merge prompt should include chunk summary alignment metadata");
+    Expect(mergePromptDump.find("\"missing_summary_chunk_ids\"") != std::string::npos, "merge prompt should include missing chunk summary ids");
+    Expect(mergePromptDump.find("\"orphan_summary_chunk_ids\"") != std::string::npos, "merge prompt should include orphan chunk summary ids");
+    Expect(mergePromptDump.find("\"duplicate_summary_chunk_ids\"") != std::string::npos, "merge prompt should include duplicate chunk summary ids");
     Expect(mergePromptDump.find("\"first_block\"") != std::string::npos, "merge prompt should include chunk first-block provenance");
     Expect(mergePromptDump.find("\"last_block\"") != std::string::npos, "merge prompt should include chunk last-block provenance");
     Expect(mergePromptDump.find("\"block_ids\"") != std::string::npos, "merge prompt should include chunk block ids");
