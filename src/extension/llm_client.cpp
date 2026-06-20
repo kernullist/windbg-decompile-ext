@@ -8449,6 +8449,24 @@ std::string BuildVerifierIssueCorrectionHint(const VerificationIssue& issue)
         return "Remove invented control-flow edges unless they are present in raw CFG successors, semantic_control_flow edges, or obfuscation.dispatchers.recovered_edges; otherwise lower confidence and list the missing edge as uncertainty.";
     }
 
+    if (issue.Code == "control_flow.loop_without_back_edge")
+    {
+        return "Do not introduce source-level loops unless recovered raw CFG or semantic_control_flow evidence contains a back edge; keep dispatcher-shaped flow explicit or list loop recovery as uncertainty.";
+    }
+
+    if (issue.Code == "control_flow.switch_without_evidence"
+        || issue.Code == "control_flow.switch_without_case_evidence"
+        || issue.Code == "control_flow.too_many_switch_cases")
+    {
+        return "Do not invent switch structure or extra cases unless grounded by recovered switch facts, case targets, or dispatcher recovered edges; otherwise emit simpler branch structure and uncertainty.";
+    }
+
+    if (issue.Code == "branch.without_evidence"
+        || issue.Code == "branch.too_few_pseudo_conditions")
+    {
+        return "Ground branch structure in normalized_conditions, conditional branch instructions, or semantic_control_flow facts; avoid adding or collapsing branches beyond recovered evidence.";
+    }
+
     if (StartsWithInsensitive(issue.Code, "obfuscation."))
     {
         return "Revise the obfuscation claim using only grounded obfuscation and semantic_control_flow facts, or lower confidence and move the claim to uncertainties.";

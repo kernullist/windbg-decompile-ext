@@ -2919,6 +2919,20 @@ void TestVerifierSnapshot()
 
     Expect(foundSwitchIssue, "verifier snapshot should flag unsupported switch claims");
     Expect(report.AdjustedConfidence < response.Confidence, "verifier snapshot should reduce confidence after fact conflict");
+    const std::string switchFeedbackPrompt = decomp::BuildDebugVerifierFeedbackPrompt(report);
+    Expect(switchFeedbackPrompt.find("recovered switch facts") != std::string::npos, "verifier feedback should name switch fact grounding");
+    Expect(switchFeedbackPrompt.find("dispatcher recovered edges") != std::string::npos, "verifier feedback should mention dispatcher edge grounding for switch recovery");
+
+    decomp::AnalyzeResponse loopResponse;
+    loopResponse.Status = "ok";
+    loopResponse.PseudoC = "void f(void) { while (x) { x--; } }";
+    loopResponse.Summary = "loop path";
+    loopResponse.Confidence = 0.90;
+
+    const decomp::VerifyReport loopReport = decomp::VerifyResponse(request, loopResponse);
+    Expect(HasIssueCode(loopReport, "control_flow.loop_without_back_edge"), "verifier snapshot should flag unsupported loop claims");
+    const std::string loopFeedbackPrompt = decomp::BuildDebugVerifierFeedbackPrompt(loopReport);
+    Expect(loopFeedbackPrompt.find("raw CFG or semantic_control_flow evidence contains a back edge") != std::string::npos, "verifier feedback should name loop back-edge grounding");
 }
 
 void TestVerifierCoverageSnapshot()
