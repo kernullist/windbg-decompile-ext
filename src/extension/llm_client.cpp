@@ -5856,6 +5856,7 @@ JsonValue BuildChunkFactsJson(
     JsonValue stackFrame = JsonValue::MakeObject();
     JsonValue chunk = JsonValue::MakeObject();
     JsonValue truncation = JsonValue::MakeObject();
+    JsonValue selection = JsonValue::MakeObject();
     std::set<uint64_t> instructionAddresses;
     std::set<std::string> blockIds;
     uint64_t startAddress = 0;
@@ -5905,6 +5906,15 @@ JsonValue BuildChunkFactsJson(
     stackFrame.Set("uses_cookie", JsonValue::MakeBoolean(request.Facts.StackFrame.UsesCookie));
     stackFrame.Set("frame_pointer", JsonValue::MakeBoolean(request.Facts.StackFrame.FramePointer));
 
+    selection.Set("chunk_strategy", JsonValue::MakeString("chunk-local high-signal blocks + boundary context + spread sampling"));
+    selection.Set("fact_strategy", JsonValue::MakeString("chunk-scoped facts + global fact carryover + spread sampling"));
+    selection.Set("instruction_window_limit", JsonValue::MakeNumber(static_cast<double>(kPromptInstructionWindowLimit)));
+    selection.Set("chunk_overlap_blocks", JsonValue::MakeNumber(static_cast<double>(kChunkOverlapBlocks)));
+    selection.Set("global_fact_limit", JsonValue::MakeNumber(static_cast<double>(kChunkPromptFactLimit)));
+    selection.Set("global_uncertainty_limit", JsonValue::MakeNumber(static_cast<double>(kChunkPromptUncertaintyLimit)));
+    selection.Set("chunk_block_count", JsonValue::MakeNumber(static_cast<double>(plan.BlockIndices.size())));
+    selection.Set("total_chunks", JsonValue::MakeNumber(static_cast<double>(plan.TotalChunks)));
+
     functionOverview.Set("query_text", JsonValue::MakeString(request.Facts.QueryText));
     functionOverview.Set("entry_address", JsonValue::MakeString(HexU64(request.Facts.EntryAddress)));
     functionOverview.Set("natural_language", naturalLanguage);
@@ -5936,6 +5946,9 @@ JsonValue BuildChunkFactsJson(
         chunk.Set("last_block", JsonValue::MakeString(request.Facts.Blocks[plan.BlockIndices.back()].Id));
     }
 
+    root.Set("arch", JsonValue::MakeString(request.Facts.Arch));
+    root.Set("mode", JsonValue::MakeString(request.Facts.Mode == AnalysisMode::LiveMemory ? "live" : "file"));
+    root.Set("selection", selection);
     root.Set("function_overview", functionOverview);
     root.Set("chunk", chunk);
     root.Set("analyzer_skeleton", JsonValue::MakeString(BuildChunkAnalyzerSkeletonPseudoC(request, plan, blockIds, instructionAddresses)));
@@ -6501,7 +6514,7 @@ std::string BuildChunkSystemPrompt(const AnalyzeRequest& request)
         "Write summary_localized and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_steps, state_updates, observed_calls, observed_memory, identifiers, and API names in English or C-style. "
         "Do not invent external call targets that are not present in the input. "
-        "Use analyzer_skeleton, recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, block_value_states, normalized_conditions, control_flow, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, data_references, call_targets, type_hints, idioms, callee_summaries, evidence_graph, and pdb facts as high-signal semantic hints when present. "
+        "Use selection, analyzer_skeleton, recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, block_value_states, normalized_conditions, control_flow, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, data_references, call_targets, type_hints, idioms, callee_summaries, evidence_graph, and pdb facts as high-signal semantic hints when present. "
         "Treat analyzer_skeleton as a chunk-local refinement scaffold, not as finished source. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Use control_flow loop, branch, and switch region metadata as structure evidence without inventing unsupported regions. "
@@ -6533,7 +6546,7 @@ std::string BuildChunkUserPrompt(
     prompt += ".\n";
     prompt += "3. Keep pseudo_steps and state_updates concrete and operation-focused.\n";
     prompt += "4. Preserve visible reads, writes, comparisons, and branches instead of replacing them with generic comments.\n";
-    prompt += "5. Use analyzer_skeleton, recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, block_value_states, normalized_conditions, control_flow, abi, session_policy, observed_behavior, data_references, call_targets, type_hints, idioms, callee_summaries, and pdb facts when they improve naming, stack-frame context, reaching-value state, region structure, calling convention, session constraints, observed runtime state, expression simplification, or type/side-effect hints.\n";
+    prompt += "5. Use selection, analyzer_skeleton, recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, block_value_states, normalized_conditions, control_flow, abi, session_policy, observed_behavior, data_references, call_targets, type_hints, idioms, callee_summaries, and pdb facts when they improve naming, prompt-coverage-aware uncertainty, stack-frame context, reaching-value state, region structure, calling convention, session constraints, observed runtime state, expression simplification, or type/side-effect hints.\n";
     prompt += "6. If the chunk is partial, say what is missing, but still describe the concrete work visible in this chunk.\n";
     prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
     prompt += "8. evidence.blocks must reference only block ids present in this chunk.\n";

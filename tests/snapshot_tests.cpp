@@ -1978,6 +1978,13 @@ void TestObfuscationFactsSnapshot()
     chunkConfig.ChunkCountLimit = 8;
     const std::string chunkPromptDump = decomp::BuildDebugFirstChunkPromptDump(chunkScopedRequest, chunkConfig);
     Expect(!chunkPromptDump.empty(), "debug chunk prompt dump should expose the first chunk prompt");
+    Expect(chunkPromptDump.find("\"arch\"") != std::string::npos, "chunk prompt should include analysis architecture");
+    Expect(chunkPromptDump.find("MERGE_ARCH_MARKER") != std::string::npos, "chunk prompt should preserve analysis architecture");
+    Expect(chunkPromptDump.find("\"mode\"") != std::string::npos, "chunk prompt should include analysis mode");
+    Expect(chunkPromptDump.find("\"live\"") != std::string::npos, "chunk prompt should preserve live analysis mode");
+    Expect(chunkPromptDump.find("\"selection\"") != std::string::npos, "chunk prompt should include prompt selection metadata");
+    Expect(chunkPromptDump.find("\"chunk_strategy\"") != std::string::npos, "chunk prompt should describe chunk selection strategy");
+    Expect(chunkPromptDump.find("chunk-scoped facts + global fact carryover + spread sampling") != std::string::npos, "chunk prompt should preserve chunk fact selection strategy");
     Expect(chunkPromptDump.find("\"analyzer_skeleton\"") != std::string::npos, "chunk prompt should include the analyzer skeleton");
     Expect(chunkPromptDump.find("chunk analyzer skeleton") != std::string::npos, "chunk analyzer skeleton should be chunk-local");
     Expect(chunkPromptDump.find("\"scope\":\"chunk\"") != std::string::npos, "chunk prompt obfuscation facts should be marked as chunk-scoped");
