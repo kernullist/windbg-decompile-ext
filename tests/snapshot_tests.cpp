@@ -1711,6 +1711,20 @@ void TestObfuscationFactsSnapshot()
     insideChunkMemoryAccess.StackPointerDelta = 0x13579B;
     chunkScopedRequest.Facts.MemoryAccesses.insert(chunkScopedRequest.Facts.MemoryAccesses.begin(), insideChunkMemoryAccess);
 
+    decomp::SwitchInfo mergeSwitch;
+    mergeSwitch.Site = 0x7777D010;
+    mergeSwitch.TableAddress = 0x7777D000;
+    mergeSwitch.CaseCount = 2;
+    mergeSwitch.DefaultTarget = 0x7777D0FF;
+    mergeSwitch.RangeMin = 0;
+    mergeSwitch.RangeMax = 1;
+    mergeSwitch.RangeKnown = true;
+    mergeSwitch.Detail = "MERGE_SWITCH_MARKER";
+    mergeSwitch.IndexExpression = "merge_switch_state";
+    mergeSwitch.CaseTargets.push_back(0x7777D020);
+    mergeSwitch.CaseTargets.push_back(0x7777D030);
+    chunkScopedRequest.Facts.Switches.insert(chunkScopedRequest.Facts.Switches.begin(), mergeSwitch);
+
     decomp::StackPointerFact outsideChunkStackPointer;
     outsideChunkStackPointer.Site = 0x77770020;
     outsideChunkStackPointer.DeltaBefore = 0x7ABCDE;
@@ -2013,6 +2027,8 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("INSIDE_CHUNK_MEMORY_ACCESS_MARKER") != std::string::npos, "merge prompt should preserve memory access facts for final synthesis");
     Expect(mergePromptDump.find("\"ir_values\"") != std::string::npos, "merge prompt should include IR value facts");
     Expect(mergePromptDump.find("INSIDE_CHUNK_IR_TARGET_MARKER") != std::string::npos, "merge prompt should preserve IR value facts for final synthesis");
+    Expect(mergePromptDump.find("\"switches\"") != std::string::npos, "merge prompt should include switch facts");
+    Expect(mergePromptDump.find("MERGE_SWITCH_MARKER") != std::string::npos, "merge prompt should preserve switch facts for final synthesis");
 
     const decomp::AnalysisFacts stateSwitchFacts = BuildLegitimateStateSwitchFacts();
     Expect(FindHighConfidenceDispatcher(stateSwitchFacts) == nullptr, "ordinary compare-chain state switch should not become a high-confidence flattening dispatcher");
