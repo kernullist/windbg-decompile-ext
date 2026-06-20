@@ -1979,6 +1979,8 @@ void TestObfuscationFactsSnapshot()
     Expect(!mergePromptDump.empty(), "debug merge prompt dump should expose merge facts");
     Expect(mergePromptDump.find("\"type_hints\"") != std::string::npos, "merge prompt should include type hints");
     Expect(mergePromptDump.find("INSIDE_CHUNK_TYPE_HINT_MARKER") != std::string::npos, "merge prompt should preserve type hints for final synthesis");
+    Expect(mergePromptDump.find("\"idioms\"") != std::string::npos, "merge prompt should include idiom facts");
+    Expect(mergePromptDump.find("INSIDE_CHUNK_IDIOM_MARKER") != std::string::npos, "merge prompt should preserve idioms for final synthesis");
 
     const decomp::AnalysisFacts stateSwitchFacts = BuildLegitimateStateSwitchFacts();
     Expect(FindHighConfidenceDispatcher(stateSwitchFacts) == nullptr, "ordinary compare-chain state switch should not become a high-confidence flattening dispatcher");
