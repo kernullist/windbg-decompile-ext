@@ -1205,6 +1205,53 @@ decomp::AnalysisFacts BuildSubstitutionFacts()
         instructions);
 }
 
+decomp::AnalysisFacts BuildOllvmLikeObfuscatedFacts()
+{
+    decomp::ModuleInfo module;
+    module.ModuleName = "snapshot";
+    module.ImageName = "snapshot.exe";
+    module.Base = 0x1a000;
+    module.Size = 0x1000;
+
+    std::vector<decomp::FunctionRegion> regions = { { 0x1a000, 0x1a0a0 } };
+    std::vector<uint8_t> bytes(0xa0, 0x90);
+    std::vector<decomp::DisassembledInstruction> instructions;
+    instructions.push_back(MakeInstruction(0x1a000, 0x1a005, "mov", "eax, 0"));
+    instructions.push_back(MakeBranch(0x1a005, 0x1a007, "jmp", 0x1a080));
+    instructions.push_back(MakeInstruction(0x1a010, 0x1a013, "cmp", "ecx, ecx"));
+    instructions.push_back(MakeBranch(0x1a013, 0x1a015, "je", 0x1a020));
+    instructions.push_back(MakeInstruction(0x1a015, 0x1a01a, "mov", "r9d, 0xDEAD"));
+    instructions.push_back(MakeBranch(0x1a01a, 0x1a01c, "jmp", 0x1a080));
+    instructions.push_back(MakeInstruction(0x1a020, 0x1a023, "add", "edx, 1"));
+    instructions.push_back(MakeInstruction(0x1a023, 0x1a026, "add", "edx, 0"));
+    instructions.push_back(MakeInstruction(0x1a026, 0x1a029, "xor", "edx, 0"));
+    instructions.push_back(MakeInstruction(0x1a029, 0x1a02e, "mov", "eax, 1"));
+    instructions.push_back(MakeBranch(0x1a02e, 0x1a030, "jmp", 0x1a080));
+    instructions.push_back(MakeInstruction(0x1a040, 0x1a043, "add", "edx, 2"));
+    instructions.push_back(MakeInstruction(0x1a043, 0x1a048, "mov", "eax, 2"));
+    instructions.push_back(MakeBranch(0x1a048, 0x1a04a, "jmp", 0x1a080));
+    instructions.push_back(MakeInstruction(0x1a060, 0x1a061, "ret"));
+    instructions.push_back(MakeInstruction(0x1a080, 0x1a083, "cmp", "eax, 0"));
+    instructions.push_back(MakeBranch(0x1a083, 0x1a085, "je", 0x1a010));
+    instructions.push_back(MakeInstruction(0x1a085, 0x1a088, "cmp", "eax, 1"));
+    instructions.push_back(MakeBranch(0x1a088, 0x1a08a, "je", 0x1a040));
+    instructions.push_back(MakeInstruction(0x1a08a, 0x1a08d, "cmp", "eax, 2"));
+    instructions.push_back(MakeBranch(0x1a08d, 0x1a08f, "je", 0x1a060));
+    instructions.push_back(MakeInstruction(0x1a08f, 0x1a090, "ret"));
+
+    decomp::DecompOptions options;
+    return decomp::BuildAnalysisFacts(
+        "snapshot!OllvmLikeObfuscated",
+        module,
+        decomp::DebugSessionKind::User,
+        options,
+        0x1a000,
+        0x1a000,
+        regions,
+        bytes,
+        instructions);
+}
+
 void TestAnalyzerSnapshot()
 {
     decomp::AnalysisFacts facts = BuildDiamondFacts();
@@ -2483,6 +2530,97 @@ void TestObfuscationFactsSnapshot()
     const std::string phase3PromptDump = decomp::BuildDebugPromptDump(obfuscationRequest);
     Expect(phase3PromptDump.find("\"substitution_idioms\"") != std::string::npos, "prompt dump should include substitution idioms");
     Expect(phase3PromptDump.find("substitution:") != std::string::npos, "analyzer skeleton should render substitution comments");
+
+    const decomp::AnalysisFacts ollvmFacts = BuildOllvmLikeObfuscatedFacts();
+    const decomp::ObfuscationDispatcher* ollvmDispatcher = FindHighConfidenceDispatcher(ollvmFacts);
+    bool foundOllvmOpaquePredicate = false;
+    bool foundOllvmSubstitution = false;
+    bool foundOllvmRecoveredEdge = false;
+    bool foundOllvmDeadEdge = false;
+
+    Expect(ollvmDispatcher != nullptr, "OLLVM-like fixture should recover a high-confidence flattening dispatcher");
+    Expect(ollvmDispatcher != nullptr && ollvmDispatcher->RecoveredEdges.size() >= 2, "OLLVM-like fixture should recover dispatcher semantic edges");
+
+    for (const decomp::OpaquePredicateFact& predicate : ollvmFacts.Obfuscation.OpaquePredicates)
+    {
+        if (predicate.ConstantResult == "true" && !predicate.DeadTargetBlock.empty())
+        {
+            foundOllvmOpaquePredicate = true;
+        }
+    }
+
+    for (const decomp::SubstitutionIdiomFact& idiom : ollvmFacts.Obfuscation.SubstitutionIdioms)
+    {
+        if (idiom.Pattern == "identity_add_zero" || idiom.Pattern == "identity_xor_zero")
+        {
+            foundOllvmSubstitution = true;
+        }
+    }
+
+    for (const decomp::SemanticControlFlowEdge& edge : ollvmFacts.SemanticControlFlow.Edges)
+    {
+        if (edge.Source == "obfuscation.recovered_edge" && !edge.Dead)
+        {
+            foundOllvmRecoveredEdge = true;
+        }
+        else if (edge.Source == "obfuscation.opaque_predicate.dead" && edge.Dead)
+        {
+            foundOllvmDeadEdge = true;
+        }
+    }
+
+    Expect(foundOllvmOpaquePredicate, "OLLVM-like fixture should recover bogus-control opaque predicate evidence");
+    Expect(foundOllvmSubstitution, "OLLVM-like fixture should recover scalar substitution idiom evidence");
+    Expect(foundOllvmRecoveredEdge, "OLLVM-like semantic CFG should include recovered flattened edges");
+    Expect(foundOllvmDeadEdge, "OLLVM-like semantic CFG should include proven opaque dead edges");
+    Expect(ContainsFactSubstring(ollvmFacts, "obfuscation dispatcher: header="), "OLLVM-like facts should describe dispatcher evidence");
+    Expect(ContainsFactSubstring(ollvmFacts, "obfuscation opaque predicate: "), "OLLVM-like facts should describe opaque predicate evidence");
+    Expect(ContainsFactSubstring(ollvmFacts, "obfuscation substitution: "), "OLLVM-like facts should describe substitution evidence");
+    Expect(HasEvidenceNodeKind(ollvmFacts, "obfuscation.dispatcher"), "OLLVM-like evidence graph should expose dispatcher nodes");
+    Expect(HasEvidenceNodeKind(ollvmFacts, "obfuscation.opaque_predicate"), "OLLVM-like evidence graph should expose opaque predicate nodes");
+    Expect(HasEvidenceNodeKind(ollvmFacts, "obfuscation.substitution_idiom"), "OLLVM-like evidence graph should expose substitution nodes");
+    Expect(HasEvidenceEdgeRelation(ollvmFacts, "simplifies"), "OLLVM-like evidence graph should link substitution simplifications");
+
+    decomp::AnalyzeRequest ollvmRequest;
+    ollvmRequest.RequestId = "obfuscation_ollvm_like_snapshot";
+    ollvmRequest.Facts = ollvmFacts;
+
+    const std::string ollvmPromptDump = decomp::BuildDebugPromptDump(ollvmRequest);
+    Expect(ollvmPromptDump.find("\"dispatchers\"") != std::string::npos, "OLLVM-like prompt should include dispatcher facts");
+    Expect(ollvmPromptDump.find("\"opaque_predicates\"") != std::string::npos, "OLLVM-like prompt should include opaque predicate facts");
+    Expect(ollvmPromptDump.find("\"substitution_idioms\"") != std::string::npos, "OLLVM-like prompt should include substitution facts");
+    Expect(ollvmPromptDump.find("semantic edge:") != std::string::npos, "OLLVM-like analyzer skeleton should render semantic CFG overlay comments");
+    Expect(ollvmPromptDump.find("opaque predicate:") != std::string::npos, "OLLVM-like analyzer skeleton should render opaque predicate comments");
+    Expect(ollvmPromptDump.find("substitution:") != std::string::npos, "OLLVM-like analyzer skeleton should render substitution comments");
+
+    decomp::LlmClientConfig ollvmChunkConfig;
+    ollvmChunkConfig.ChunkBlockLimit = 4;
+    ollvmChunkConfig.ChunkCountLimit = 8;
+
+    const std::string ollvmMergePromptDump = decomp::BuildDebugMergePromptDump(ollvmRequest, ollvmChunkConfig);
+    Expect(!ollvmMergePromptDump.empty(), "OLLVM-like debug merge prompt dump should be available");
+
+    const decomp::JsonValue ollvmMergeFactsJson = ParseDebugMergeFactsJson(ollvmMergePromptDump);
+    ExpectJsonBooleanValue(ollvmMergeFactsJson, { "chunking", "merge_obfuscation_policy", "has_flattening_dispatcher" }, true, "OLLVM-like merge policy should flag flattening dispatcher");
+    ExpectJsonBooleanValue(ollvmMergeFactsJson, { "chunking", "merge_obfuscation_policy", "has_opaque_predicates" }, true, "OLLVM-like merge policy should flag opaque predicates");
+    ExpectJsonBooleanValue(ollvmMergeFactsJson, { "chunking", "merge_obfuscation_policy", "has_substitution_idioms" }, true, "OLLVM-like merge policy should flag substitution idioms");
+    ExpectJsonStringArrayContains(ollvmMergeFactsJson, { "chunking", "merge_obfuscation_policy", "obfuscation_rewrite_rules" }, "prefer_semantic_overlay_edges", "OLLVM-like merge rewrite rules should prefer semantic overlays");
+    ExpectJsonStringArrayContains(ollvmMergeFactsJson, { "chunking", "merge_obfuscation_policy", "obfuscation_uncertainty_rules" }, "do_not_infer_dead_edges_without_opaque_predicate_facts", "OLLVM-like merge uncertainty rules should guard bogus-control pruning");
+
+    ExpectJsonBooleanValue(ollvmMergeFactsJson, { "chunking", "merge_deobfuscation_plan", "requires_dispatcher_edge_reconciliation" }, true, "OLLVM-like deobfuscation plan should require dispatcher edge reconciliation");
+    ExpectJsonBooleanValue(ollvmMergeFactsJson, { "chunking", "merge_deobfuscation_plan", "requires_opaque_dead_edge_pruning" }, true, "OLLVM-like deobfuscation plan should require opaque dead-edge pruning");
+    ExpectJsonBooleanValue(ollvmMergeFactsJson, { "chunking", "merge_deobfuscation_plan", "requires_substitution_simplification" }, true, "OLLVM-like deobfuscation plan should require substitution simplification");
+    ExpectJsonBooleanValue(ollvmMergeFactsJson, { "chunking", "merge_deobfuscation_plan", "requires_semantic_overlay_review" }, true, "OLLVM-like deobfuscation plan should require semantic overlay review");
+    ExpectJsonStringArrayContains(ollvmMergeFactsJson, { "chunking", "merge_deobfuscation_plan", "deobfuscation_actions" }, "recover_dispatcher_edges", "OLLVM-like deobfuscation actions should recover dispatcher edges");
+    ExpectJsonStringArrayContains(ollvmMergeFactsJson, { "chunking", "merge_deobfuscation_plan", "deobfuscation_actions" }, "prune_proven_opaque_dead_edges", "OLLVM-like deobfuscation actions should prune proven opaque edges");
+    ExpectJsonStringArrayContains(ollvmMergeFactsJson, { "chunking", "merge_deobfuscation_plan", "deobfuscation_actions" }, "apply_local_substitution_simplifications", "OLLVM-like deobfuscation actions should apply substitution simplifications");
+    ExpectJsonStringArrayContains(ollvmMergeFactsJson, { "chunking", "merge_deobfuscation_plan", "blocked_assumptions" }, "opaque_branch_is_dead_without_fact", "OLLVM-like deobfuscation plan should block unsupported bogus-control pruning");
+
+    ExpectJsonBooleanValue(ollvmMergeFactsJson, { "chunking", "merge_deobfuscation_output_contract", "requires_pseudo_c_deobfuscation_review" }, true, "OLLVM-like output contract should require pseudo-C deobfuscation review");
+    ExpectJsonBooleanValue(ollvmMergeFactsJson, { "chunking", "merge_deobfuscation_output_contract", "requires_rewrite_evidence" }, true, "OLLVM-like output contract should require rewrite evidence");
+    ExpectJsonBooleanValue(ollvmMergeFactsJson, { "chunking", "merge_deobfuscation_conflict_policy", "requires_conflict_resolution" }, true, "OLLVM-like conflict policy should require conflict resolution");
+    ExpectJsonStringArrayContains(ollvmMergeFactsJson, { "chunking", "merge_deobfuscation_conflict_policy", "conflict_checks" }, "opaque_dead_edges_vs_visible_branch_paths", "OLLVM-like conflict checks should compare opaque dead edges with visible paths");
+    ExpectJsonStringArrayContains(ollvmMergeFactsJson, { "chunking", "merge_deobfuscation_conflict_policy", "confidence_downgrade_reasons" }, "opaque_dead_edge_unproven", "OLLVM-like conflict policy should downgrade unproven opaque edge claims");
 }
 
 void TestSimdAbiSnapshot()
