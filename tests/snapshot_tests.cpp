@@ -1594,6 +1594,8 @@ void TestObfuscationFactsSnapshot()
     chunkScopedRequest.Facts = facts;
     chunkScopedRequest.Facts.Arch = "MERGE_ARCH_MARKER";
     chunkScopedRequest.Facts.Mode = decomp::AnalysisMode::LiveMemory;
+    chunkScopedRequest.Facts.QueryAddress = 0x42424242;
+    chunkScopedRequest.Facts.Rva = 0x31313131;
     chunkScopedRequest.Facts.Module.LoadedImageName = "CHUNK_MERGE_LOADED_IMAGE_MARKER.sys";
     chunkScopedRequest.Facts.Module.SymbolType = 424242;
     chunkScopedRequest.Facts.Abi.FrameBase = "CHUNK_ABI_FRAME_BASE_MARKER";
@@ -1984,6 +1986,10 @@ void TestObfuscationFactsSnapshot()
     Expect(chunkPromptDump.find("MERGE_ARCH_MARKER") != std::string::npos, "chunk prompt should preserve analysis architecture");
     Expect(chunkPromptDump.find("\"mode\"") != std::string::npos, "chunk prompt should include analysis mode");
     Expect(chunkPromptDump.find("\"live\"") != std::string::npos, "chunk prompt should preserve live analysis mode");
+    Expect(chunkPromptDump.find("\"query_address\"") != std::string::npos, "chunk prompt should include query address");
+    Expect(chunkPromptDump.find("0x42424242") != std::string::npos, "chunk prompt should preserve query address");
+    Expect(chunkPromptDump.find("\"rva\"") != std::string::npos, "chunk prompt should include function RVA");
+    Expect(chunkPromptDump.find("0x31313131") != std::string::npos, "chunk prompt should preserve function RVA");
     Expect(chunkPromptDump.find("\"selection\"") != std::string::npos, "chunk prompt should include prompt selection metadata");
     Expect(chunkPromptDump.find("\"chunk_strategy\"") != std::string::npos, "chunk prompt should describe chunk selection strategy");
     Expect(chunkPromptDump.find("chunk-scoped facts + global fact carryover + spread sampling") != std::string::npos, "chunk prompt should preserve chunk fact selection strategy");

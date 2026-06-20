@@ -5919,7 +5919,9 @@ JsonValue BuildChunkFactsJson(
     selection.Set("total_chunks", JsonValue::MakeNumber(static_cast<double>(plan.TotalChunks)));
 
     functionOverview.Set("query_text", JsonValue::MakeString(request.Facts.QueryText));
+    functionOverview.Set("query_address", JsonValue::MakeString(HexU64(request.Facts.QueryAddress)));
     functionOverview.Set("entry_address", JsonValue::MakeString(HexU64(request.Facts.EntryAddress)));
+    functionOverview.Set("rva", JsonValue::MakeString(HexU64(request.Facts.Rva)));
     functionOverview.Set("natural_language", naturalLanguage);
     functionOverview.Set("calling_convention", JsonValue::MakeString(request.Facts.CallingConvention));
     functionOverview.Set("live_bytes_differ_from_image", JsonValue::MakeBoolean(request.Facts.LiveBytesDifferFromImage));
