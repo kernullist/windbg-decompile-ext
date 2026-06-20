@@ -6363,6 +6363,7 @@ JsonValue BuildMergeFactsJson(
     bool callTargetsTruncated = false;
     bool normalizedConditionsTruncated = false;
     bool pdbTruncated = false;
+    bool observedBehaviorTruncated = false;
     bool evidenceGraphTruncated = false;
     bool factsTruncated = false;
     bool uncertaintiesTruncated = false;
@@ -6427,6 +6428,7 @@ JsonValue BuildMergeFactsJson(
     root.Set("call_targets", BuildCallTargetsJson(request, &callTargetsTruncated));
     root.Set("normalized_conditions", BuildNormalizedConditionsJson(request, &normalizedConditionsTruncated));
     root.Set("pdb", BuildPdbFactsJson(request, &pdbTruncated));
+    root.Set("observed_behavior", BuildObservedBehaviorJson(request, &observedBehaviorTruncated));
     root.Set("evidence_graph", BuildEvidenceGraphJson(request, &evidenceGraphTruncated));
     root.Set("global_facts", BuildStringArray(request.Facts.Facts, 24, &factsTruncated));
     root.Set("global_uncertainties", BuildStringArray(request.Facts.UncertainPoints, 12, &uncertaintiesTruncated));
@@ -6453,6 +6455,7 @@ JsonValue BuildMergeFactsJson(
     truncation.Set("call_targets", JsonValue::MakeBoolean(callTargetsTruncated));
     truncation.Set("normalized_conditions", JsonValue::MakeBoolean(normalizedConditionsTruncated));
     truncation.Set("pdb", JsonValue::MakeBoolean(pdbTruncated));
+    truncation.Set("observed_behavior", JsonValue::MakeBoolean(observedBehaviorTruncated));
     truncation.Set("evidence_graph", JsonValue::MakeBoolean(evidenceGraphTruncated));
     truncation.Set("facts", JsonValue::MakeBoolean(factsTruncated));
     truncation.Set("uncertainties", JsonValue::MakeBoolean(uncertaintiesTruncated));
@@ -6517,7 +6520,7 @@ std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
         "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style. "
         "Use the chunk summaries to produce a fuller function-level pseudocode than a single-pass summary. "
-        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, control_flow, type_hints, idioms, callee_summaries, abi, session_policy, obfuscation, semantic_control_flow, and pdb facts to preserve semantic names, control-flow intent, and debugger-session constraints. "
+        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, control_flow, type_hints, idioms, callee_summaries, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, and pdb facts to preserve semantic names, control-flow intent, debugger-session constraints, and observed runtime context. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
         "Prefer reconstructing concrete reads, writes, branches, and helper interactions when the chunk evidence supports them. "
@@ -6543,7 +6546,7 @@ std::string BuildMergeUserPrompt(
     prompt += ".\n";
     prompt += "3. Build a richer pseudo_c than a short high-level summary; use the chunk evidence to cover the main body.\n";
     prompt += "4. Preserve unknowns with UNKNOWN_TYPE instead of omitting entire regions of logic.\n";
-    prompt += "5. Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, type_hints, idioms, callee_summaries, abi, session_policy, and pdb facts when they help produce more concrete names, conditions, stack-frame context, or session-aware uncertainty.\n";
+    prompt += "5. Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, type_hints, idioms, callee_summaries, abi, session_policy, observed_behavior, and pdb facts when they help produce more concrete names, conditions, stack-frame context, runtime context, or session-aware uncertainty.\n";
     prompt += "6. If chunks disagree or coverage remains partial, explain that in uncertainties, but still keep the visible operations explicit.\n";
     prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
     prompt += "8. evidence.blocks must reference block ids that appear in the chunk summaries.\n";

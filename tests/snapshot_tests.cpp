@@ -1989,6 +1989,9 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("CHUNK_ABI_HOME_SLOT_MARKER") != std::string::npos, "merge prompt should preserve ABI facts for final synthesis");
     Expect(mergePromptDump.find("\"session_policy\"") != std::string::npos, "merge prompt should include session policy facts");
     Expect(mergePromptDump.find("CHUNK_SESSION_EXECUTION_MARKER") != std::string::npos, "merge prompt should preserve session policy facts for final synthesis");
+    Expect(mergePromptDump.find("\"observed_behavior\"") != std::string::npos, "merge prompt should include observed behavior facts");
+    Expect(mergePromptDump.find("CHUNK_OBSERVED_ARGUMENT_MARKER") != std::string::npos, "merge prompt should preserve observed argument samples for final synthesis");
+    Expect(mergePromptDump.find("CHUNK_OBSERVED_HOTSPOT_MARKER") != std::string::npos, "merge prompt should preserve observed memory hotspots for final synthesis");
 
     const decomp::AnalysisFacts stateSwitchFacts = BuildLegitimateStateSwitchFacts();
     Expect(FindHighConfidenceDispatcher(stateSwitchFacts) == nullptr, "ordinary compare-chain state switch should not become a high-confidence flattening dispatcher");
