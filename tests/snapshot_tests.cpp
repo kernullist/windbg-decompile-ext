@@ -2080,6 +2080,11 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("\"priority_chunk_ids\"") != std::string::npos, "merge prompt should include priority chunk ids");
     Expect(mergePromptDump.find("\"requires_summary_reconciliation\"") != std::string::npos, "merge prompt should include summary reconciliation review flag");
     Expect(mergePromptDump.find("\"requires_evidence_review\"") != std::string::npos, "merge prompt should include evidence review flag");
+    Expect(mergePromptDump.find("\"merge_confidence_policy\"") != std::string::npos, "merge prompt should include merge confidence policy");
+    Expect(mergePromptDump.find("\"recommended_confidence_ceiling\"") != std::string::npos, "merge prompt should include recommended confidence ceiling");
+    Expect(mergePromptDump.find("\"ceiling_reasons\"") != std::string::npos, "merge prompt should include confidence ceiling reasons");
+    Expect(mergePromptDump.find("\"requires_uncertainty\"") != std::string::npos, "merge prompt should include required uncertainty flag");
+    Expect(mergePromptDump.find("\"can_report_high_confidence\"") != std::string::npos, "merge prompt should include high-confidence eligibility flag");
     Expect(mergePromptDump.find("\"first_block\"") != std::string::npos, "merge prompt should include chunk first-block provenance");
     Expect(mergePromptDump.find("\"last_block\"") != std::string::npos, "merge prompt should include chunk last-block provenance");
     Expect(mergePromptDump.find("\"block_ids\"") != std::string::npos, "merge prompt should include chunk block ids");
