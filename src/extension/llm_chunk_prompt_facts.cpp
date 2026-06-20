@@ -2116,6 +2116,8 @@ JsonValue BuildMergeChunkObfuscationPolicyJson(const AnalyzeRequest& request)
         rewriteRules.push_back("prune_only_proven_dead_edges");
         rewriteRules.push_back("simplify_substitution_idioms_locally");
         rewriteRules.push_back("fall_back_to_raw_blocks_when_semantic_overlay_is_missing");
+        rewriteRules.push_back("assign_state_variables_only_to_recovered_state_values");
+        rewriteRules.push_back("preserve_helper_call_argument_expressions");
     }
     else
     {
@@ -2126,6 +2128,8 @@ JsonValue BuildMergeChunkObfuscationPolicyJson(const AnalyzeRequest& request)
     uncertaintyRules.push_back("mark_low_confidence_recovered_edges_uncertain");
     uncertaintyRules.push_back("do_not_infer_dead_edges_without_opaque_predicate_facts");
     uncertaintyRules.push_back("do_not_promote_substitution_idioms_to_source_intent");
+    uncertaintyRules.push_back("do_not_use_data_reads_as_state_values");
+    uncertaintyRules.push_back("mark_missing_helper_argument_operands_uncertain");
 
     if (!deobfuscationEnabled)
     {
@@ -2299,18 +2303,23 @@ JsonValue BuildMergeChunkDeobfuscationOutputContractJson(const AnalyzeRequest& r
         requirements.push_back(hasDispatchers ? "suppress_dispatcher_loop_shape" : "no_dispatcher_rewrite_required");
         requirements.push_back(hasOpaquePredicates ? "prune_only_proven_opaque_dead_edges" : "no_opaque_edge_pruning_required");
         requirements.push_back(hasSubstitutionIdioms ? "apply_local_substitution_simplifications" : "no_substitution_simplification_required");
+        requirements.push_back("assign_state_variables_only_to_recovered_state_values");
+        requirements.push_back("preserve_helper_call_argument_expressions");
     }
     else
     {
         requirements.push_back("preserve_raw_obfuscated_structure");
         requirements.push_back("do_not_emit_deobfuscated_rewrite");
         requirements.push_back("treat_obfuscation_facts_as_observations_only");
+        requirements.push_back("validate_any_explicit_deobfuscated_state_claims");
     }
 
     evidencePaths.push_back("semantic_control_flow.edges");
     evidencePaths.push_back("obfuscation.dispatchers.recovered_edges");
     evidencePaths.push_back("obfuscation.opaque_predicates");
     evidencePaths.push_back("obfuscation.substitution_idioms");
+    evidencePaths.push_back("call_arguments");
+    evidencePaths.push_back("ir_values");
     AppendMergeDeobfuscationOutputRule(outputRules, "pseudo_c", requirements, evidencePaths);
 
     requirements.clear();

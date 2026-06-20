@@ -89,6 +89,11 @@ std::string BuildDebugMergePromptDump(
     const AnalyzeRequest& request,
     const LlmClientConfig& config);
 std::string BuildDebugVerifierFeedbackPrompt(const VerifyReport& report);
+bool DebugParseChunkAnalysisJson(
+    const std::string& text,
+    bool& repaired,
+    size_t& uncertaintyCount,
+    std::string& error);
 void ApplyDebugMergeOutputPolicy(
     const AnalyzeRequest& request,
     const LlmClientConfig& config,

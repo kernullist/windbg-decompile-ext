@@ -2053,6 +2053,21 @@ void TestObfuscationFactsSnapshot()
     chunkConfig.ChunkCountLimit = 8;
     const std::string chunkPromptDump = decomp::BuildDebugFirstChunkPromptDump(chunkScopedRequest, chunkConfig);
     Expect(!chunkPromptDump.empty(), "debug chunk prompt dump should expose the first chunk prompt");
+
+    bool repairedChunkJson = false;
+    size_t repairedChunkUncertaintyCount = 0;
+    std::string repairedChunkError;
+    const std::string truncatedChunkJson = "{\"chunk_id\":\"chunk_0\",\"summary_localized\":\"partial\",\"pseudo_steps\":[\"step\"],\"state_updates\":[\"state = 0x1\"],\"observed_calls\":[],\"observed_memory\":[],\"uncertainties\":[\"unterminated";
+    Expect(
+        decomp::DebugParseChunkAnalysisJson(
+            truncatedChunkJson,
+            repairedChunkJson,
+            repairedChunkUncertaintyCount,
+            repairedChunkError),
+        "chunk JSON repair should parse an unterminated string response");
+    Expect(repairedChunkJson, "chunk JSON repair should report that the response was repaired");
+    Expect(repairedChunkUncertaintyCount >= 1, "chunk JSON repair should preserve parse-repair uncertainty");
+
     Expect(chunkPromptDump.find("\"arch\"") != std::string::npos, "chunk prompt should include analysis architecture");
     Expect(chunkPromptDump.find("MERGE_ARCH_MARKER") != std::string::npos, "chunk prompt should preserve analysis architecture");
     Expect(chunkPromptDump.find("\"mode\"") != std::string::npos, "chunk prompt should include analysis mode");
@@ -2463,9 +2478,41 @@ void TestObfuscationFactsSnapshot()
     Expect(ollvmPromptDump.find("\"substitution_idioms\"") != std::string::npos, "OLLVM-like prompt should include substitution facts");
     Expect(ollvmPromptDump.find("\"deobfuscation_readiness\"") != std::string::npos, "OLLVM-like prompt should include deobfuscation readiness");
     Expect(ollvmPromptDump.find("prune_proven_opaque_dead_edges") != std::string::npos, "OLLVM-like prompt should include opaque dead-edge readiness action");
+    Expect(ollvmPromptDump.find("assign state variables only to recovered state constants") != std::string::npos, "OLLVM-like prompt should require recovered state constants for flattened state assignments");
+    Expect(ollvmPromptDump.find("Preserve helper call argument expressions") != std::string::npos, "OLLVM-like prompt should require helper call argument expression preservation");
     Expect(ollvmPromptDump.find("semantic edge:") != std::string::npos, "OLLVM-like analyzer skeleton should render semantic CFG overlay comments");
     Expect(ollvmPromptDump.find("opaque predicate:") != std::string::npos, "OLLVM-like analyzer skeleton should render opaque predicate comments");
     Expect(ollvmPromptDump.find("substitution:") != std::string::npos, "OLLVM-like analyzer skeleton should render substitution comments");
+
+    decomp::AnalyzeResponse badStateResponse;
+    badStateResponse.Status = "ok";
+    badStateResponse.PseudoC = "uint32_t f(uint8_t* bytes, size_t index) { uint32_t state = 0x0; while (state != 0x2) { if (state == 0x0) { state = bytes[index]; } else if (state == 0x1) { state = 0x2; } } return state; }";
+    badStateResponse.Summary = "deobfuscated flattened state update";
+    badStateResponse.Confidence = 0.92;
+
+    const decomp::VerifyReport badStateReport = decomp::VerifyResponse(ollvmRequest, badStateResponse);
+    Expect(HasIssueCode(badStateReport, "obfuscation.state_assignment_non_state_value"), "OLLVM-like verifier should flag data reads assigned to a flattened state variable");
+    Expect(HasIssueCode(badStateReport, "obfuscation.state_transition_assignment_omitted"), "OLLVM-like verifier should flag omitted recovered state transition values in explicit state-machine pseudo-C");
+
+    decomp::AnalyzeRequest ollvmDeobfuscationOffRequest = ollvmRequest;
+    ollvmDeobfuscationOffRequest.RequestId = "obfuscation_ollvm_like_deobf_off_snapshot";
+    ollvmDeobfuscationOffRequest.Facts.DeobfuscationReadiness.Enabled = false;
+    ollvmDeobfuscationOffRequest.Facts.DeobfuscationReadiness.SafeToRewriteControlFlow = false;
+    ollvmDeobfuscationOffRequest.Facts.DeobfuscationReadiness.SafeActions.clear();
+    ollvmDeobfuscationOffRequest.Facts.DeobfuscationReadiness.BlockedAssumptions.push_back("deobfuscation_disabled_by_option");
+
+    const decomp::VerifyReport badStateDeobfuscationOffReport = decomp::VerifyResponse(ollvmDeobfuscationOffRequest, badStateResponse);
+    Expect(HasIssueCode(badStateDeobfuscationOffReport, "obfuscation.state_assignment_non_state_value"), "deobfuscation disabled mode should still validate explicit unsupported state rewrite claims");
+
+    decomp::AnalyzeResponse symbolicStateResponse;
+    symbolicStateResponse.Status = "ok";
+    symbolicStateResponse.PseudoC = "uint32_t f(void) { const uint32_t stateEntry = 0x0; const uint32_t stateBody = 0x1; const uint32_t stateExit = 0x2; uint32_t state = stateEntry; if (state == stateEntry) { state = stateBody; } if (state == stateBody) { state = stateExit; } return state; }";
+    symbolicStateResponse.Summary = "explicit symbolic flattened state transitions";
+    symbolicStateResponse.Confidence = 0.92;
+
+    const decomp::VerifyReport symbolicStateReport = decomp::VerifyResponse(ollvmRequest, symbolicStateResponse);
+    Expect(!HasIssueCode(symbolicStateReport, "obfuscation.state_assignment_non_state_value"), "OLLVM-like verifier should accept symbolic state constants bound to recovered state values");
+    Expect(!HasIssueCode(symbolicStateReport, "obfuscation.state_transition_assignment_omitted"), "OLLVM-like verifier should count symbolic state constants as recovered state transition assignments");
 
     decomp::LlmClientConfig ollvmChunkConfig;
     ollvmChunkConfig.ChunkBlockLimit = 4;
@@ -2479,7 +2526,10 @@ void TestObfuscationFactsSnapshot()
     ExpectJsonBooleanValue(ollvmMergeFactsJson, { "chunking", "merge_obfuscation_policy", "has_opaque_predicates" }, true, "OLLVM-like merge policy should flag opaque predicates");
     ExpectJsonBooleanValue(ollvmMergeFactsJson, { "chunking", "merge_obfuscation_policy", "has_substitution_idioms" }, true, "OLLVM-like merge policy should flag substitution idioms");
     ExpectJsonStringArrayContains(ollvmMergeFactsJson, { "chunking", "merge_obfuscation_policy", "obfuscation_rewrite_rules" }, "prefer_semantic_overlay_edges", "OLLVM-like merge rewrite rules should prefer semantic overlays");
+    ExpectJsonStringArrayContains(ollvmMergeFactsJson, { "chunking", "merge_obfuscation_policy", "obfuscation_rewrite_rules" }, "assign_state_variables_only_to_recovered_state_values", "OLLVM-like merge rewrite rules should restrict flattened state assignments");
+    ExpectJsonStringArrayContains(ollvmMergeFactsJson, { "chunking", "merge_obfuscation_policy", "obfuscation_rewrite_rules" }, "preserve_helper_call_argument_expressions", "OLLVM-like merge rewrite rules should preserve helper call argument expressions");
     ExpectJsonStringArrayContains(ollvmMergeFactsJson, { "chunking", "merge_obfuscation_policy", "obfuscation_uncertainty_rules" }, "do_not_infer_dead_edges_without_opaque_predicate_facts", "OLLVM-like merge uncertainty rules should guard bogus-control pruning");
+    ExpectJsonStringArrayContains(ollvmMergeFactsJson, { "chunking", "merge_obfuscation_policy", "obfuscation_uncertainty_rules" }, "do_not_use_data_reads_as_state_values", "OLLVM-like merge uncertainty rules should reject data reads as state values");
 
     ExpectJsonBooleanValue(ollvmMergeFactsJson, { "chunking", "merge_deobfuscation_plan", "requires_dispatcher_edge_reconciliation" }, true, "OLLVM-like deobfuscation plan should require dispatcher edge reconciliation");
     ExpectJsonBooleanValue(ollvmMergeFactsJson, { "chunking", "merge_deobfuscation_plan", "requires_opaque_dead_edge_pruning" }, true, "OLLVM-like deobfuscation plan should require opaque dead-edge pruning");
@@ -2863,6 +2913,53 @@ void TestVerifierCoverageSnapshot()
 
     const decomp::VerifyReport suffixWithArgsReport = decomp::VerifyResponse(request, symbolSuffixWithArgsResponse);
     Expect(!HasIssueCode(suffixWithArgsReport, "call.arguments_omitted"), "verifier should accept pseudo calls that preserve recovered argument arity");
+
+    decomp::AnalyzeRequest callExpressionRequest;
+    callExpressionRequest.RequestId = "verifier_call_expression_snapshot";
+    callExpressionRequest.Facts = BuildDiamondFacts();
+
+    decomp::CallTargetInfo expressionCall;
+    expressionCall.Site = 0x1024;
+    expressionCall.DisplayName = "sample!AddSubstituted";
+    expressionCall.TargetKind = "internal_direct";
+    expressionCall.Confidence = 0.84;
+    callExpressionRequest.Facts.CallTargets.push_back(expressionCall);
+
+    decomp::CallArgumentFact expressionArg1;
+    expressionArg1.Site = 0x1024;
+    expressionArg1.Ordinal = 1;
+    expressionArg1.Location = "rcx";
+    expressionArg1.Expression = "accumulator ^ shifted";
+    expressionArg1.Confidence = 0.82;
+    callExpressionRequest.Facts.CallArguments.push_back(expressionArg1);
+
+    decomp::CallArgumentFact expressionArg2;
+    expressionArg2.Site = 0x1024;
+    expressionArg2.Ordinal = 2;
+    expressionArg2.Location = "rdx";
+    expressionArg2.Expression = "0x10203041";
+    expressionArg2.Confidence = 0.82;
+    callExpressionRequest.Facts.CallArguments.push_back(expressionArg2);
+
+    decomp::AnalyzeResponse normalizedExpressionCallResponse;
+    normalizedExpressionCallResponse.Status = "ok";
+    normalizedExpressionCallResponse.PseudoC = "void f(void) { sample_AddSubstituted(accumulator ^ shifted, 0x10203041); }";
+    normalizedExpressionCallResponse.Summary = "calls helper with recovered expression";
+    normalizedExpressionCallResponse.Confidence = 0.92;
+
+    const decomp::VerifyReport normalizedExpressionCallReport = decomp::VerifyResponse(callExpressionRequest, normalizedExpressionCallResponse);
+    Expect(!HasIssueCode(normalizedExpressionCallReport, "call.recovered_targets_omitted"), "verifier should match recovered helper calls with module-prefix underscore normalization");
+    Expect(!HasIssueCode(normalizedExpressionCallReport, "call.argument_expression_omitted"), "verifier should accept preserved recovered helper call argument expressions");
+
+    decomp::AnalyzeResponse droppedExpressionCallResponse;
+    droppedExpressionCallResponse.Status = "ok";
+    droppedExpressionCallResponse.PseudoC = "void f(void) { sample_AddSubstituted(shifted, 0x10203041); }";
+    droppedExpressionCallResponse.Summary = "calls helper with incomplete expression";
+    droppedExpressionCallResponse.Confidence = 0.92;
+
+    const decomp::VerifyReport droppedExpressionCallReport = decomp::VerifyResponse(callExpressionRequest, droppedExpressionCallResponse);
+    Expect(!HasIssueCode(droppedExpressionCallReport, "call.recovered_targets_omitted"), "verifier should not misreport a normalized helper call as omitted when checking argument loss");
+    Expect(HasIssueCode(droppedExpressionCallReport, "call.argument_expression_omitted"), "verifier should flag recovered helper call argument expression operand loss");
 
     decomp::AnalyzeRequest prototypeOnlyRequest;
     prototypeOnlyRequest.RequestId = "verifier_prototype_arity_snapshot";

@@ -1862,6 +1862,163 @@ bool ParseChunkAnalysis(
     return true;
 }
 
+void TrimTrailingCommaForJsonRepair(std::string& text)
+{
+    const size_t last = text.find_last_not_of(" \t\r\n");
+
+    if (last != std::string::npos && text[last] == ',')
+    {
+        text.erase(last, 1U);
+    }
+}
+
+bool TryRepairTruncatedChunkJson(
+    const std::string& text,
+    std::string& repaired,
+    std::string& error)
+{
+    repaired = TrimCopy(text);
+
+    if (repaired.empty())
+    {
+        error = "empty JSON text";
+        return false;
+    }
+
+    const size_t objectStart = repaired.find('{');
+
+    if (objectStart == std::string::npos)
+    {
+        error = "missing JSON object start";
+        return false;
+    }
+
+    if (objectStart != 0)
+    {
+        repaired = repaired.substr(objectStart);
+    }
+
+    std::vector<char> closers;
+    bool inString = false;
+    bool escaped = false;
+
+    for (const char ch : repaired)
+    {
+        if (inString)
+        {
+            if (escaped)
+            {
+                escaped = false;
+            }
+            else if (ch == '\\')
+            {
+                escaped = true;
+            }
+            else if (ch == '"')
+            {
+                inString = false;
+            }
+
+            continue;
+        }
+
+        if (ch == '"')
+        {
+            inString = true;
+            continue;
+        }
+
+        if (ch == '{')
+        {
+            closers.push_back('}');
+            continue;
+        }
+
+        if (ch == '[')
+        {
+            closers.push_back(']');
+            continue;
+        }
+
+        if (ch == '}' || ch == ']')
+        {
+            if (closers.empty() || closers.back() != ch)
+            {
+                error = "mismatched JSON delimiter";
+                return false;
+            }
+
+            closers.pop_back();
+        }
+    }
+
+    if (!inString && closers.empty())
+    {
+        error = "no repairable truncation";
+        return false;
+    }
+
+    if (inString)
+    {
+        if (escaped && !repaired.empty() && repaired.back() == '\\')
+        {
+            repaired.pop_back();
+        }
+
+        repaired.push_back('"');
+    }
+
+    while (!closers.empty())
+    {
+        TrimTrailingCommaForJsonRepair(repaired);
+        repaired.push_back(closers.back());
+        closers.pop_back();
+    }
+
+    return true;
+}
+
+bool ParseChunkAnalysisWithRepair(
+    const std::string& text,
+    ChunkAnalysis& analysis,
+    std::string& error,
+    bool& repaired)
+{
+    repaired = false;
+
+    ChunkAnalysis parsedAnalysis;
+
+    if (ParseChunkAnalysis(text, parsedAnalysis, error))
+    {
+        analysis = std::move(parsedAnalysis);
+        return true;
+    }
+
+    const std::string originalError = error;
+    std::string repairedJson;
+    std::string repairError;
+
+    if (!TryRepairTruncatedChunkJson(text, repairedJson, repairError))
+    {
+        error = originalError + "; JSON repair unavailable: " + repairError;
+        return false;
+    }
+
+    ChunkAnalysis repairedAnalysis;
+    std::string repairedParseError;
+
+    if (!ParseChunkAnalysis(repairedJson, repairedAnalysis, repairedParseError))
+    {
+        error = originalError + "; repaired JSON parse failed: " + repairedParseError;
+        return false;
+    }
+
+    repairedAnalysis.Uncertainties.push_back("chunk JSON was repaired after parse error: " + originalError);
+    analysis = std::move(repairedAnalysis);
+    repaired = true;
+    return true;
+}
+
 std::string BuildChunkSystemPrompt(const AnalyzeRequest& request)
 {
     return
@@ -1873,6 +2030,8 @@ std::string BuildChunkSystemPrompt(const AnalyzeRequest& request)
         "Use selection, analyzer_skeleton, recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, block_value_states, normalized_conditions, control_flow, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, data_references, call_targets, type_hints, idioms, callee_summaries, evidence_graph, and pdb facts as high-signal semantic hints when present. "
         "Treat analyzer_skeleton as a chunk-local refinement scaffold, not as finished source. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
+        "When reconstructing flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never use data reads such as bytes[index] as state values. "
+        "Preserve helper call argument expressions from call_arguments and ir_values, including operands and operators. "
         "Use control_flow loop, branch, and switch region metadata as structure evidence without inventing unsupported regions. "
         "Use abi facts for Microsoft x64 stack home slots, tail-call, thunk, no-return, and frame-base hints. "
         "Use session_policy to distinguish live, dump, kernel, and trace-like analysis constraints. "
@@ -1908,6 +2067,7 @@ std::string BuildChunkUserPrompt(
     prompt += "8. evidence.blocks must reference only block ids present in this chunk.\n";
     prompt += "9. Use graph_summary to keep chunk-local control-flow claims aligned with function-level CFG evidence.\n";
     prompt += "10. Use chunk_boundary live_in_values, live_out_values, and crossing edges to preserve state that enters or leaves this chunk.\n";
+    prompt += "11. For flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never replace a state transition with a data read such as bytes[index]. Preserve helper call argument expressions from call_arguments and ir_values without dropping operands or operators.\n";
     return prompt;
 }
 
@@ -1921,6 +2081,8 @@ std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
         "Use the chunk plans, coverage metadata, summary alignment, quality, evidence, risk metadata, per-chunk risk details, merge review plan, confidence policy, acceptance checks, output contract, traceability matrix, obfuscation policy, deobfuscation plan, deobfuscation output contract, and deobfuscation conflict policy, and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
         "Use selection, blocks, direct_calls, indirect_calls, recovered_arguments, recovered_locals, call_arguments, stack_pointer, memory_accesses, ir_values, switches, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, control_flow, type_hints, idioms, callee_summaries, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, and pdb facts to preserve semantic names, prompt coverage limits, block grounding, call-site grounding, stack-frame context, reaching-value state, memory side effects, switch dispatch intent, control-flow intent, debugger-session constraints, and observed runtime context. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
+        "When reconstructing flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never use data reads such as bytes[index] as state values. "
+        "Preserve helper call argument expressions from call_arguments and ir_values, including operands and operators. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
         "Prefer reconstructing concrete reads, writes, branches, and helper interactions when the chunk evidence supports them. "
         "Do not invent calls or fields that are not grounded by the chunk summaries or global facts. "
@@ -1959,6 +2121,7 @@ std::string BuildMergeUserPrompt(
     prompt += "16. Follow chunking.merge_deobfuscation_output_contract when reflecting deobfuscation decisions into pseudo_c, summary, uncertainties, evidence, and confidence.\n";
     prompt += "17. Follow chunking.merge_deobfuscation_conflict_policy when semantic overlay, recovered edges, raw CFG, and chunk claims disagree.\n";
     prompt += "18. Treat the analyzer skeleton and graph-derived facts as a draft to refine; do not invent unsupported loops, switches, or calls during merge.\n";
+    prompt += "19. For flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never replace a state transition with a data read such as bytes[index]. Preserve helper call argument expressions from call_arguments and ir_values without dropping operands or operators.\n";
     return prompt;
 }
 
@@ -1974,6 +2137,8 @@ std::string BuildSystemPrompt(const AnalyzeRequest& request)
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style as appropriate. "
         "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, obfuscation, semantic_control_flow, type_hints, idioms, callee_summaries, graph_summary, session_policy, observed_behavior, and pdb facts as high-confidence semantic hints when available. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and do not render the dispatcher as business logic unless recovery confidence is low. "
+        "When reconstructing flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never use data reads such as bytes[index] as state values. "
+        "Preserve helper call argument expressions from call_arguments and ir_values, including operands and operators. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
         "Use evidence.blocks values that reference only valid basic block ids from the input. "
         "Blocks are a representative selection, not necessarily the first contiguous blocks in the function. "
@@ -2008,6 +2173,7 @@ std::string BuildUserPrompt(const AnalyzeRequest& request)
     prompt += "13. Use graph_summary as the authoritative CFG/region outline; do not invent loops, switches, or branches that graph_summary and control_flow do not support.\n";
     prompt += "14. If semantic_control_flow contains high-confidence non-dead edges, reconstruct control flow from those edges before describing raw dispatcher blocks; keep missing state transitions uncertain.\n";
     prompt += "15. Use semantic_control_flow dead edges and obfuscation.opaque_predicates only to justify proven dead edges, and use obfuscation.substitution_idioms only as local simplification evidence.\n";
+    prompt += "16. For flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never replace a state transition with a data read such as bytes[index]. Preserve helper call argument expressions from call_arguments and ir_values without dropping operands or operators.\n";
     return prompt;
 }
 
@@ -3974,12 +4140,53 @@ bool AnalyzeWithChunkedLlm(
 
         ChunkAnalysis chunkAnalysis;
         std::string parseError;
+        bool repairedChunkJson = false;
 
-        if (!ParseChunkAnalysis(chunkJson, chunkAnalysis, parseError))
+        if (!ParseChunkAnalysisWithRepair(chunkJson, chunkAnalysis, parseError, repairedChunkJson))
         {
-            error = "failed to parse chunk JSON for " + plan.Id + ": " + parseError + "; preview: " + BuildPreviewText(chunkJson);
-            LogVerbose(config, "chunk LLM parse failed id=" + plan.Id + " error=" + BuildPreviewText(error));
-            return false;
+            std::string retryJson;
+            std::string retryError;
+            ChunkAnalysis retryChunkAnalysis;
+            bool repairedRetryChunkJson = false;
+            const std::string retryUserPrompt = BuildChunkUserPrompt(request, plan)
+                + "\n\nPrevious chunk JSON parse failed: "
+                + parseError
+                + "\nReturn exactly one complete JSON object matching the requested schema. "
+                + "Close all strings, arrays, and objects. Do not include markdown or prose outside the JSON object.\n";
+
+            LogVerbose(config, "chunk LLM parse failed id=" + plan.Id + " error=" + BuildPreviewText(parseError));
+            LogProgress(
+                config,
+                "LLM chunk " + std::to_string(plan.SlotIndex + 1)
+                    + "/" + std::to_string(plan.TotalChunks)
+                    + " returned invalid JSON; retrying");
+
+            if (SubmitChatJsonWithRetry(
+                    config,
+                    BuildChunkSystemPrompt(request),
+                    retryUserPrompt,
+                    config.ChunkCompletionTokens,
+                    (std::max)(static_cast<uint32_t>(6000), config.ChunkCompletionTokens + 1200U),
+                    retryJson,
+                    retryError)
+                && ParseChunkAnalysisWithRepair(retryJson, retryChunkAnalysis, retryError, repairedRetryChunkJson))
+            {
+                chunkJson = retryJson;
+                chunkAnalysis = std::move(retryChunkAnalysis);
+                repairedChunkJson = repairedRetryChunkJson;
+                chunkAnalysis.Uncertainties.push_back("chunk JSON retry was used after parse error: " + parseError);
+            }
+            else
+            {
+                error = "failed to parse chunk JSON for " + plan.Id + ": " + parseError + "; preview: " + BuildPreviewText(chunkJson);
+                LogVerbose(config, "chunk LLM parse failed id=" + plan.Id + " error=" + BuildPreviewText(error));
+                return false;
+            }
+        }
+
+        if (repairedChunkJson)
+        {
+            LogVerbose(config, "chunk LLM JSON repaired id=" + plan.Id + " preview=" + BuildPreviewText(chunkJson));
         }
 
         if (chunkAnalysis.ChunkId.empty())
@@ -4162,6 +4369,24 @@ std::string BuildDebugMergePromptDump(
 std::string BuildDebugVerifierFeedbackPrompt(const VerifyReport& report)
 {
     return BuildVerifierFeedbackPrompt(report);
+}
+
+bool DebugParseChunkAnalysisJson(
+    const std::string& text,
+    bool& repaired,
+    size_t& uncertaintyCount,
+    std::string& error)
+{
+    ChunkAnalysis analysis;
+
+    if (!ParseChunkAnalysisWithRepair(text, analysis, error, repaired))
+    {
+        uncertaintyCount = 0;
+        return false;
+    }
+
+    uncertaintyCount = analysis.Uncertainties.size();
+    return true;
 }
 
 void ApplyDebugMergeOutputPolicy(

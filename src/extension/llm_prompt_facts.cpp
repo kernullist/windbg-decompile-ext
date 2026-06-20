@@ -2024,13 +2024,13 @@ JsonValue BuildDeobfuscationReadinessJson(const AnalyzeRequest& request)
     {
         object.Set(
             "usage_guidance",
-            JsonValue::MakeString("Use safe_actions only when the corresponding priority_fact_paths are present; keep blocked_assumptions as uncertainty instead of inventing deobfuscated control flow."));
+            JsonValue::MakeString("Use safe_actions only when the corresponding priority_fact_paths are present; keep blocked_assumptions as uncertainty instead of inventing deobfuscated control flow. Assign flattened state variables only to recovered state constants or explicitly uncertain state values, and preserve recovered helper call argument expressions."));
     }
     else
     {
         object.Set(
             "usage_guidance",
-            JsonValue::MakeString("Deobfuscation is disabled by command option; keep obfuscation facts as evidence, preserve raw CFG shape, and do not apply safe_actions as rewrites."));
+            JsonValue::MakeString("Deobfuscation is disabled by command option; keep obfuscation facts as evidence, preserve raw CFG shape, and do not apply safe_actions as rewrites. If a deobfuscated state claim is still made, assign flattened state variables only to recovered state constants or explicitly uncertain state values, and preserve recovered helper call argument expressions."));
     }
 
     return object;

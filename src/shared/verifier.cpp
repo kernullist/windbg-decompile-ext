@@ -500,6 +500,10 @@ std::vector<std::string> BuildSymbolCandidates(const std::string& symbol)
     if (bang != std::string::npos && bang + 1 < symbol.size())
     {
         addCandidate(symbol.substr(bang + 1));
+
+        std::string underscoreQualified = symbol;
+        underscoreQualified[bang] = '_';
+        addCandidate(underscoreQualified);
     }
 
     for (size_t index = 0; index < candidates.size(); ++index)
@@ -510,6 +514,36 @@ std::vector<std::string> BuildSymbolCandidates(const std::string& symbol)
         if (candidateBang != std::string::npos && candidateBang + 1 < candidate.size())
         {
             candidate = candidate.substr(candidateBang + 1);
+        }
+
+        const size_t scope = candidate.rfind("::");
+
+        if (scope != std::string::npos && scope + 2 < candidate.size())
+        {
+            addCandidate(candidate.substr(scope + 2));
+        }
+
+        const size_t underscore = candidate.rfind('_');
+
+        if (underscore != std::string::npos && underscore + 1 < candidate.size())
+        {
+            const std::string prefix = candidate.substr(0, underscore);
+            const std::string suffix = candidate.substr(underscore + 1);
+            bool prefixLooksLikeModule = !prefix.empty();
+
+            for (const char ch : prefix)
+            {
+                if (std::isupper(static_cast<unsigned char>(ch)) != 0)
+                {
+                    prefixLooksLikeModule = false;
+                    break;
+                }
+            }
+
+            if (prefixLooksLikeModule && std::isalpha(static_cast<unsigned char>(suffix.front())) != 0)
+            {
+                addCandidate(suffix);
+            }
         }
 
         if (StartsWithInsensitive(candidate, "__imp_"))
@@ -647,6 +681,249 @@ std::vector<uint32_t> FindCallArities(const AnalyzeResponse& response, const std
     }
 
     return arities;
+}
+
+bool TryReadCallArgumentTextsFromOpenParen(
+    const std::vector<PseudoCodeToken>& tokens,
+    size_t openParenIndex,
+    std::vector<std::string>& arguments)
+{
+    arguments.clear();
+
+    if (openParenIndex >= tokens.size() || tokens[openParenIndex].Text != "(")
+    {
+        return false;
+    }
+
+    size_t depth = 0;
+    std::string current;
+    bool sawArgumentToken = false;
+
+    for (size_t index = openParenIndex + 1U; index < tokens.size(); ++index)
+    {
+        const std::string& text = tokens[index].Text;
+
+        if (text == "(" || text == "[" || text == "{")
+        {
+            ++depth;
+            current += text;
+            sawArgumentToken = true;
+            continue;
+        }
+
+        if (text == ")" || text == "]" || text == "}")
+        {
+            if (depth == 0)
+            {
+                if (sawArgumentToken)
+                {
+                    arguments.push_back(current);
+                }
+
+                return text == ")";
+            }
+
+            --depth;
+            current += text;
+            sawArgumentToken = true;
+            continue;
+        }
+
+        if (text == "," && depth == 0)
+        {
+            if (sawArgumentToken)
+            {
+                arguments.push_back(current);
+                current.clear();
+                sawArgumentToken = false;
+            }
+
+            continue;
+        }
+
+        current += text;
+        sawArgumentToken = true;
+    }
+
+    return false;
+}
+
+std::vector<std::vector<std::string>> FindCallArgumentLists(const AnalyzeResponse& response, const std::string& callee)
+{
+    std::vector<std::vector<std::string>> argumentLists;
+    const std::vector<std::string> candidates = BuildSymbolCandidates(callee);
+    const std::vector<PseudoCodeToken> tokens = CodeTokens(response);
+
+    for (size_t index = 0; index + 1U < tokens.size(); ++index)
+    {
+        if (tokens[index].Kind != "function_name" || tokens[index + 1U].Text != "(")
+        {
+            continue;
+        }
+
+        bool matches = false;
+
+        for (const std::string& candidate : candidates)
+        {
+            matches = matches || TokenTextEquals(tokens[index], candidate);
+        }
+
+        if (!matches)
+        {
+            continue;
+        }
+
+        std::vector<std::string> arguments;
+
+        if (TryReadCallArgumentTextsFromOpenParen(tokens, index + 1U, arguments))
+        {
+            argumentLists.push_back(std::move(arguments));
+        }
+    }
+
+    return argumentLists;
+}
+
+bool IsIgnoredExpressionTerm(const std::string& term)
+{
+    static const char* ignored[] = {
+        "static_cast",
+        "reinterpret_cast",
+        "const_cast",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "size_t",
+        "unsigned",
+        "signed",
+        "int",
+        "long",
+        "short",
+        "char",
+        "true",
+        "false"
+    };
+
+    for (const char* value : ignored)
+    {
+        if (term == value)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::vector<std::string> ExtractSignificantExpressionTerms(const std::string& expression)
+{
+    std::vector<std::string> terms;
+    std::string current;
+
+    auto flushCurrent = [&terms, &current]()
+    {
+        if (current.empty())
+        {
+            return;
+        }
+
+        std::string term = ToLowerAscii(current);
+        current.clear();
+
+        if (IsIgnoredExpressionTerm(term))
+        {
+            return;
+        }
+
+        if (term.size() == 1 && !std::isdigit(static_cast<unsigned char>(term[0])))
+        {
+            return;
+        }
+
+        if (std::find(terms.begin(), terms.end(), term) == terms.end())
+        {
+            terms.push_back(std::move(term));
+        }
+    };
+
+    for (const char ch : expression)
+    {
+        if (std::isalnum(static_cast<unsigned char>(ch)) != 0 || ch == '_')
+        {
+            current.push_back(ch);
+        }
+        else
+        {
+            flushCurrent();
+        }
+    }
+
+    flushCurrent();
+    return terms;
+}
+
+bool IsExpressionRichEnoughToVerify(const std::string& expression)
+{
+    const std::string compact = LowerNoSpace(expression);
+
+    if (compact.size() < 3)
+    {
+        return false;
+    }
+
+    return compact.find('^') != std::string::npos
+        || compact.find('+') != std::string::npos
+        || compact.find('-') != std::string::npos
+        || compact.find('*') != std::string::npos
+        || compact.find('|') != std::string::npos
+        || compact.find('&') != std::string::npos
+        || compact.find("<<") != std::string::npos
+        || compact.find(">>") != std::string::npos;
+}
+
+bool PseudoArgumentPreservesExpectedExpression(
+    const std::string& pseudoArgument,
+    const std::string& expectedExpression)
+{
+    if (!IsExpressionRichEnoughToVerify(expectedExpression))
+    {
+        return true;
+    }
+
+    const std::string pseudo = LowerNoSpace(pseudoArgument);
+    const std::string expected = LowerNoSpace(expectedExpression);
+
+    if (pseudo.empty() || expected.empty())
+    {
+        return true;
+    }
+
+    if (pseudo.find(expected) != std::string::npos)
+    {
+        return true;
+    }
+
+    const std::vector<std::string> terms = ExtractSignificantExpressionTerms(expectedExpression);
+
+    if (terms.size() < 2)
+    {
+        return true;
+    }
+
+    for (const std::string& term : terms)
+    {
+        if (pseudo.find(term) == std::string::npos)
+        {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 bool LooksLikeAssignedCallResult(const AnalyzeResponse& response, const std::string& callee)
@@ -1661,6 +1938,650 @@ void CheckRecoveredCallArgumentConsistency(const AnalyzeRequest& request, const 
     }
 }
 
+std::vector<CallArgumentFact> RecoveredCallArgumentsAtSite(const AnalysisFacts& facts, uint64_t site)
+{
+    std::vector<CallArgumentFact> arguments;
+
+    for (const CallArgumentFact& argument : facts.CallArguments)
+    {
+        if (argument.Site == site && argument.Confidence >= 0.65 && !TrimCopy(argument.Expression).empty())
+        {
+            arguments.push_back(argument);
+        }
+    }
+
+    std::sort(
+        arguments.begin(),
+        arguments.end(),
+        [](const CallArgumentFact& left, const CallArgumentFact& right)
+        {
+            return left.Ordinal < right.Ordinal;
+        });
+
+    return arguments;
+}
+
+bool PseudoCallPreservesRecoveredExpressions(
+    const std::vector<std::string>& pseudoArguments,
+    const std::vector<CallArgumentFact>& recoveredArguments)
+{
+    bool checkedExpression = false;
+
+    for (const CallArgumentFact& argument : recoveredArguments)
+    {
+        if (argument.Ordinal == 0 || argument.Ordinal > pseudoArguments.size())
+        {
+            return false;
+        }
+
+        if (!IsExpressionRichEnoughToVerify(argument.Expression))
+        {
+            continue;
+        }
+
+        checkedExpression = true;
+
+        if (!PseudoArgumentPreservesExpectedExpression(pseudoArguments[argument.Ordinal - 1U], argument.Expression))
+        {
+            return false;
+        }
+    }
+
+    return checkedExpression;
+}
+
+void CheckRecoveredCallArgumentExpressionConsistency(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
+{
+    if (response.Confidence <= 0.65)
+    {
+        return;
+    }
+
+    size_t suspiciousCalls = 0;
+
+    for (const CallTargetInfo& call : request.Facts.CallTargets)
+    {
+        if (call.DisplayName.empty() || call.Confidence < 0.65)
+        {
+            continue;
+        }
+
+        const std::vector<CallArgumentFact> recoveredArguments = RecoveredCallArgumentsAtSite(request.Facts, call.Site);
+
+        if (recoveredArguments.empty())
+        {
+            continue;
+        }
+
+        const std::vector<std::vector<std::string>> pseudoArgumentLists = FindCallArgumentLists(response, call.DisplayName);
+
+        if (pseudoArgumentLists.empty())
+        {
+            continue;
+        }
+
+        bool hasExpressionToCheck = false;
+        bool hasPreservingCall = false;
+
+        for (const CallArgumentFact& argument : recoveredArguments)
+        {
+            hasExpressionToCheck = hasExpressionToCheck || IsExpressionRichEnoughToVerify(argument.Expression);
+        }
+
+        if (!hasExpressionToCheck)
+        {
+            continue;
+        }
+
+        for (const std::vector<std::string>& pseudoArguments : pseudoArgumentLists)
+        {
+            if (PseudoCallPreservesRecoveredExpressions(pseudoArguments, recoveredArguments))
+            {
+                hasPreservingCall = true;
+                break;
+            }
+        }
+
+        if (!hasPreservingCall)
+        {
+            ++suspiciousCalls;
+        }
+    }
+
+    if (suspiciousCalls != 0)
+    {
+        ++report.FactConflicts;
+        AddIssue(
+            report,
+            "call.argument_expression_omitted",
+            "warning",
+            "pseudo_c calls recovered callees but drops high-confidence recovered argument expression operands",
+            "calls_with_argument_expression_loss=" + std::to_string(suspiciousCalls));
+    }
+}
+
+std::set<std::string> BuildObfuscationStateVariableCandidates(const AnalysisFacts& facts)
+{
+    std::set<std::string> candidates;
+
+    for (const ObfuscationStateVariable& variable : facts.Obfuscation.StateVariables)
+    {
+        if (!variable.Name.empty())
+        {
+            candidates.insert(ToLowerAscii(variable.Name));
+        }
+    }
+
+    for (const ObfuscationDispatcher& dispatcher : facts.Obfuscation.Dispatchers)
+    {
+        if (!dispatcher.StateVariable.empty())
+        {
+            candidates.insert(ToLowerAscii(dispatcher.StateVariable));
+        }
+    }
+
+    if (!facts.Obfuscation.Dispatchers.empty() || !facts.SemanticControlFlow.Edges.empty())
+    {
+        candidates.insert("state");
+        candidates.insert("dispatcher_state");
+        candidates.insert("current_state");
+    }
+
+    return candidates;
+}
+
+std::set<std::string> BuildKnownObfuscationStateValues(const AnalysisFacts& facts)
+{
+    std::set<std::string> values;
+
+    for (const SemanticControlFlowEdge& edge : facts.SemanticControlFlow.Edges)
+    {
+        if (!edge.StateValue.empty())
+        {
+            values.insert(LowerNoSpace(edge.StateValue));
+        }
+    }
+
+    for (const ObfuscationDispatcher& dispatcher : facts.Obfuscation.Dispatchers)
+    {
+        for (const RecoveredControlFlowEdge& edge : dispatcher.RecoveredEdges)
+        {
+            if (!edge.StateValue.empty())
+            {
+                values.insert(LowerNoSpace(edge.StateValue));
+            }
+        }
+    }
+
+    return values;
+}
+
+bool ExpressionContainsKnownStateValue(const std::string& expression, const std::set<std::string>& knownStateValues)
+{
+    const std::string compact = LowerNoSpace(expression);
+
+    for (const std::string& value : knownStateValues)
+    {
+        if (!value.empty() && compact.find(value) != std::string::npos)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool LooksLikeNonStateValueAssignment(const std::string& expression, const std::set<std::string>& knownStateValues)
+{
+    const std::string compact = LowerNoSpace(expression);
+
+    if (compact.empty())
+    {
+        return false;
+    }
+
+    if (ExpressionContainsKnownStateValue(expression, knownStateValues))
+    {
+        return false;
+    }
+
+    if (compact.find("state") != std::string::npos)
+    {
+        return false;
+    }
+
+    return compact.find('[') != std::string::npos
+        || compact.find(']') != std::string::npos
+        || compact.find("bytes") != std::string::npos
+        || compact.find("buffer") != std::string::npos
+        || compact.find("input") != std::string::npos
+        || compact.find('(') != std::string::npos;
+}
+
+bool ResponseUsesObfuscationStateAssignments(
+    const std::vector<PseudoCodeToken>& tokens,
+    const std::set<std::string>& stateVariables)
+{
+    for (size_t index = 0; index + 1U < tokens.size(); ++index)
+    {
+        if (tokens[index].Kind != "identifier")
+        {
+            continue;
+        }
+
+        if (stateVariables.find(ToLowerAscii(tokens[index].Text)) == stateVariables.end())
+        {
+            continue;
+        }
+
+        if (tokens[index + 1U].Text == "=")
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::set<std::string> CollectAssignedObfuscationStateValues(
+    const std::vector<PseudoCodeToken>& tokens,
+    const std::set<std::string>& stateVariables,
+    const std::set<std::string>& knownStateValues,
+    const std::vector<std::pair<std::string, std::string>>& knownStateAliases)
+{
+    std::set<std::string> assignedValues;
+
+    for (size_t index = 0; index + 2U < tokens.size(); ++index)
+    {
+        if (tokens[index].Kind != "identifier")
+        {
+            continue;
+        }
+
+        if (stateVariables.find(ToLowerAscii(tokens[index].Text)) == stateVariables.end())
+        {
+            continue;
+        }
+
+        if (tokens[index + 1U].Text != "=")
+        {
+            continue;
+        }
+
+        std::string expression;
+        size_t depth = 0;
+
+        for (size_t cursor = index + 2U; cursor < tokens.size(); ++cursor)
+        {
+            const std::string& text = tokens[cursor].Text;
+
+            if (text == "(" || text == "[" || text == "{")
+            {
+                ++depth;
+            }
+            else if (text == ")" || text == "]" || text == "}")
+            {
+                if (depth != 0)
+                {
+                    --depth;
+                }
+            }
+
+            if (text == ";" && depth == 0)
+            {
+                break;
+            }
+
+            expression += text;
+        }
+
+        const std::string compactExpression = LowerNoSpace(expression);
+
+        for (const std::string& value : knownStateValues)
+        {
+            if (!value.empty() && compactExpression.find(value) != std::string::npos)
+            {
+                assignedValues.insert(value);
+            }
+        }
+
+        for (const std::pair<std::string, std::string>& alias : knownStateAliases)
+        {
+            if (!alias.first.empty() && compactExpression.find(alias.first) != std::string::npos)
+            {
+                assignedValues.insert(alias.second);
+            }
+        }
+    }
+
+    return assignedValues;
+}
+
+std::vector<std::pair<std::string, std::string>> BuildKnownObfuscationStateAliases(
+    const std::vector<PseudoCodeToken>& tokens,
+    const std::set<std::string>& stateVariables,
+    const std::set<std::string>& knownStateValues)
+{
+    std::vector<std::pair<std::string, std::string>> aliases;
+
+    for (size_t index = 0; index + 2U < tokens.size(); ++index)
+    {
+        if (tokens[index].Kind != "identifier")
+        {
+            continue;
+        }
+
+        const std::string aliasName = LowerNoSpace(tokens[index].Text);
+
+        if (stateVariables.find(aliasName) != stateVariables.end())
+        {
+            continue;
+        }
+
+        if (aliasName.find("state") == std::string::npos)
+        {
+            continue;
+        }
+
+        if (tokens[index + 1U].Text != "=")
+        {
+            continue;
+        }
+
+        std::string expression;
+        size_t depth = 0;
+
+        for (size_t cursor = index + 2U; cursor < tokens.size(); ++cursor)
+        {
+            const std::string& text = tokens[cursor].Text;
+
+            if (text == "(" || text == "[" || text == "{")
+            {
+                ++depth;
+            }
+            else if (text == ")" || text == "]" || text == "}")
+            {
+                if (depth != 0)
+                {
+                    --depth;
+                }
+            }
+
+            if (text == ";" && depth == 0)
+            {
+                break;
+            }
+
+            expression += text;
+        }
+
+        const std::string compactExpression = LowerNoSpace(expression);
+
+        for (const std::string& value : knownStateValues)
+        {
+            if (!value.empty() && compactExpression.find(value) != std::string::npos)
+            {
+                aliases.push_back(std::make_pair(aliasName, value));
+            }
+        }
+    }
+
+    return aliases;
+}
+
+bool HasUnresolvedSymbolicObfuscationStateAssignment(
+    const std::vector<PseudoCodeToken>& tokens,
+    const std::set<std::string>& stateVariables,
+    const std::set<std::string>& knownStateValues,
+    const std::vector<std::pair<std::string, std::string>>& knownStateAliases)
+{
+    for (size_t index = 0; index + 2U < tokens.size(); ++index)
+    {
+        if (tokens[index].Kind != "identifier")
+        {
+            continue;
+        }
+
+        if (stateVariables.find(ToLowerAscii(tokens[index].Text)) == stateVariables.end())
+        {
+            continue;
+        }
+
+        if (tokens[index + 1U].Text != "=")
+        {
+            continue;
+        }
+
+        std::string expression;
+        size_t depth = 0;
+
+        for (size_t cursor = index + 2U; cursor < tokens.size(); ++cursor)
+        {
+            const std::string& text = tokens[cursor].Text;
+
+            if (text == "(" || text == "[" || text == "{")
+            {
+                ++depth;
+            }
+            else if (text == ")" || text == "]" || text == "}")
+            {
+                if (depth != 0)
+                {
+                    --depth;
+                }
+            }
+
+            if (text == ";" && depth == 0)
+            {
+                break;
+            }
+
+            expression += text;
+        }
+
+        const std::string compactExpression = LowerNoSpace(expression);
+        bool containsKnownStateValue = false;
+
+        for (const std::string& value : knownStateValues)
+        {
+            containsKnownStateValue = containsKnownStateValue
+                || (!value.empty() && compactExpression.find(value) != std::string::npos);
+        }
+
+        for (const std::pair<std::string, std::string>& alias : knownStateAliases)
+        {
+            containsKnownStateValue = containsKnownStateValue
+                || (!alias.first.empty() && compactExpression.find(alias.first) != std::string::npos);
+        }
+
+        if (!containsKnownStateValue && compactExpression.find("state") != std::string::npos)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::set<std::string> BuildRequiredObfuscationStateTransitionValues(const AnalysisFacts& facts)
+{
+    std::set<std::string> values;
+
+    for (const SemanticControlFlowEdge& edge : facts.SemanticControlFlow.Edges)
+    {
+        if (!edge.Dead && edge.Confidence >= 0.75 && !edge.StateValue.empty())
+        {
+            values.insert(LowerNoSpace(edge.StateValue));
+        }
+    }
+
+    for (const ObfuscationDispatcher& dispatcher : facts.Obfuscation.Dispatchers)
+    {
+        if (dispatcher.Confidence < 0.75)
+        {
+            continue;
+        }
+
+        for (const RecoveredControlFlowEdge& edge : dispatcher.RecoveredEdges)
+        {
+            if (edge.Confidence >= 0.75 && !edge.StateValue.empty())
+            {
+                values.insert(LowerNoSpace(edge.StateValue));
+            }
+        }
+    }
+
+    return values;
+}
+
+void CheckObfuscationStateTransitionAssignments(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
+{
+    if (response.Confidence <= 0.60)
+    {
+        return;
+    }
+
+    const std::set<std::string> stateVariables = BuildObfuscationStateVariableCandidates(request.Facts);
+
+    if (stateVariables.empty())
+    {
+        return;
+    }
+
+    const std::set<std::string> knownStateValues = BuildKnownObfuscationStateValues(request.Facts);
+    const std::set<std::string> requiredValues = BuildRequiredObfuscationStateTransitionValues(request.Facts);
+
+    if (knownStateValues.empty() || requiredValues.empty())
+    {
+        return;
+    }
+
+    const std::vector<PseudoCodeToken> tokens = CodeTokens(response);
+
+    if (!ResponseUsesObfuscationStateAssignments(tokens, stateVariables))
+    {
+        return;
+    }
+
+    const std::vector<std::pair<std::string, std::string>> knownStateAliases = BuildKnownObfuscationStateAliases(
+        tokens,
+        stateVariables,
+        knownStateValues);
+    const std::set<std::string> assignedValues = CollectAssignedObfuscationStateValues(
+        tokens,
+        stateVariables,
+        knownStateValues,
+        knownStateAliases);
+
+    if (HasUnresolvedSymbolicObfuscationStateAssignment(tokens, stateVariables, knownStateValues, knownStateAliases))
+    {
+        return;
+    }
+
+    std::vector<std::string> missingValues;
+
+    for (const std::string& value : requiredValues)
+    {
+        if (assignedValues.find(value) == assignedValues.end())
+        {
+            missingValues.push_back(value);
+        }
+    }
+
+    if (!missingValues.empty())
+    {
+        ++report.MissingEvidence;
+        AddIssue(
+            report,
+            "obfuscation.state_transition_assignment_omitted",
+            "warning",
+            "pseudo_c uses an obfuscation state variable but omits one or more recovered state transition values",
+            "missing_state_values=" + JoinStrings(missingValues, ","));
+    }
+}
+
+void CheckObfuscationStateAssignments(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
+{
+    if (response.Confidence <= 0.60)
+    {
+        return;
+    }
+
+    const std::set<std::string> stateVariables = BuildObfuscationStateVariableCandidates(request.Facts);
+
+    if (stateVariables.empty())
+    {
+        return;
+    }
+
+    const std::set<std::string> knownStateValues = BuildKnownObfuscationStateValues(request.Facts);
+    const std::vector<PseudoCodeToken> tokens = CodeTokens(response);
+    size_t badAssignments = 0;
+    std::vector<std::string> contexts;
+
+    for (size_t index = 0; index + 2U < tokens.size(); ++index)
+    {
+        if (tokens[index].Kind != "identifier")
+        {
+            continue;
+        }
+
+        if (stateVariables.find(ToLowerAscii(tokens[index].Text)) == stateVariables.end())
+        {
+            continue;
+        }
+
+        if (tokens[index + 1U].Text != "=")
+        {
+            continue;
+        }
+
+        std::string expression;
+        size_t depth = 0;
+
+        for (size_t cursor = index + 2U; cursor < tokens.size(); ++cursor)
+        {
+            const std::string& text = tokens[cursor].Text;
+
+            if (text == "(" || text == "[" || text == "{")
+            {
+                ++depth;
+            }
+            else if (text == ")" || text == "]" || text == "}")
+            {
+                if (depth != 0)
+                {
+                    --depth;
+                }
+            }
+
+            if (text == ";" && depth == 0)
+            {
+                break;
+            }
+
+            expression += text;
+        }
+
+        if (LooksLikeNonStateValueAssignment(expression, knownStateValues))
+        {
+            ++badAssignments;
+            contexts.push_back(tokens[index].Text + " = " + expression);
+        }
+    }
+
+    if (badAssignments != 0)
+    {
+        ++report.FactConflicts;
+        AddIssue(
+            report,
+            "obfuscation.state_assignment_non_state_value",
+            "error",
+            "pseudo_c assigns a likely data expression to an obfuscation state variable instead of a recovered state value",
+            BuildClaimContextEvidence(contexts));
+    }
+}
+
 bool IsKnownResponseName(const AnalyzeRequest& request, const std::string& name)
 {
     if (name.empty())
@@ -2438,6 +3359,9 @@ VerifyReport VerifyResponse(const AnalyzeRequest& request, AnalyzeResponse& resp
     CheckCalleeSummaryConsistency(request, response, report);
     CheckRecoveredCallCoverage(request, response, report);
     CheckRecoveredCallArgumentConsistency(request, response, report);
+    CheckRecoveredCallArgumentExpressionConsistency(request, response, report);
+    CheckObfuscationStateAssignments(request, response, report);
+    CheckObfuscationStateTransitionAssignments(request, response, report);
     CheckResponseNameGrounding(request, response, report);
     CheckEvidenceCoverage(request, response, report);
     CheckEvidenceGraphConsistency(request, response, report);
