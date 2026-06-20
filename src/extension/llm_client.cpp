@@ -4395,6 +4395,7 @@ constexpr size_t kChunkOverlapBlocks = 2;
 constexpr size_t kChunkPromptFactLimit = 16;
 constexpr size_t kChunkPromptUncertaintyLimit = 8;
 constexpr size_t kMergeChunkUncoveredBlockIdLimit = 32;
+constexpr size_t kMergeChunkEvidenceBlockIdLimit = 32;
 constexpr double kMergeChunkLowConfidenceThreshold = 0.55;
 
 std::string DescribePreferredNaturalLanguage(const AnalyzeRequest& request)
@@ -6536,6 +6537,90 @@ JsonValue BuildMergeChunkSummaryQualityJson(
     return object;
 }
 
+JsonValue BuildMergeChunkSummaryEvidenceJson(
+    const AnalyzeRequest& request,
+    const std::vector<ChunkPlan>& chunkPlans,
+    const std::vector<ChunkAnalysis>& chunkAnalyses)
+{
+    JsonValue object = JsonValue::MakeObject();
+    std::set<std::string> plannedBlockIds;
+    std::set<std::string> evidenceBlockIds;
+    std::set<std::string> outsideEvidenceBlockIds;
+    std::vector<std::string> chunksWithoutBlockEvidence;
+
+    for (const ChunkPlan& plan : chunkPlans)
+    {
+        for (const size_t blockIndex : plan.BlockIndices)
+        {
+            if (blockIndex < request.Facts.Blocks.size())
+            {
+                plannedBlockIds.insert(request.Facts.Blocks[blockIndex].Id);
+            }
+        }
+    }
+
+    for (const ChunkAnalysis& analysis : chunkAnalyses)
+    {
+        bool hasBlockEvidence = false;
+
+        for (const EvidenceItem& evidence : analysis.Evidence)
+        {
+            for (const std::string& blockId : evidence.Blocks)
+            {
+                if (blockId.empty())
+                {
+                    continue;
+                }
+
+                hasBlockEvidence = true;
+                evidenceBlockIds.insert(blockId);
+
+                if (plannedBlockIds.find(blockId) == plannedBlockIds.end())
+                {
+                    outsideEvidenceBlockIds.insert(blockId);
+                }
+            }
+        }
+
+        if (!hasBlockEvidence)
+        {
+            chunksWithoutBlockEvidence.push_back(analysis.ChunkId);
+        }
+    }
+
+    size_t groundedEvidenceBlockCount = 0;
+
+    for (const std::string& blockId : evidenceBlockIds)
+    {
+        if (plannedBlockIds.find(blockId) != plannedBlockIds.end())
+        {
+            ++groundedEvidenceBlockCount;
+        }
+    }
+
+    std::vector<std::string> outsideEvidenceBlockIdList;
+
+    for (const std::string& blockId : outsideEvidenceBlockIds)
+    {
+        if (outsideEvidenceBlockIdList.size() >= kMergeChunkEvidenceBlockIdLimit)
+        {
+            break;
+        }
+
+        outsideEvidenceBlockIdList.push_back(blockId);
+    }
+
+    object.Set("planned_block_count", JsonValue::MakeNumber(static_cast<double>(plannedBlockIds.size())));
+    object.Set("evidence_block_count", JsonValue::MakeNumber(static_cast<double>(evidenceBlockIds.size())));
+    object.Set("grounded_evidence_block_count", JsonValue::MakeNumber(static_cast<double>(groundedEvidenceBlockCount)));
+    object.Set("evidence_block_coverage_ratio", JsonValue::MakeNumber(plannedBlockIds.empty() ? 0.0 : static_cast<double>(groundedEvidenceBlockCount) / static_cast<double>(plannedBlockIds.size())));
+    object.Set("chunks_without_block_evidence", BuildStringArray(chunksWithoutBlockEvidence, 16, nullptr));
+    object.Set("evidence_blocks_outside_chunk_plans", BuildStringArray(outsideEvidenceBlockIdList, kMergeChunkEvidenceBlockIdLimit, nullptr));
+    object.Set("evidence_blocks_outside_chunk_plans_truncated", JsonValue::MakeBoolean(outsideEvidenceBlockIds.size() > kMergeChunkEvidenceBlockIdLimit));
+    object.Set("all_evidence_blocks_grounded", JsonValue::MakeBoolean(outsideEvidenceBlockIds.empty()));
+    return object;
+}
+
 JsonValue BuildMergeFactsJson(
     const AnalyzeRequest& request,
     const std::vector<ChunkPlan>& chunkPlans,
@@ -6622,6 +6707,7 @@ JsonValue BuildMergeFactsJson(
     chunking.Set("chunk_plans", BuildMergeChunkPlansJson(request, chunkPlans));
     chunking.Set("summary_alignment", BuildMergeChunkSummaryAlignmentJson(chunkPlans, chunkAnalyses));
     chunking.Set("summary_quality", BuildMergeChunkSummaryQualityJson(chunkAnalyses));
+    chunking.Set("summary_evidence", BuildMergeChunkSummaryEvidenceJson(request, chunkPlans, chunkAnalyses));
 
     root.Set("arch", JsonValue::MakeString(request.Facts.Arch));
     root.Set("mode", JsonValue::MakeString(request.Facts.Mode == AnalysisMode::LiveMemory ? "live" : "file"));
@@ -6763,7 +6849,7 @@ std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
         "Return only a JSON object with these keys: status, pseudo_c, summary, params, locals, uncertainties, evidence, confidence. "
         "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style. "
-        "Use the chunk plans, coverage metadata, summary alignment and quality metadata, and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
+        "Use the chunk plans, coverage metadata, summary alignment, quality, and evidence metadata, and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
         "Use selection, blocks, direct_calls, indirect_calls, recovered_arguments, recovered_locals, call_arguments, stack_pointer, memory_accesses, ir_values, switches, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, control_flow, type_hints, idioms, callee_summaries, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, and pdb facts to preserve semantic names, prompt coverage limits, block grounding, call-site grounding, stack-frame context, reaching-value state, memory side effects, switch dispatch intent, control-flow intent, debugger-session constraints, and observed runtime context. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
@@ -6794,7 +6880,7 @@ std::string BuildMergeUserPrompt(
     prompt += "6. If chunks disagree or coverage remains partial, explain that in uncertainties, but still keep the visible operations explicit.\n";
     prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
     prompt += "8. evidence.blocks must reference block ids that appear in the chunk summaries.\n";
-    prompt += "9. Use chunking.coverage_complete, chunking.uncovered_block_ids, chunking.chunk_plans, chunking.summary_alignment, and chunking.summary_quality to detect omitted, duplicated, orphaned, low-confidence, or weak-evidence chunks before trusting a short chunk summary.\n";
+    prompt += "9. Use chunking.coverage_complete, chunking.uncovered_block_ids, chunking.chunk_plans, chunking.summary_alignment, chunking.summary_quality, and chunking.summary_evidence to detect omitted, duplicated, orphaned, low-confidence, weak-evidence, or ungrounded chunks before trusting a short chunk summary.\n";
     prompt += "10. Treat the analyzer skeleton and graph-derived facts as a draft to refine; do not invent unsupported loops, switches, or calls during merge.\n";
     return prompt;
 }
