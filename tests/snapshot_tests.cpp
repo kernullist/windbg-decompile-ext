@@ -1725,6 +1725,20 @@ void TestObfuscationFactsSnapshot()
     mergeSwitch.CaseTargets.push_back(0x7777D030);
     chunkScopedRequest.Facts.Switches.insert(chunkScopedRequest.Facts.Switches.begin(), mergeSwitch);
 
+    decomp::CallSite mergeDirectCall;
+    mergeDirectCall.Site = 0x7777E010;
+    mergeDirectCall.Target = "MERGE_DIRECT_CALL_MARKER";
+    mergeDirectCall.Kind = "direct";
+    mergeDirectCall.Returns = true;
+    chunkScopedRequest.Facts.Calls.insert(chunkScopedRequest.Facts.Calls.begin(), mergeDirectCall);
+
+    decomp::CallSite mergeIndirectCall;
+    mergeIndirectCall.Site = 0x7777E020;
+    mergeIndirectCall.Target = "MERGE_INDIRECT_CALL_MARKER";
+    mergeIndirectCall.Kind = "indirect";
+    mergeIndirectCall.Returns = true;
+    chunkScopedRequest.Facts.IndirectCalls.insert(chunkScopedRequest.Facts.IndirectCalls.begin(), mergeIndirectCall);
+
     decomp::StackPointerFact outsideChunkStackPointer;
     outsideChunkStackPointer.Site = 0x77770020;
     outsideChunkStackPointer.DeltaBefore = 0x7ABCDE;
@@ -2029,6 +2043,10 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("INSIDE_CHUNK_IR_TARGET_MARKER") != std::string::npos, "merge prompt should preserve IR value facts for final synthesis");
     Expect(mergePromptDump.find("\"switches\"") != std::string::npos, "merge prompt should include switch facts");
     Expect(mergePromptDump.find("MERGE_SWITCH_MARKER") != std::string::npos, "merge prompt should preserve switch facts for final synthesis");
+    Expect(mergePromptDump.find("\"direct_calls\"") != std::string::npos, "merge prompt should include direct call facts");
+    Expect(mergePromptDump.find("MERGE_DIRECT_CALL_MARKER") != std::string::npos, "merge prompt should preserve direct call facts for final synthesis");
+    Expect(mergePromptDump.find("\"indirect_calls\"") != std::string::npos, "merge prompt should include indirect call facts");
+    Expect(mergePromptDump.find("MERGE_INDIRECT_CALL_MARKER") != std::string::npos, "merge prompt should preserve indirect call facts for final synthesis");
 
     const decomp::AnalysisFacts stateSwitchFacts = BuildLegitimateStateSwitchFacts();
     Expect(FindHighConfidenceDispatcher(stateSwitchFacts) == nullptr, "ordinary compare-chain state switch should not become a high-confidence flattening dispatcher");
