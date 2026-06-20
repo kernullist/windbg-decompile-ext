@@ -4395,6 +4395,7 @@ constexpr size_t kChunkOverlapBlocks = 2;
 constexpr size_t kChunkPromptFactLimit = 16;
 constexpr size_t kChunkPromptUncertaintyLimit = 8;
 constexpr size_t kMergeChunkUncoveredBlockIdLimit = 32;
+constexpr double kMergeChunkLowConfidenceThreshold = 0.55;
 
 std::string DescribePreferredNaturalLanguage(const AnalyzeRequest& request)
 {
@@ -6479,6 +6480,62 @@ JsonValue BuildMergeChunkSummaryAlignmentJson(
     return object;
 }
 
+JsonValue BuildMergeChunkSummaryQualityJson(
+    const std::vector<ChunkAnalysis>& chunkAnalyses)
+{
+    JsonValue object = JsonValue::MakeObject();
+    std::vector<std::string> lowConfidenceChunkIds;
+    std::vector<std::string> uncertaintyChunkIds;
+    std::vector<std::string> emptyEvidenceChunkIds;
+    double confidenceSum = 0.0;
+    double minConfidence = 0.0;
+    double maxConfidence = 0.0;
+    bool hasConfidence = false;
+
+    for (const ChunkAnalysis& analysis : chunkAnalyses)
+    {
+        confidenceSum += analysis.Confidence;
+
+        if (!hasConfidence)
+        {
+            minConfidence = analysis.Confidence;
+            maxConfidence = analysis.Confidence;
+            hasConfidence = true;
+        }
+        else
+        {
+            minConfidence = (std::min)(minConfidence, analysis.Confidence);
+            maxConfidence = (std::max)(maxConfidence, analysis.Confidence);
+        }
+
+        if (analysis.Confidence < kMergeChunkLowConfidenceThreshold)
+        {
+            lowConfidenceChunkIds.push_back(analysis.ChunkId);
+        }
+
+        if (!analysis.Uncertainties.empty())
+        {
+            uncertaintyChunkIds.push_back(analysis.ChunkId);
+        }
+
+        if (analysis.Evidence.empty())
+        {
+            emptyEvidenceChunkIds.push_back(analysis.ChunkId);
+        }
+    }
+
+    object.Set("summary_count", JsonValue::MakeNumber(static_cast<double>(chunkAnalyses.size())));
+    object.Set("average_confidence", JsonValue::MakeNumber(chunkAnalyses.empty() ? 0.0 : confidenceSum / static_cast<double>(chunkAnalyses.size())));
+    object.Set("min_confidence", JsonValue::MakeNumber(hasConfidence ? minConfidence : 0.0));
+    object.Set("max_confidence", JsonValue::MakeNumber(hasConfidence ? maxConfidence : 0.0));
+    object.Set("low_confidence_threshold", JsonValue::MakeNumber(kMergeChunkLowConfidenceThreshold));
+    object.Set("low_confidence_chunk_ids", BuildStringArray(lowConfidenceChunkIds, 16, nullptr));
+    object.Set("uncertainty_chunk_ids", BuildStringArray(uncertaintyChunkIds, 16, nullptr));
+    object.Set("empty_evidence_chunk_ids", BuildStringArray(emptyEvidenceChunkIds, 16, nullptr));
+    object.Set("all_summaries_have_evidence", JsonValue::MakeBoolean(emptyEvidenceChunkIds.empty()));
+    return object;
+}
+
 JsonValue BuildMergeFactsJson(
     const AnalyzeRequest& request,
     const std::vector<ChunkPlan>& chunkPlans,
@@ -6564,6 +6621,7 @@ JsonValue BuildMergeFactsJson(
     chunking.Set("uncovered_block_ids_truncated", JsonValue::MakeBoolean(uncoveredBlockIdsTruncated));
     chunking.Set("chunk_plans", BuildMergeChunkPlansJson(request, chunkPlans));
     chunking.Set("summary_alignment", BuildMergeChunkSummaryAlignmentJson(chunkPlans, chunkAnalyses));
+    chunking.Set("summary_quality", BuildMergeChunkSummaryQualityJson(chunkAnalyses));
 
     root.Set("arch", JsonValue::MakeString(request.Facts.Arch));
     root.Set("mode", JsonValue::MakeString(request.Facts.Mode == AnalysisMode::LiveMemory ? "live" : "file"));
@@ -6705,7 +6763,7 @@ std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
         "Return only a JSON object with these keys: status, pseudo_c, summary, params, locals, uncertainties, evidence, confidence. "
         "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style. "
-        "Use the chunk plans, coverage metadata, summary alignment metadata, and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
+        "Use the chunk plans, coverage metadata, summary alignment and quality metadata, and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
         "Use selection, blocks, direct_calls, indirect_calls, recovered_arguments, recovered_locals, call_arguments, stack_pointer, memory_accesses, ir_values, switches, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, control_flow, type_hints, idioms, callee_summaries, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, and pdb facts to preserve semantic names, prompt coverage limits, block grounding, call-site grounding, stack-frame context, reaching-value state, memory side effects, switch dispatch intent, control-flow intent, debugger-session constraints, and observed runtime context. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
@@ -6736,7 +6794,7 @@ std::string BuildMergeUserPrompt(
     prompt += "6. If chunks disagree or coverage remains partial, explain that in uncertainties, but still keep the visible operations explicit.\n";
     prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
     prompt += "8. evidence.blocks must reference block ids that appear in the chunk summaries.\n";
-    prompt += "9. Use chunking.coverage_complete, chunking.uncovered_block_ids, chunking.chunk_plans, and chunking.summary_alignment to detect omitted, duplicated, or orphaned chunk coverage before trusting a short chunk summary.\n";
+    prompt += "9. Use chunking.coverage_complete, chunking.uncovered_block_ids, chunking.chunk_plans, chunking.summary_alignment, and chunking.summary_quality to detect omitted, duplicated, orphaned, low-confidence, or weak-evidence chunks before trusting a short chunk summary.\n";
     prompt += "10. Treat the analyzer skeleton and graph-derived facts as a draft to refine; do not invent unsupported loops, switches, or calls during merge.\n";
     return prompt;
 }
