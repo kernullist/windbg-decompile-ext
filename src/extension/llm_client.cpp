@@ -7735,6 +7735,85 @@ JsonValue BuildMergeChunkObfuscationPolicyJson(const AnalyzeRequest& request)
     return object;
 }
 
+JsonValue BuildMergeChunkDeobfuscationPlanJson(const AnalyzeRequest& request)
+{
+    JsonValue object = JsonValue::MakeObject();
+    std::vector<std::string> deobfuscationActions;
+    std::vector<std::string> priorityFactPaths;
+    std::vector<std::string> blockedAssumptions;
+    size_t highConfidenceSemanticEdgeCount = 0;
+    const bool hasDispatchers = !request.Facts.Obfuscation.Dispatchers.empty();
+    const bool hasOpaquePredicates = !request.Facts.Obfuscation.OpaquePredicates.empty();
+    const bool hasSubstitutionIdioms = !request.Facts.Obfuscation.SubstitutionIdioms.empty();
+    const bool hasSemanticOverlay = !request.Facts.SemanticControlFlow.Edges.empty();
+    const bool hasObfuscationFacts = hasDispatchers || hasOpaquePredicates || hasSubstitutionIdioms;
+
+    for (const SemanticControlFlowEdge& edge : request.Facts.SemanticControlFlow.Edges)
+    {
+        if (edge.Confidence >= 0.75)
+        {
+            ++highConfidenceSemanticEdgeCount;
+        }
+    }
+
+    if (hasSemanticOverlay)
+    {
+        AppendMergeReviewAction(deobfuscationActions, "apply_semantic_control_flow_overlay");
+        AppendMergeReviewAction(priorityFactPaths, "semantic_control_flow.edges");
+    }
+
+    if (hasDispatchers)
+    {
+        AppendMergeReviewAction(deobfuscationActions, "recover_dispatcher_edges");
+        AppendMergeReviewAction(deobfuscationActions, "suppress_dispatcher_loop_shape");
+        AppendMergeReviewAction(priorityFactPaths, "obfuscation.dispatchers.recovered_edges");
+        AppendMergeReviewAction(priorityFactPaths, "obfuscation.dispatchers.state_variable");
+    }
+
+    if (hasOpaquePredicates)
+    {
+        AppendMergeReviewAction(deobfuscationActions, "prune_proven_opaque_dead_edges");
+        AppendMergeReviewAction(priorityFactPaths, "obfuscation.opaque_predicates");
+    }
+
+    if (hasSubstitutionIdioms)
+    {
+        AppendMergeReviewAction(deobfuscationActions, "apply_local_substitution_simplifications");
+        AppendMergeReviewAction(priorityFactPaths, "obfuscation.substitution_idioms");
+    }
+
+    if (hasObfuscationFacts && !hasSemanticOverlay)
+    {
+        AppendMergeReviewAction(deobfuscationActions, "preserve_raw_cfg_fallback_uncertainty");
+        AppendMergeReviewAction(priorityFactPaths, "control_flow");
+        AppendMergeReviewAction(priorityFactPaths, "blocks");
+    }
+
+    if (!hasObfuscationFacts)
+    {
+        AppendMergeReviewAction(deobfuscationActions, "no_deobfuscation_rewrite_required");
+    }
+
+    blockedAssumptions.push_back("raw_dispatcher_loop_is_source_loop");
+    blockedAssumptions.push_back("opaque_branch_is_dead_without_fact");
+    blockedAssumptions.push_back("substitution_idiom_is_source_intent");
+    blockedAssumptions.push_back("low_confidence_semantic_edge_is_structural_truth");
+
+    object.Set("deobfuscation_action_count", JsonValue::MakeNumber(static_cast<double>(deobfuscationActions.size())));
+    object.Set("deobfuscation_actions", BuildStringArray(deobfuscationActions, 16, nullptr));
+    object.Set("priority_fact_paths", BuildStringArray(priorityFactPaths, 16, nullptr));
+    object.Set("blocked_assumptions", BuildStringArray(blockedAssumptions, 16, nullptr));
+    object.Set("requires_dispatcher_edge_reconciliation", JsonValue::MakeBoolean(hasDispatchers));
+    object.Set("requires_opaque_dead_edge_pruning", JsonValue::MakeBoolean(hasOpaquePredicates));
+    object.Set("requires_substitution_simplification", JsonValue::MakeBoolean(hasSubstitutionIdioms));
+    object.Set("requires_semantic_overlay_review", JsonValue::MakeBoolean(hasSemanticOverlay));
+    object.Set("requires_raw_cfg_fallback_uncertainty", JsonValue::MakeBoolean(hasObfuscationFacts && !hasSemanticOverlay));
+    object.Set("safe_to_rewrite_obfuscated_cfg", JsonValue::MakeBoolean(!hasObfuscationFacts || highConfidenceSemanticEdgeCount != 0));
+    object.Set("high_confidence_semantic_edge_count", JsonValue::MakeNumber(static_cast<double>(highConfidenceSemanticEdgeCount)));
+    object.Set("semantic_overlay_confidence_threshold", JsonValue::MakeNumber(0.75));
+    return object;
+}
+
 JsonValue BuildMergeFactsJson(
     const AnalyzeRequest& request,
     const std::vector<ChunkPlan>& chunkPlans,
@@ -7830,6 +7909,7 @@ JsonValue BuildMergeFactsJson(
     chunking.Set("merge_output_contract", BuildMergeChunkOutputContractJson());
     chunking.Set("merge_traceability_matrix", BuildMergeChunkTraceabilityMatrixJson());
     chunking.Set("merge_obfuscation_policy", BuildMergeChunkObfuscationPolicyJson(request));
+    chunking.Set("merge_deobfuscation_plan", BuildMergeChunkDeobfuscationPlanJson(request));
 
     root.Set("arch", JsonValue::MakeString(request.Facts.Arch));
     root.Set("mode", JsonValue::MakeString(request.Facts.Mode == AnalysisMode::LiveMemory ? "live" : "file"));
@@ -7971,7 +8051,7 @@ std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
         "Return only a JSON object with these keys: status, pseudo_c, summary, params, locals, uncertainties, evidence, confidence. "
         "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style. "
-        "Use the chunk plans, coverage metadata, summary alignment, quality, evidence, risk metadata, per-chunk risk details, merge review plan, confidence policy, acceptance checks, output contract, traceability matrix, and obfuscation policy, and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
+        "Use the chunk plans, coverage metadata, summary alignment, quality, evidence, risk metadata, per-chunk risk details, merge review plan, confidence policy, acceptance checks, output contract, traceability matrix, obfuscation policy, and deobfuscation plan, and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
         "Use selection, blocks, direct_calls, indirect_calls, recovered_arguments, recovered_locals, call_arguments, stack_pointer, memory_accesses, ir_values, switches, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, control_flow, type_hints, idioms, callee_summaries, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, and pdb facts to preserve semantic names, prompt coverage limits, block grounding, call-site grounding, stack-frame context, reaching-value state, memory side effects, switch dispatch intent, control-flow intent, debugger-session constraints, and observed runtime context. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
@@ -8002,13 +8082,14 @@ std::string BuildMergeUserPrompt(
     prompt += "6. If chunks disagree or coverage remains partial, explain that in uncertainties, but still keep the visible operations explicit.\n";
     prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
     prompt += "8. evidence.blocks must reference block ids that appear in the chunk summaries.\n";
-    prompt += "9. Use chunking.coverage_complete, chunking.uncovered_block_ids, chunking.chunk_plans, chunking.summary_alignment, chunking.summary_quality, chunking.summary_evidence, chunking.merge_risk, chunking.merge_risk_details, chunking.merge_review_plan, chunking.merge_confidence_policy, chunking.merge_acceptance_checks, chunking.merge_output_contract, chunking.merge_traceability_matrix, and chunking.merge_obfuscation_policy to detect omitted, duplicated, orphaned, low-confidence, weak-evidence, ungrounded, obfuscated, or risk-coded chunks before trusting a short chunk summary.\n";
+    prompt += "9. Use chunking.coverage_complete, chunking.uncovered_block_ids, chunking.chunk_plans, chunking.summary_alignment, chunking.summary_quality, chunking.summary_evidence, chunking.merge_risk, chunking.merge_risk_details, chunking.merge_review_plan, chunking.merge_confidence_policy, chunking.merge_acceptance_checks, chunking.merge_output_contract, chunking.merge_traceability_matrix, chunking.merge_obfuscation_policy, and chunking.merge_deobfuscation_plan to detect omitted, duplicated, orphaned, low-confidence, weak-evidence, ungrounded, obfuscated, or risk-coded chunks before trusting a short chunk summary.\n";
     prompt += "10. Respect chunking.merge_confidence_policy.recommended_confidence_ceiling when setting confidence, and carry required uncertainty into uncertainties.\n";
     prompt += "11. Satisfy chunking.merge_acceptance_checks before reporting a clean merge; if blocking_issues is non-empty, reflect that in uncertainties and confidence.\n";
     prompt += "12. Follow chunking.merge_output_contract for required keys, evidence shape, grounding, language, and blocked-merge behavior.\n";
     prompt += "13. Use chunking.merge_traceability_matrix to map each output field back to source fact paths and chunk metadata before finalizing the JSON.\n";
     prompt += "14. Follow chunking.merge_obfuscation_policy when reconstructing flattened dispatch, opaque predicates, substitution idioms, and semantic-control-flow overlays.\n";
-    prompt += "15. Treat the analyzer skeleton and graph-derived facts as a draft to refine; do not invent unsupported loops, switches, or calls during merge.\n";
+    prompt += "15. Follow chunking.merge_deobfuscation_plan for dispatcher recovery, opaque edge pruning, substitution simplification, semantic overlay review, and raw-CFG fallback uncertainty.\n";
+    prompt += "16. Treat the analyzer skeleton and graph-derived facts as a draft to refine; do not invent unsupported loops, switches, or calls during merge.\n";
     return prompt;
 }
 

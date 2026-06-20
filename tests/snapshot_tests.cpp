@@ -2105,6 +2105,11 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("\"obfuscation_rewrite_rules\"") != std::string::npos, "merge prompt should include obfuscation rewrite rules");
     Expect(mergePromptDump.find("\"obfuscation_uncertainty_rules\"") != std::string::npos, "merge prompt should include obfuscation uncertainty rules");
     Expect(mergePromptDump.find("\"semantic_overlay_confidence_threshold\"") != std::string::npos, "merge prompt should include semantic overlay confidence threshold");
+    Expect(mergePromptDump.find("\"merge_deobfuscation_plan\"") != std::string::npos, "merge prompt should include merge deobfuscation plan");
+    Expect(mergePromptDump.find("\"deobfuscation_actions\"") != std::string::npos, "merge prompt should include deobfuscation actions");
+    Expect(mergePromptDump.find("\"priority_fact_paths\"") != std::string::npos, "merge prompt should include deobfuscation priority fact paths");
+    Expect(mergePromptDump.find("\"blocked_assumptions\"") != std::string::npos, "merge prompt should include blocked deobfuscation assumptions");
+    Expect(mergePromptDump.find("\"safe_to_rewrite_obfuscated_cfg\"") != std::string::npos, "merge prompt should include obfuscated CFG rewrite safety flag");
     Expect(mergePromptDump.find("\"first_block\"") != std::string::npos, "merge prompt should include chunk first-block provenance");
     Expect(mergePromptDump.find("\"last_block\"") != std::string::npos, "merge prompt should include chunk last-block provenance");
     Expect(mergePromptDump.find("\"block_ids\"") != std::string::npos, "merge prompt should include chunk block ids");
