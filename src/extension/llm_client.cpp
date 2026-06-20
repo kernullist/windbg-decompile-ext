@@ -8423,65 +8423,129 @@ bool ShouldRetryWithVerifierFeedback(const VerifyReport& report)
     return report.FactConflicts != 0 || report.MissingEvidence > 1;
 }
 
+struct VerifierIssueCorrectionRule
+{
+    std::array<const char*, 3> Codes = {};
+    size_t CodeCount = 0;
+    const char* Hint = "";
+};
+
+bool MatchesVerifierIssueCorrectionRule(
+    const std::string& code,
+    const VerifierIssueCorrectionRule& rule)
+{
+    for (size_t index = 0; index < rule.CodeCount; ++index)
+    {
+        if (rule.Codes[index] != nullptr && code == rule.Codes[index])
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 std::string BuildVerifierIssueCorrectionHint(const VerificationIssue& issue)
 {
-    if (issue.Code == "obfuscation.dead_edge_claim_without_opaque_predicate"
-        || issue.Code == "obfuscation.dead_edge_claim_without_matching_evidence"
-        || issue.Code == "obfuscation.dead_edge_rendered_as_live")
-    {
-        return "Do not prune or render a dead edge unless it is grounded by obfuscation.opaque_predicates or a semantic_control_flow dead edge; otherwise keep the branch visible or list uncertainty.";
-    }
+    static const VerifierIssueCorrectionRule rules[] = {
+        {
+            {
+                "obfuscation.dead_edge_claim_without_opaque_predicate",
+                "obfuscation.dead_edge_claim_without_matching_evidence",
+                "obfuscation.dead_edge_rendered_as_live"
+            },
+            3,
+            "Do not prune or render a dead edge unless it is grounded by obfuscation.opaque_predicates or a semantic_control_flow dead edge; otherwise keep the branch visible or list uncertainty."
+        },
+        {
+            {
+                "obfuscation.substitution_claim_without_evidence",
+                "obfuscation.substitution_memory_semantics_claim",
+                nullptr
+            },
+            2,
+            "Remove unsupported substitution rewrites; use obfuscation.substitution_idioms only for local scalar simplifications and keep pointer, load, store, volatile, or alias-sensitive expressions uncertain."
+        },
+        {
+            {
+                "obfuscation.dispatcher_claim_without_evidence",
+                "obfuscation.raw_dispatcher_loop_without_uncertainty",
+                nullptr
+            },
+            2,
+            "Use obfuscation.dispatchers.recovered_edges or semantic_control_flow edges for recovered structure; do not present a raw dispatcher loop as source logic unless uncertainty is explicit."
+        },
+        {
+            {
+                "control_flow.edge_claim_without_evidence",
+                nullptr,
+                nullptr
+            },
+            1,
+            "Remove invented control-flow edges unless they are present in raw CFG successors, semantic_control_flow edges, or obfuscation.dispatchers.recovered_edges; otherwise lower confidence and list the missing edge as uncertainty."
+        },
+        {
+            {
+                "control_flow.loop_without_back_edge",
+                nullptr,
+                nullptr
+            },
+            1,
+            "Do not introduce source-level loops unless recovered raw CFG or semantic_control_flow evidence contains a back edge; keep dispatcher-shaped flow explicit or list loop recovery as uncertainty."
+        },
+        {
+            {
+                "control_flow.switch_without_evidence",
+                "control_flow.switch_without_case_evidence",
+                "control_flow.too_many_switch_cases"
+            },
+            3,
+            "Do not invent switch structure or extra cases unless grounded by recovered switch facts, case targets, or dispatcher recovered edges; otherwise emit simpler branch structure and uncertainty."
+        },
+        {
+            {
+                "branch.without_evidence",
+                "branch.too_few_pseudo_conditions",
+                nullptr
+            },
+            2,
+            "Ground branch structure in normalized_conditions, conditional branch instructions, or semantic_control_flow facts; avoid adding or collapsing branches beyond recovered evidence."
+        },
+        {
+            {
+                "evidence.missing_for_high_confidence",
+                "evidence.low_coverage",
+                nullptr
+            },
+            2,
+            "Add block-grounded evidence entries for high-signal blocks, calls, branches, and memory effects before keeping high confidence; otherwise lower confidence and explain the coverage gap in uncertainties."
+        },
+        {
+            {
+                "evidence_graph.missing",
+                "evidence_graph.low_coverage",
+                nullptr
+            },
+            2,
+            "When evidence_graph is absent or weak, avoid presenting semantic claims as fully cross-checked; cite available facts directly, lower confidence, and add uncertainty about weak graph grounding."
+        },
+        {
+            {
+                "dataflow.unconverged_without_uncertainty",
+                nullptr,
+                nullptr
+            },
+            1,
+            "When block_value_states are unconverged, avoid definitive reaching-value or alias-sensitive rewrites; add uncertainty and cap confidence until dataflow convergence is proven."
+        }
+    };
 
-    if (issue.Code == "obfuscation.substitution_claim_without_evidence"
-        || issue.Code == "obfuscation.substitution_memory_semantics_claim")
+    for (const VerifierIssueCorrectionRule& rule : rules)
     {
-        return "Remove unsupported substitution rewrites; use obfuscation.substitution_idioms only for local scalar simplifications and keep pointer, load, store, volatile, or alias-sensitive expressions uncertain.";
-    }
-
-    if (issue.Code == "obfuscation.dispatcher_claim_without_evidence"
-        || issue.Code == "obfuscation.raw_dispatcher_loop_without_uncertainty")
-    {
-        return "Use obfuscation.dispatchers.recovered_edges or semantic_control_flow edges for recovered structure; do not present a raw dispatcher loop as source logic unless uncertainty is explicit.";
-    }
-
-    if (issue.Code == "control_flow.edge_claim_without_evidence")
-    {
-        return "Remove invented control-flow edges unless they are present in raw CFG successors, semantic_control_flow edges, or obfuscation.dispatchers.recovered_edges; otherwise lower confidence and list the missing edge as uncertainty.";
-    }
-
-    if (issue.Code == "control_flow.loop_without_back_edge")
-    {
-        return "Do not introduce source-level loops unless recovered raw CFG or semantic_control_flow evidence contains a back edge; keep dispatcher-shaped flow explicit or list loop recovery as uncertainty.";
-    }
-
-    if (issue.Code == "control_flow.switch_without_evidence"
-        || issue.Code == "control_flow.switch_without_case_evidence"
-        || issue.Code == "control_flow.too_many_switch_cases")
-    {
-        return "Do not invent switch structure or extra cases unless grounded by recovered switch facts, case targets, or dispatcher recovered edges; otherwise emit simpler branch structure and uncertainty.";
-    }
-
-    if (issue.Code == "branch.without_evidence"
-        || issue.Code == "branch.too_few_pseudo_conditions")
-    {
-        return "Ground branch structure in normalized_conditions, conditional branch instructions, or semantic_control_flow facts; avoid adding or collapsing branches beyond recovered evidence.";
-    }
-
-    if (issue.Code == "evidence.missing_for_high_confidence"
-        || issue.Code == "evidence.low_coverage")
-    {
-        return "Add block-grounded evidence entries for high-signal blocks, calls, branches, and memory effects before keeping high confidence; otherwise lower confidence and explain the coverage gap in uncertainties.";
-    }
-
-    if (issue.Code == "evidence_graph.missing"
-        || issue.Code == "evidence_graph.low_coverage")
-    {
-        return "When evidence_graph is absent or weak, avoid presenting semantic claims as fully cross-checked; cite available facts directly, lower confidence, and add uncertainty about weak graph grounding.";
-    }
-
-    if (issue.Code == "dataflow.unconverged_without_uncertainty")
-    {
-        return "When block_value_states are unconverged, avoid definitive reaching-value or alias-sensitive rewrites; add uncertainty and cap confidence until dataflow convergence is proven.";
+        if (MatchesVerifierIssueCorrectionRule(issue.Code, rule))
+        {
+            return rule.Hint;
+        }
     }
 
     if (StartsWithInsensitive(issue.Code, "obfuscation."))
