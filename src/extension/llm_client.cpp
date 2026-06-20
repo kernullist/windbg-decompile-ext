@@ -4401,6 +4401,47 @@ constexpr size_t kMergeChunkRiskEvidenceBlockIdLimit = 8;
 constexpr size_t kMergeChunkReviewPlanChunkLimit = 16;
 constexpr double kMergeChunkLowConfidenceThreshold = 0.55;
 
+std::set<size_t> BuildMergeCoveredBlockIndexSet(const std::vector<ChunkPlan>& chunkPlans)
+{
+    std::set<size_t> coveredBlocks;
+
+    for (const ChunkPlan& plan : chunkPlans)
+    {
+        for (const size_t blockIndex : plan.BlockIndices)
+        {
+            coveredBlocks.insert(blockIndex);
+        }
+    }
+
+    return coveredBlocks;
+}
+
+size_t CountValidMergeCoveredBlocks(
+    const std::set<size_t>& coveredBlocks,
+    size_t totalBlockCount)
+{
+    size_t count = 0;
+
+    for (const size_t blockIndex : coveredBlocks)
+    {
+        if (blockIndex < totalBlockCount)
+        {
+            ++count;
+        }
+    }
+
+    return count;
+}
+
+size_t CountMergeUncoveredBlocks(
+    const AnalyzeRequest& request,
+    const std::set<size_t>& coveredBlocks)
+{
+    const size_t totalBlockCount = request.Facts.Blocks.size();
+    const size_t coveredBlockCount = CountValidMergeCoveredBlocks(coveredBlocks, totalBlockCount);
+    return totalBlockCount - coveredBlockCount;
+}
+
 std::string DescribePreferredNaturalLanguage(const AnalyzeRequest& request)
 {
     if (!request.Facts.PreferredNaturalLanguageName.empty() && !request.Facts.PreferredNaturalLanguageTag.empty())
@@ -7144,57 +7185,132 @@ void ApplyMergeConfidenceCeiling(
     }
 }
 
-JsonValue BuildMergeChunkConfidencePolicyJson(
-    const MergeChunkDiagnostics& diagnostics)
+struct MergeConfidencePolicy
 {
-    JsonValue object = JsonValue::MakeObject();
-    std::vector<std::string> ceilingReasons;
-    double confidenceCeiling = 0.90;
+    double RecommendedConfidenceCeiling = 0.90;
+    std::vector<std::string> CeilingReasons;
+};
+
+struct MergeAcceptancePolicy
+{
+    std::vector<std::string> AcceptanceChecks;
+    std::vector<std::string> BlockingIssues;
+    bool RequiresCoverageStatement = false;
+    bool RequiresEvidenceRewrite = false;
+};
+
+struct MergeOutputPostPolicy
+{
+    bool Active = false;
+    MergeConfidencePolicy Confidence;
+    MergeAcceptancePolicy Acceptance;
+};
+
+MergeConfidencePolicy BuildMergeConfidencePolicy(const MergeChunkDiagnostics& diagnostics)
+{
+    MergeConfidencePolicy policy;
 
     if (diagnostics.ChunkSummaryCount == 0)
     {
-        ApplyMergeConfidenceCeiling(confidenceCeiling, ceilingReasons, 0.45, "no_chunk_summaries");
+        ApplyMergeConfidenceCeiling(policy.RecommendedConfidenceCeiling, policy.CeilingReasons, 0.45, "no_chunk_summaries");
     }
 
     if (diagnostics.UncoveredBlockCount != 0)
     {
-        ApplyMergeConfidenceCeiling(confidenceCeiling, ceilingReasons, 0.65, "coverage_gap");
+        ApplyMergeConfidenceCeiling(policy.RecommendedConfidenceCeiling, policy.CeilingReasons, 0.65, "coverage_gap");
     }
 
     if (diagnostics.MissingSummaryCount != 0)
     {
-        ApplyMergeConfidenceCeiling(confidenceCeiling, ceilingReasons, 0.60, "missing_chunk_summary");
+        ApplyMergeConfidenceCeiling(policy.RecommendedConfidenceCeiling, policy.CeilingReasons, 0.60, "missing_chunk_summary");
     }
 
     if (diagnostics.OrphanSummaryCount != 0)
     {
-        ApplyMergeConfidenceCeiling(confidenceCeiling, ceilingReasons, 0.65, "orphan_chunk_summary");
+        ApplyMergeConfidenceCeiling(policy.RecommendedConfidenceCeiling, policy.CeilingReasons, 0.65, "orphan_chunk_summary");
     }
 
     if (diagnostics.DuplicateSummaryCount != 0)
     {
-        ApplyMergeConfidenceCeiling(confidenceCeiling, ceilingReasons, 0.62, "duplicate_chunk_summary");
+        ApplyMergeConfidenceCeiling(policy.RecommendedConfidenceCeiling, policy.CeilingReasons, 0.62, "duplicate_chunk_summary");
     }
 
     if (diagnostics.LowConfidenceSummaryCount != 0)
     {
-        ApplyMergeConfidenceCeiling(confidenceCeiling, ceilingReasons, 0.55, "low_confidence_chunk_summary");
+        ApplyMergeConfidenceCeiling(policy.RecommendedConfidenceCeiling, policy.CeilingReasons, 0.55, "low_confidence_chunk_summary");
+    }
+
+    if (diagnostics.UncertainSummaryCount != 0)
+    {
+        ApplyMergeConfidenceCeiling(policy.RecommendedConfidenceCeiling, policy.CeilingReasons, 0.65, "uncertain_chunk_summary");
     }
 
     if (diagnostics.EmptyEvidenceSummaryCount != 0 || diagnostics.MissingBlockEvidenceSummaryCount != 0)
     {
-        ApplyMergeConfidenceCeiling(confidenceCeiling, ceilingReasons, 0.58, "weak_chunk_evidence");
+        ApplyMergeConfidenceCeiling(policy.RecommendedConfidenceCeiling, policy.CeilingReasons, 0.58, "weak_chunk_evidence");
     }
 
     if (diagnostics.UngroundedEvidenceSummaryCount != 0)
     {
-        ApplyMergeConfidenceCeiling(confidenceCeiling, ceilingReasons, 0.55, "ungrounded_chunk_evidence");
+        ApplyMergeConfidenceCeiling(policy.RecommendedConfidenceCeiling, policy.CeilingReasons, 0.55, "ungrounded_chunk_evidence");
     }
 
-    object.Set("recommended_confidence_ceiling", JsonValue::MakeNumber(confidenceCeiling));
-    object.Set("ceiling_reasons", BuildStringArray(ceilingReasons, 16, nullptr));
-    object.Set("requires_uncertainty", JsonValue::MakeBoolean(!ceilingReasons.empty()));
-    object.Set("can_report_high_confidence", JsonValue::MakeBoolean(ceilingReasons.empty()));
+    return policy;
+}
+
+MergeAcceptancePolicy BuildMergeAcceptancePolicy(const MergeChunkDiagnostics& diagnostics)
+{
+    MergeAcceptancePolicy policy;
+
+    AppendMergeReviewAction(policy.AcceptanceChecks, "preserve_visible_operations");
+    AppendMergeReviewAction(policy.AcceptanceChecks, "ground_claims_to_chunk_blocks");
+    AppendMergeReviewAction(policy.AcceptanceChecks, "respect_confidence_policy");
+
+    if (diagnostics.UncoveredBlockCount != 0)
+    {
+        AppendMergeReviewAction(policy.AcceptanceChecks, "describe_uncovered_blocks");
+        AppendMergeReviewAction(policy.BlockingIssues, "coverage_gap");
+    }
+
+    if (diagnostics.MissingSummaryCount != 0 || diagnostics.OrphanSummaryCount != 0 || diagnostics.DuplicateSummaryCount != 0)
+    {
+        AppendMergeReviewAction(policy.AcceptanceChecks, "reconcile_chunk_summary_alignment");
+        AppendMergeReviewAction(policy.BlockingIssues, "summary_alignment_issue");
+    }
+
+    if (diagnostics.LowConfidenceSummaryCount != 0 || diagnostics.UncertainSummaryCount != 0)
+    {
+        AppendMergeReviewAction(policy.AcceptanceChecks, "carry_chunk_uncertainties");
+        AppendMergeReviewAction(policy.BlockingIssues, "uncertain_or_low_confidence_summary");
+    }
+
+    if (diagnostics.WeakEvidenceSummaryCount != 0)
+    {
+        AppendMergeReviewAction(policy.AcceptanceChecks, "avoid_unsupported_evidence_claims");
+        AppendMergeReviewAction(policy.BlockingIssues, "weak_chunk_evidence");
+    }
+
+    if (diagnostics.UngroundedEvidenceSummaryCount != 0)
+    {
+        AppendMergeReviewAction(policy.AcceptanceChecks, "discard_ungrounded_evidence");
+        AppendMergeReviewAction(policy.BlockingIssues, "ungrounded_chunk_evidence");
+    }
+
+    policy.RequiresCoverageStatement = diagnostics.UncoveredBlockCount != 0;
+    policy.RequiresEvidenceRewrite = diagnostics.WeakEvidenceSummaryCount != 0 || diagnostics.UngroundedEvidenceSummaryCount != 0;
+    return policy;
+}
+
+JsonValue BuildMergeChunkConfidencePolicyJson(
+    const MergeChunkDiagnostics& diagnostics)
+{
+    JsonValue object = JsonValue::MakeObject();
+    const MergeConfidencePolicy policy = BuildMergeConfidencePolicy(diagnostics);
+
+    object.Set("recommended_confidence_ceiling", JsonValue::MakeNumber(policy.RecommendedConfidenceCeiling));
+    object.Set("ceiling_reasons", BuildStringArray(policy.CeilingReasons, 16, nullptr));
+    object.Set("requires_uncertainty", JsonValue::MakeBoolean(!policy.CeilingReasons.empty()));
+    object.Set("can_report_high_confidence", JsonValue::MakeBoolean(policy.CeilingReasons.empty()));
     object.Set("low_confidence_threshold", JsonValue::MakeNumber(kMergeChunkLowConfidenceThreshold));
     object.Set("chunk_plan_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.ChunkPlanCount)));
     object.Set("chunk_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.ChunkSummaryCount)));
@@ -7212,52 +7328,17 @@ JsonValue BuildMergeChunkAcceptanceChecksJson(
     const MergeChunkDiagnostics& diagnostics)
 {
     JsonValue object = JsonValue::MakeObject();
-    std::vector<std::string> acceptanceChecks;
-    std::vector<std::string> blockingIssues;
+    const MergeAcceptancePolicy policy = BuildMergeAcceptancePolicy(diagnostics);
 
-    AppendMergeReviewAction(acceptanceChecks, "preserve_visible_operations");
-    AppendMergeReviewAction(acceptanceChecks, "ground_claims_to_chunk_blocks");
-    AppendMergeReviewAction(acceptanceChecks, "respect_confidence_policy");
-
-    if (diagnostics.UncoveredBlockCount != 0)
-    {
-        AppendMergeReviewAction(acceptanceChecks, "describe_uncovered_blocks");
-        AppendMergeReviewAction(blockingIssues, "coverage_gap");
-    }
-
-    if (diagnostics.MissingSummaryCount != 0 || diagnostics.OrphanSummaryCount != 0 || diagnostics.DuplicateSummaryCount != 0)
-    {
-        AppendMergeReviewAction(acceptanceChecks, "reconcile_chunk_summary_alignment");
-        AppendMergeReviewAction(blockingIssues, "summary_alignment_issue");
-    }
-
-    if (diagnostics.LowConfidenceSummaryCount != 0 || diagnostics.UncertainSummaryCount != 0)
-    {
-        AppendMergeReviewAction(acceptanceChecks, "carry_chunk_uncertainties");
-        AppendMergeReviewAction(blockingIssues, "uncertain_or_low_confidence_summary");
-    }
-
-    if (diagnostics.WeakEvidenceSummaryCount != 0)
-    {
-        AppendMergeReviewAction(acceptanceChecks, "avoid_unsupported_evidence_claims");
-        AppendMergeReviewAction(blockingIssues, "weak_chunk_evidence");
-    }
-
-    if (diagnostics.UngroundedEvidenceSummaryCount != 0)
-    {
-        AppendMergeReviewAction(acceptanceChecks, "discard_ungrounded_evidence");
-        AppendMergeReviewAction(blockingIssues, "ungrounded_chunk_evidence");
-    }
-
-    object.Set("acceptance_check_count", JsonValue::MakeNumber(static_cast<double>(acceptanceChecks.size())));
-    object.Set("acceptance_checks", BuildStringArray(acceptanceChecks, 16, nullptr));
-    object.Set("blocking_issue_count", JsonValue::MakeNumber(static_cast<double>(blockingIssues.size())));
-    object.Set("blocking_issues", BuildStringArray(blockingIssues, 16, nullptr));
-    object.Set("must_emit_uncertainties", JsonValue::MakeBoolean(!blockingIssues.empty()));
-    object.Set("must_bound_confidence", JsonValue::MakeBoolean(!blockingIssues.empty()));
-    object.Set("requires_coverage_statement", JsonValue::MakeBoolean(diagnostics.UncoveredBlockCount != 0));
-    object.Set("requires_evidence_rewrite", JsonValue::MakeBoolean(diagnostics.WeakEvidenceSummaryCount != 0 || diagnostics.UngroundedEvidenceSummaryCount != 0));
-    object.Set("ready_for_high_confidence_merge", JsonValue::MakeBoolean(blockingIssues.empty()));
+    object.Set("acceptance_check_count", JsonValue::MakeNumber(static_cast<double>(policy.AcceptanceChecks.size())));
+    object.Set("acceptance_checks", BuildStringArray(policy.AcceptanceChecks, 16, nullptr));
+    object.Set("blocking_issue_count", JsonValue::MakeNumber(static_cast<double>(policy.BlockingIssues.size())));
+    object.Set("blocking_issues", BuildStringArray(policy.BlockingIssues, 16, nullptr));
+    object.Set("must_emit_uncertainties", JsonValue::MakeBoolean(!policy.BlockingIssues.empty()));
+    object.Set("must_bound_confidence", JsonValue::MakeBoolean(!policy.BlockingIssues.empty()));
+    object.Set("requires_coverage_statement", JsonValue::MakeBoolean(policy.RequiresCoverageStatement));
+    object.Set("requires_evidence_rewrite", JsonValue::MakeBoolean(policy.RequiresEvidenceRewrite));
+    object.Set("ready_for_high_confidence_merge", JsonValue::MakeBoolean(policy.BlockingIssues.empty()));
     object.Set("missing_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.MissingSummaryCount)));
     object.Set("orphan_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.OrphanSummaryCount)));
     object.Set("duplicate_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.DuplicateSummaryCount)));
@@ -7266,6 +7347,159 @@ JsonValue BuildMergeChunkAcceptanceChecksJson(
     object.Set("weak_evidence_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.WeakEvidenceSummaryCount)));
     object.Set("ungrounded_evidence_summary_count", JsonValue::MakeNumber(static_cast<double>(diagnostics.UngroundedEvidenceSummaryCount)));
     return object;
+}
+
+std::string FormatPolicyConfidence(double value)
+{
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(2) << Clamp01(value);
+    return stream.str();
+}
+
+void AppendUniqueMergePolicyText(
+    std::vector<std::string>& values,
+    const std::string& value)
+{
+    if (value.empty())
+    {
+        return;
+    }
+
+    if (std::find(values.begin(), values.end(), value) == values.end())
+    {
+        values.push_back(value);
+    }
+}
+
+void AddMergePolicyVerifierIssue(
+    VerifyReport& report,
+    const std::string& code,
+    const std::string& severity,
+    const std::string& message,
+    const std::string& evidence)
+{
+    for (const VerificationIssue& issue : report.Issues)
+    {
+        if (issue.Code == code && issue.Evidence == evidence)
+        {
+            return;
+        }
+    }
+
+    VerificationIssue issue;
+    issue.Code = code;
+    issue.Severity = severity;
+    issue.Message = message;
+    issue.Evidence = evidence;
+    report.Issues.push_back(issue);
+    report.Warnings.push_back(message);
+}
+
+std::string BuildMergePolicyUncertaintyText(const MergeOutputPostPolicy& policy)
+{
+    std::vector<std::string> details;
+
+    if (!policy.Confidence.CeilingReasons.empty())
+    {
+        details.push_back("confidence_reasons=" + JoinStrings(policy.Confidence.CeilingReasons, ","));
+    }
+
+    if (!policy.Acceptance.BlockingIssues.empty())
+    {
+        details.push_back("blocking_issues=" + JoinStrings(policy.Acceptance.BlockingIssues, ","));
+    }
+
+    if (details.empty())
+    {
+        return std::string();
+    }
+
+    return "merge acceptance policy applied: " + JoinStrings(details, "; ");
+}
+
+MergeOutputPostPolicy BuildMergeOutputPostPolicy(
+    const AnalyzeRequest& request,
+    const std::vector<ChunkPlan>& chunkPlans,
+    const std::vector<ChunkAnalysis>& chunkAnalyses)
+{
+    MergeOutputPostPolicy policy;
+
+    if (chunkPlans.empty())
+    {
+        return policy;
+    }
+
+    const std::set<size_t> coveredBlocks = BuildMergeCoveredBlockIndexSet(chunkPlans);
+    const size_t uncoveredBlockCount = CountMergeUncoveredBlocks(request, coveredBlocks);
+    const MergeChunkDiagnostics diagnostics = BuildMergeChunkDiagnostics(request, chunkPlans, chunkAnalyses, uncoveredBlockCount);
+
+    policy.Active = true;
+    policy.Confidence = BuildMergeConfidencePolicy(diagnostics);
+    policy.Acceptance = BuildMergeAcceptancePolicy(diagnostics);
+    return policy;
+}
+
+void ApplyMergeOutputPostPolicy(
+    const MergeOutputPostPolicy& policy,
+    AnalyzeResponse& response)
+{
+    if (!policy.Active)
+    {
+        return;
+    }
+
+    const double originalConfidence = Clamp01(response.Confidence);
+    const double ceiling = Clamp01(policy.Confidence.RecommendedConfidenceCeiling);
+    const bool requiresUncertainty = !policy.Confidence.CeilingReasons.empty()
+        || !policy.Acceptance.BlockingIssues.empty();
+    const bool hadUncertainty = !response.Uncertainties.empty();
+
+    if (originalConfidence > ceiling)
+    {
+        ++response.Verifier.FactConflicts;
+        AddMergePolicyVerifierIssue(
+            response.Verifier,
+            "merge.confidence_ceiling_exceeded",
+            "error",
+            "merge response confidence exceeded the chunk confidence policy ceiling",
+            "confidence=" + FormatPolicyConfidence(originalConfidence)
+                + " ceiling=" + FormatPolicyConfidence(ceiling)
+                + " reasons=" + JoinStrings(policy.Confidence.CeilingReasons, ","));
+        response.Confidence = ceiling;
+    }
+    else
+    {
+        response.Confidence = originalConfidence;
+    }
+
+    if (requiresUncertainty)
+    {
+        const std::string uncertainty = BuildMergePolicyUncertaintyText(policy);
+        AppendUniqueMergePolicyText(response.Uncertainties, uncertainty);
+
+        if (!hadUncertainty)
+        {
+            ++response.Verifier.MissingEvidence;
+            AddMergePolicyVerifierIssue(
+                response.Verifier,
+                "merge.acceptance_blockers_missing_uncertainty",
+                "error",
+                "merge response omitted uncertainty required by chunk acceptance blockers",
+                JoinStrings(policy.Acceptance.BlockingIssues, ","));
+        }
+    }
+
+    if (!policy.Acceptance.BlockingIssues.empty() && originalConfidence > ceiling)
+    {
+        AddMergePolicyVerifierIssue(
+            response.Verifier,
+            "merge.acceptance_blockers_high_confidence",
+            "error",
+            "merge response reported high confidence despite chunk acceptance blockers",
+            JoinStrings(policy.Acceptance.BlockingIssues, ","));
+    }
+
+    response.Verifier.AdjustedConfidence = Clamp01((std::min)(response.Verifier.AdjustedConfidence, response.Confidence));
 }
 
 JsonValue BuildMergeChunkOutputContractJson()
@@ -7776,7 +8010,7 @@ JsonValue BuildMergeFactsJson(
     bool uncertaintiesTruncated = false;
     bool uncoveredBlockIdsTruncated = false;
     const std::optional<size_t> middleInstructionIndex = FindMiddleInterestingInstructionIndex(request);
-    std::set<size_t> coveredBlocks;
+    const std::set<size_t> coveredBlocks = BuildMergeCoveredBlockIndexSet(chunkPlans);
 
     module.Set("module_name", JsonValue::MakeString(request.Facts.Module.ModuleName));
     module.Set("image_name", JsonValue::MakeString(request.Facts.Module.ImageName));
@@ -7798,16 +8032,8 @@ JsonValue BuildMergeFactsJson(
     selection.Set("instruction_window_limit", JsonValue::MakeNumber(static_cast<double>(kPromptInstructionWindowLimit)));
     selection.Set("block_limit", JsonValue::MakeNumber(static_cast<double>(kPromptBlockLimit)));
 
-    for (const ChunkPlan& plan : chunkPlans)
-    {
-        for (size_t blockIndex : plan.BlockIndices)
-        {
-            coveredBlocks.insert(blockIndex);
-        }
-    }
-
     const size_t totalBlockCount = request.Facts.Blocks.size();
-    const size_t coveredBlockCount = coveredBlocks.size() > totalBlockCount ? totalBlockCount : coveredBlocks.size();
+    const size_t coveredBlockCount = CountValidMergeCoveredBlocks(coveredBlocks, totalBlockCount);
     const size_t uncoveredBlockCount = totalBlockCount - coveredBlockCount;
     const MergeChunkDiagnostics diagnostics = BuildMergeChunkDiagnostics(request, chunkPlans, chunkAnalyses, uncoveredBlockCount);
     chunking.Set("chunk_count", JsonValue::MakeNumber(static_cast<double>(chunkPlans.size())));
@@ -9893,6 +10119,7 @@ bool ParseAndMaybeRetryWithVerifier(
     uint32_t retryFloor,
     const std::string& initialJson,
     const std::string& providerName,
+    const MergeOutputPostPolicy* mergePolicy,
     AnalyzeResponse& response,
     std::string& error)
 {
@@ -9907,6 +10134,10 @@ bool ParseAndMaybeRetryWithVerifier(
     LogVerbose(config, "LLM model JSON parsed");
 
     VerifyResponse(request, response);
+    if (mergePolicy != nullptr)
+    {
+        ApplyMergeOutputPostPolicy(*mergePolicy, response);
+    }
     LogVerbose(
         config,
         "verifier after initial LLM response adjusted=" + std::to_string(response.Verifier.AdjustedConfidence)
@@ -9951,6 +10182,10 @@ bool ParseAndMaybeRetryWithVerifier(
     }
 
     VerifyResponse(request, retryResponse);
+    if (mergePolicy != nullptr)
+    {
+        ApplyMergeOutputPostPolicy(*mergePolicy, retryResponse);
+    }
     LogVerbose(
         config,
         "verifier after feedback retry adjusted=" + std::to_string(retryResponse.Verifier.AdjustedConfidence)
@@ -10010,6 +10245,7 @@ bool AnalyzeWithSinglePassLlm(
         (std::max)(static_cast<uint32_t>(4000), config.MaxCompletionTokens),
         modelJson,
         "openai-compatible-direct",
+        nullptr,
         response,
         error);
 }
@@ -10095,6 +10331,7 @@ bool AnalyzeWithChunkedLlm(
     std::string mergeJson;
     const std::string mergeSystemPrompt = BuildMergeSystemPrompt(request);
     const std::string mergeUserPrompt = BuildMergeUserPrompt(request, chunkPlans, chunkAnalyses);
+    const MergeOutputPostPolicy mergePolicy = BuildMergeOutputPostPolicy(request, chunkPlans, chunkAnalyses);
     LogVerbose(config, "merge LLM prompts built system_chars=" + std::to_string(mergeSystemPrompt.size()) + " user_chars=" + std::to_string(mergeUserPrompt.size()));
     LogProgress(config, "LLM merge request started");
 
@@ -10120,6 +10357,7 @@ bool AnalyzeWithChunkedLlm(
         (std::max)(static_cast<uint32_t>(9000), config.MergeCompletionTokens),
         mergeJson,
         "openai-compatible-direct-chunked",
+        &mergePolicy,
         response,
         error);
 }
@@ -10210,18 +10448,10 @@ std::string BuildDebugFirstChunkPromptDump(
     return dump;
 }
 
-std::string BuildDebugMergePromptDump(
-    const AnalyzeRequest& request,
-    const LlmClientConfig& config)
+std::vector<ChunkAnalysis> BuildDebugMergeChunkAnalyses(const std::vector<ChunkPlan>& chunkPlans)
 {
-    const std::vector<ChunkPlan> chunkPlans = BuildChunkPlans(request, config);
-
-    if (chunkPlans.empty())
-    {
-        return std::string();
-    }
-
     std::vector<ChunkAnalysis> chunkAnalyses;
+    chunkAnalyses.reserve(chunkPlans.size());
 
     for (const ChunkPlan& plan : chunkPlans)
     {
@@ -10234,6 +10464,21 @@ std::string BuildDebugMergePromptDump(
         chunkAnalyses.push_back(std::move(analysis));
     }
 
+    return chunkAnalyses;
+}
+
+std::string BuildDebugMergePromptDump(
+    const AnalyzeRequest& request,
+    const LlmClientConfig& config)
+{
+    const std::vector<ChunkPlan> chunkPlans = BuildChunkPlans(request, config);
+
+    if (chunkPlans.empty())
+    {
+        return std::string();
+    }
+
+    const std::vector<ChunkAnalysis> chunkAnalyses = BuildDebugMergeChunkAnalyses(chunkPlans);
     std::string dump;
     dump += "merge_system_prompt:\n";
     dump += BuildMergeSystemPrompt(request);
@@ -10243,5 +10488,24 @@ std::string BuildDebugMergePromptDump(
     dump += SerializeJson(BuildMergeFactsJson(request, chunkPlans, chunkAnalyses), true);
     dump += "\n";
     return dump;
+}
+
+void ApplyDebugMergeOutputPolicy(
+    const AnalyzeRequest& request,
+    const LlmClientConfig& config,
+    AnalyzeResponse& response)
+{
+    const std::vector<ChunkPlan> chunkPlans = BuildChunkPlans(request, config);
+
+    if (chunkPlans.empty())
+    {
+        VerifyResponse(request, response);
+        return;
+    }
+
+    const std::vector<ChunkAnalysis> chunkAnalyses = BuildDebugMergeChunkAnalyses(chunkPlans);
+    const MergeOutputPostPolicy policy = BuildMergeOutputPostPolicy(request, chunkPlans, chunkAnalyses);
+    VerifyResponse(request, response);
+    ApplyMergeOutputPostPolicy(policy, response);
 }
 }

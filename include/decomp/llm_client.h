@@ -88,4 +88,8 @@ std::string BuildDebugFirstChunkPromptDump(
 std::string BuildDebugMergePromptDump(
     const AnalyzeRequest& request,
     const LlmClientConfig& config);
+void ApplyDebugMergeOutputPolicy(
+    const AnalyzeRequest& request,
+    const LlmClientConfig& config,
+    AnalyzeResponse& response);
 }

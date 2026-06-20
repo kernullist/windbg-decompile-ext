@@ -3220,6 +3220,33 @@ void TestVerifierCoverageSnapshot()
     }
 }
 
+void TestMergeOutputPolicySnapshot()
+{
+    decomp::AnalyzeRequest request;
+    request.RequestId = "merge_output_policy_snapshot";
+    request.Facts = BuildDiamondFacts();
+
+    decomp::LlmClientConfig config;
+    config.ForceChunked = true;
+    config.ChunkBlockLimit = 1;
+    config.ChunkCountLimit = 8;
+
+    decomp::AnalyzeResponse response;
+    response.Status = "ok";
+    response.PseudoC = "void f(void) { return; }";
+    response.Summary = "clean high-confidence merge";
+    response.Confidence = 0.92;
+
+    decomp::ApplyDebugMergeOutputPolicy(request, config, response);
+
+    Expect(response.Confidence <= 0.55, "merge output policy should cap confidence at the debug chunk ceiling");
+    Expect(response.Verifier.AdjustedConfidence <= response.Confidence + 0.001, "merge output policy should cap verifier adjusted confidence");
+    Expect(!response.Uncertainties.empty(), "merge output policy should emit required uncertainty");
+    Expect(HasIssueCode(response.Verifier, "merge.confidence_ceiling_exceeded"), "merge output policy should flag confidence ceiling violations");
+    Expect(HasIssueCode(response.Verifier, "merge.acceptance_blockers_missing_uncertainty"), "merge output policy should flag omitted acceptance uncertainty");
+    Expect(HasIssueCode(response.Verifier, "merge.acceptance_blockers_high_confidence"), "merge output policy should flag high confidence with acceptance blockers");
+}
+
 void TestUxHelperSnapshot()
 {
     decomp::AnalyzeRequest request;
@@ -3356,6 +3383,7 @@ int main()
     TestStructuredPrototypeSchemaSnapshot();
     TestVerifierSnapshot();
     TestVerifierCoverageSnapshot();
+    TestMergeOutputPolicySnapshot();
     TestUxHelperSnapshot();
 
     if (g_failures != 0)
