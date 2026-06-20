@@ -4396,6 +4396,8 @@ constexpr size_t kChunkPromptFactLimit = 16;
 constexpr size_t kChunkPromptUncertaintyLimit = 8;
 constexpr size_t kMergeChunkUncoveredBlockIdLimit = 32;
 constexpr size_t kMergeChunkEvidenceBlockIdLimit = 32;
+constexpr size_t kMergeChunkRiskDetailLimit = 24;
+constexpr size_t kMergeChunkRiskEvidenceBlockIdLimit = 8;
 constexpr double kMergeChunkLowConfidenceThreshold = 0.55;
 
 std::string DescribePreferredNaturalLanguage(const AnalyzeRequest& request)
@@ -6767,6 +6769,251 @@ JsonValue BuildMergeChunkRiskJson(
     return object;
 }
 
+void AppendMergeChunkRiskDetail(
+    JsonValue& riskedChunks,
+    size_t& totalRiskedChunks,
+    bool& truncated,
+    const std::string& chunkId,
+    bool planned,
+    size_t blockCount,
+    const std::set<std::string>& plannedBlockIds,
+    const std::vector<const ChunkAnalysis*>& analyses)
+{
+    std::vector<std::string> riskCodes;
+    std::vector<std::string> ungroundedEvidenceBlockIds;
+    std::set<std::string> ungroundedEvidenceBlockSet;
+    double confidenceSum = 0.0;
+    double minConfidence = 0.0;
+    double maxConfidence = 0.0;
+    bool hasConfidence = false;
+    bool hasLowConfidence = false;
+    bool hasUncertainties = false;
+    bool hasEvidence = false;
+    bool hasBlockEvidence = false;
+
+    for (const ChunkAnalysis* analysis : analyses)
+    {
+        if (analysis == nullptr)
+        {
+            continue;
+        }
+
+        confidenceSum += analysis->Confidence;
+
+        if (!hasConfidence)
+        {
+            minConfidence = analysis->Confidence;
+            maxConfidence = analysis->Confidence;
+            hasConfidence = true;
+        }
+        else
+        {
+            minConfidence = (std::min)(minConfidence, analysis->Confidence);
+            maxConfidence = (std::max)(maxConfidence, analysis->Confidence);
+        }
+
+        if (analysis->Confidence < kMergeChunkLowConfidenceThreshold)
+        {
+            hasLowConfidence = true;
+        }
+
+        if (!analysis->Uncertainties.empty())
+        {
+            hasUncertainties = true;
+        }
+
+        if (!analysis->Evidence.empty())
+        {
+            hasEvidence = true;
+        }
+
+        for (const EvidenceItem& evidence : analysis->Evidence)
+        {
+            for (const std::string& blockId : evidence.Blocks)
+            {
+                if (blockId.empty())
+                {
+                    continue;
+                }
+
+                hasBlockEvidence = true;
+
+                if (plannedBlockIds.find(blockId) == plannedBlockIds.end())
+                {
+                    ungroundedEvidenceBlockSet.insert(blockId);
+                }
+            }
+        }
+    }
+
+    if (!planned)
+    {
+        riskCodes.push_back("orphan_summary");
+    }
+
+    if (analyses.empty())
+    {
+        riskCodes.push_back("missing_summary");
+    }
+
+    if (analyses.size() > 1)
+    {
+        riskCodes.push_back("duplicate_summaries");
+    }
+
+    if (hasLowConfidence)
+    {
+        riskCodes.push_back("low_confidence");
+    }
+
+    if (hasUncertainties)
+    {
+        riskCodes.push_back("uncertain");
+    }
+
+    if (!hasEvidence)
+    {
+        riskCodes.push_back("empty_evidence");
+    }
+
+    if (!hasBlockEvidence)
+    {
+        riskCodes.push_back("missing_block_evidence");
+    }
+
+    if (!ungroundedEvidenceBlockSet.empty())
+    {
+        riskCodes.push_back("ungrounded_evidence_blocks");
+    }
+
+    if (riskCodes.empty())
+    {
+        return;
+    }
+
+    ++totalRiskedChunks;
+
+    if (riskedChunks.GetArray().size() >= kMergeChunkRiskDetailLimit)
+    {
+        truncated = true;
+        return;
+    }
+
+    for (const std::string& blockId : ungroundedEvidenceBlockSet)
+    {
+        if (ungroundedEvidenceBlockIds.size() >= kMergeChunkRiskEvidenceBlockIdLimit)
+        {
+            break;
+        }
+
+        ungroundedEvidenceBlockIds.push_back(blockId);
+    }
+
+    JsonValue item = JsonValue::MakeObject();
+    item.Set("chunk_id", JsonValue::MakeString(chunkId));
+    item.Set("planned", JsonValue::MakeBoolean(planned));
+    item.Set("block_count", JsonValue::MakeNumber(static_cast<double>(blockCount)));
+    item.Set("summary_count", JsonValue::MakeNumber(static_cast<double>(analyses.size())));
+    item.Set("risk_codes", BuildStringArray(riskCodes, 16, nullptr));
+    item.Set("confidence_average", JsonValue::MakeNumber(analyses.empty() ? 0.0 : confidenceSum / static_cast<double>(analyses.size())));
+    item.Set("confidence_min", JsonValue::MakeNumber(hasConfidence ? minConfidence : 0.0));
+    item.Set("confidence_max", JsonValue::MakeNumber(hasConfidence ? maxConfidence : 0.0));
+    item.Set("has_missing_summary", JsonValue::MakeBoolean(analyses.empty()));
+    item.Set("has_duplicate_summaries", JsonValue::MakeBoolean(analyses.size() > 1));
+    item.Set("has_low_confidence", JsonValue::MakeBoolean(hasLowConfidence));
+    item.Set("has_uncertainties", JsonValue::MakeBoolean(hasUncertainties));
+    item.Set("has_evidence", JsonValue::MakeBoolean(hasEvidence));
+    item.Set("has_block_evidence", JsonValue::MakeBoolean(hasBlockEvidence));
+    item.Set("ungrounded_evidence_blocks", BuildStringArray(ungroundedEvidenceBlockIds, kMergeChunkRiskEvidenceBlockIdLimit, nullptr));
+    item.Set("ungrounded_evidence_blocks_truncated", JsonValue::MakeBoolean(ungroundedEvidenceBlockSet.size() > kMergeChunkRiskEvidenceBlockIdLimit));
+    riskedChunks.PushBack(item);
+}
+
+JsonValue BuildMergeChunkRiskDetailsJson(
+    const AnalyzeRequest& request,
+    const std::vector<ChunkPlan>& chunkPlans,
+    const std::vector<ChunkAnalysis>& chunkAnalyses)
+{
+    JsonValue object = JsonValue::MakeObject();
+    JsonValue riskedChunks = JsonValue::MakeArray();
+    std::unordered_map<std::string, std::vector<const ChunkAnalysis*>> analysesByChunkId;
+    std::set<std::string> planIds;
+    std::set<std::string> orphanChunkIds;
+    size_t totalRiskedChunks = 0;
+    bool truncated = false;
+
+    for (const ChunkAnalysis& analysis : chunkAnalyses)
+    {
+        analysesByChunkId[analysis.ChunkId].push_back(&analysis);
+    }
+
+    for (const ChunkPlan& plan : chunkPlans)
+    {
+        planIds.insert(plan.Id);
+    }
+
+    for (const ChunkPlan& plan : chunkPlans)
+    {
+        std::set<std::string> plannedBlockIds;
+        std::vector<const ChunkAnalysis*> emptyAnalyses;
+        const auto analysisIt = analysesByChunkId.find(plan.Id);
+        const std::vector<const ChunkAnalysis*>& analyses = analysisIt == analysesByChunkId.end() ? emptyAnalyses : analysisIt->second;
+
+        for (const size_t blockIndex : plan.BlockIndices)
+        {
+            if (blockIndex < request.Facts.Blocks.size())
+            {
+                plannedBlockIds.insert(request.Facts.Blocks[blockIndex].Id);
+            }
+        }
+
+        AppendMergeChunkRiskDetail(
+            riskedChunks,
+            totalRiskedChunks,
+            truncated,
+            plan.Id,
+            true,
+            plan.BlockIndices.size(),
+            plannedBlockIds,
+            analyses);
+    }
+
+    for (const ChunkAnalysis& analysis : chunkAnalyses)
+    {
+        if (planIds.find(analysis.ChunkId) == planIds.end())
+        {
+            orphanChunkIds.insert(analysis.ChunkId);
+        }
+    }
+
+    for (const std::string& chunkId : orphanChunkIds)
+    {
+        std::set<std::string> plannedBlockIds;
+        const auto analysisIt = analysesByChunkId.find(chunkId);
+
+        if (analysisIt == analysesByChunkId.end())
+        {
+            continue;
+        }
+
+        AppendMergeChunkRiskDetail(
+            riskedChunks,
+            totalRiskedChunks,
+            truncated,
+            chunkId,
+            false,
+            0,
+            plannedBlockIds,
+            analysisIt->second);
+    }
+
+    object.Set("risked_chunk_count", JsonValue::MakeNumber(static_cast<double>(totalRiskedChunks)));
+    object.Set("risked_chunks", riskedChunks);
+    object.Set("risked_chunks_truncated", JsonValue::MakeBoolean(truncated));
+    object.Set("risk_detail_limit", JsonValue::MakeNumber(static_cast<double>(kMergeChunkRiskDetailLimit)));
+    return object;
+}
+
 JsonValue BuildMergeFactsJson(
     const AnalyzeRequest& request,
     const std::vector<ChunkPlan>& chunkPlans,
@@ -6855,6 +7102,7 @@ JsonValue BuildMergeFactsJson(
     chunking.Set("summary_quality", BuildMergeChunkSummaryQualityJson(chunkAnalyses));
     chunking.Set("summary_evidence", BuildMergeChunkSummaryEvidenceJson(request, chunkPlans, chunkAnalyses));
     chunking.Set("merge_risk", BuildMergeChunkRiskJson(request, chunkPlans, chunkAnalyses, uncoveredBlockCount));
+    chunking.Set("merge_risk_details", BuildMergeChunkRiskDetailsJson(request, chunkPlans, chunkAnalyses));
 
     root.Set("arch", JsonValue::MakeString(request.Facts.Arch));
     root.Set("mode", JsonValue::MakeString(request.Facts.Mode == AnalysisMode::LiveMemory ? "live" : "file"));
@@ -6996,7 +7244,7 @@ std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
         "Return only a JSON object with these keys: status, pseudo_c, summary, params, locals, uncertainties, evidence, confidence. "
         "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style. "
-        "Use the chunk plans, coverage metadata, summary alignment, quality, evidence, and risk metadata, and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
+        "Use the chunk plans, coverage metadata, summary alignment, quality, evidence, risk metadata, and per-chunk risk details, and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
         "Use selection, blocks, direct_calls, indirect_calls, recovered_arguments, recovered_locals, call_arguments, stack_pointer, memory_accesses, ir_values, switches, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, control_flow, type_hints, idioms, callee_summaries, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, and pdb facts to preserve semantic names, prompt coverage limits, block grounding, call-site grounding, stack-frame context, reaching-value state, memory side effects, switch dispatch intent, control-flow intent, debugger-session constraints, and observed runtime context. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
@@ -7027,7 +7275,7 @@ std::string BuildMergeUserPrompt(
     prompt += "6. If chunks disagree or coverage remains partial, explain that in uncertainties, but still keep the visible operations explicit.\n";
     prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
     prompt += "8. evidence.blocks must reference block ids that appear in the chunk summaries.\n";
-    prompt += "9. Use chunking.coverage_complete, chunking.uncovered_block_ids, chunking.chunk_plans, chunking.summary_alignment, chunking.summary_quality, chunking.summary_evidence, and chunking.merge_risk to detect omitted, duplicated, orphaned, low-confidence, weak-evidence, ungrounded, or risk-coded chunks before trusting a short chunk summary.\n";
+    prompt += "9. Use chunking.coverage_complete, chunking.uncovered_block_ids, chunking.chunk_plans, chunking.summary_alignment, chunking.summary_quality, chunking.summary_evidence, chunking.merge_risk, and chunking.merge_risk_details to detect omitted, duplicated, orphaned, low-confidence, weak-evidence, ungrounded, or risk-coded chunks before trusting a short chunk summary.\n";
     prompt += "10. Treat the analyzer skeleton and graph-derived facts as a draft to refine; do not invent unsupported loops, switches, or calls during merge.\n";
     return prompt;
 }

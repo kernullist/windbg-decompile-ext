@@ -2070,6 +2070,11 @@ void TestObfuscationFactsSnapshot()
     Expect(mergePromptDump.find("\"has_low_confidence_chunks\"") != std::string::npos, "merge prompt should include low-confidence chunk risk flag");
     Expect(mergePromptDump.find("\"has_empty_evidence_chunks\"") != std::string::npos, "merge prompt should include empty-evidence chunk risk flag");
     Expect(mergePromptDump.find("\"has_ungrounded_evidence_blocks\"") != std::string::npos, "merge prompt should include ungrounded evidence risk flag");
+    Expect(mergePromptDump.find("\"merge_risk_details\"") != std::string::npos, "merge prompt should include per-chunk risk details");
+    Expect(mergePromptDump.find("\"risked_chunks\"") != std::string::npos, "merge prompt should include risked chunk details");
+    Expect(mergePromptDump.find("\"risked_chunk_count\"") != std::string::npos, "merge prompt should include risked chunk count");
+    Expect(mergePromptDump.find("\"has_missing_summary\"") != std::string::npos, "merge prompt should include missing-summary chunk risk flag");
+    Expect(mergePromptDump.find("\"has_duplicate_summaries\"") != std::string::npos, "merge prompt should include duplicate-summary chunk risk flag");
     Expect(mergePromptDump.find("\"first_block\"") != std::string::npos, "merge prompt should include chunk first-block provenance");
     Expect(mergePromptDump.find("\"last_block\"") != std::string::npos, "merge prompt should include chunk last-block provenance");
     Expect(mergePromptDump.find("\"block_ids\"") != std::string::npos, "merge prompt should include chunk block ids");
