@@ -3102,6 +3102,17 @@ void TestVerifierCoverageSnapshot()
     Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.dead_edge_claim_without_opaque_predicate"), "verifier should reject unsupported opaque dead-edge claims");
     Expect(HasIssueCode(unsupportedObfuscationReport, "obfuscation.substitution_claim_without_evidence"), "verifier should reject unsupported substitution claims");
 
+    decomp::AnalyzeResponse obfuscationUncertaintyResponse;
+    obfuscationUncertaintyResponse.Status = "ok";
+    obfuscationUncertaintyResponse.PseudoC = "void f(void) { return; }";
+    obfuscationUncertaintyResponse.Summary = "opaque predicate evidence was unavailable, so no dead branch pruning was applied; substitution idioms were unavailable";
+    obfuscationUncertaintyResponse.Uncertainties.push_back("obfuscation evidence unavailable");
+    obfuscationUncertaintyResponse.Confidence = 0.72;
+
+    const decomp::VerifyReport obfuscationUncertaintyReport = decomp::VerifyResponse(unsupportedObfuscationRequest, obfuscationUncertaintyResponse);
+    Expect(!HasIssueCode(obfuscationUncertaintyReport, "obfuscation.dead_edge_claim_without_opaque_predicate"), "verifier should not treat negated opaque-pruning uncertainty as a dead-edge claim");
+    Expect(!HasIssueCode(obfuscationUncertaintyReport, "obfuscation.substitution_claim_without_evidence"), "verifier should not treat unavailable substitution evidence as a simplification claim");
+
     decomp::AnalyzeRequest substitutionRequest;
     substitutionRequest.RequestId = "verifier_substitution_semantics_snapshot";
     substitutionRequest.Facts = BuildSubstitutionFacts();
@@ -3123,6 +3134,16 @@ void TestVerifierCoverageSnapshot()
 
     const decomp::VerifyReport memorySubstitutionReport = decomp::VerifyResponse(substitutionRequest, memorySubstitutionResponse);
     Expect(HasIssueCode(memorySubstitutionReport, "obfuscation.substitution_memory_semantics_claim"), "verifier should flag memory-sensitive substitution claims");
+
+    decomp::AnalyzeResponse memoryUncertaintyResponse;
+    memoryUncertaintyResponse.Status = "ok";
+    memoryUncertaintyResponse.PseudoC = "void f(void) { return; }";
+    memoryUncertaintyResponse.Summary = "substitution idiom evidence was present, but memory effects were uncertain and pointer loads were not simplified";
+    memoryUncertaintyResponse.Uncertainties.push_back("memory-sensitive substitution not applied");
+    memoryUncertaintyResponse.Confidence = 0.78;
+
+    const decomp::VerifyReport memoryUncertaintyReport = decomp::VerifyResponse(substitutionRequest, memoryUncertaintyResponse);
+    Expect(!HasIssueCode(memoryUncertaintyReport, "obfuscation.substitution_memory_semantics_claim"), "verifier should not flag negated memory-substitution uncertainty as a rewrite claim");
 
     std::string rawSource;
     std::string rawTarget;

@@ -910,37 +910,98 @@ bool MentionsRawDispatcherShape(const AnalyzeResponse& response)
         || ContainsInsensitive(response.PseudoC, "control-flow flatten");
 }
 
-bool MentionsOpaqueDeadEdgeClaim(const AnalyzeResponse& response)
+bool ContainsAnyInsensitive(
+    const std::string& text,
+    const std::vector<std::string>& needles)
 {
-    return ContainsInsensitive(response.Summary, "opaque predicate")
-        || ContainsInsensitive(response.PseudoC, "opaque predicate")
-        || ContainsInsensitive(response.Summary, "bogus control")
-        || ContainsInsensitive(response.PseudoC, "bogus control")
-        || ContainsInsensitive(response.Summary, "dead branch")
-        || ContainsInsensitive(response.PseudoC, "dead branch")
-        || ContainsInsensitive(response.Summary, "dead block")
-        || ContainsInsensitive(response.PseudoC, "dead block")
-        || ContainsInsensitive(response.Summary, "junk block")
-        || ContainsInsensitive(response.PseudoC, "junk block");
+    for (const std::string& needle : needles)
+    {
+        if (ContainsInsensitive(text, needle))
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
-bool MentionsSubstitutionSimplificationClaim(const AnalyzeResponse& response)
+bool IsNegatedObfuscationClaimContext(const std::string& context)
 {
-    return ContainsInsensitive(response.Summary, "instruction substitution")
-        || ContainsInsensitive(response.PseudoC, "instruction substitution")
-        || ContainsInsensitive(response.Summary, "substitution idiom")
-        || ContainsInsensitive(response.PseudoC, "substitution idiom")
-        || ContainsInsensitive(response.Summary, "algebraic identity")
-        || ContainsInsensitive(response.PseudoC, "algebraic identity");
+    const std::vector<std::string> markers = {
+        "no dead",
+        "not dead",
+        "did not prune",
+        "do not prune",
+        "without pruning",
+        "not pruned",
+        "not removed",
+        "unproven",
+        "unavailable",
+        "insufficient",
+        "unknown"
+    };
+
+    return ContainsAnyInsensitive(context, markers);
+}
+
+bool IsOpaqueDeadEdgeClaimContext(const std::string& context)
+{
+    if (IsNegatedObfuscationClaimContext(context))
+    {
+        return false;
+    }
+
+    const std::vector<std::string> deadTargets = {
+        "dead branch",
+        "dead block",
+        "dead edge",
+        "dead path",
+        "dead target",
+        "bogus control",
+        "bogus branch",
+        "bogus edge",
+        "junk block",
+        "junk edge"
+    };
+    const std::vector<std::string> actions = {
+        "prune",
+        "pruned",
+        "pruning",
+        "remove",
+        "removed",
+        "eliminate",
+        "eliminated",
+        "discard",
+        "discarded",
+        "omit",
+        "omitted",
+        "suppress",
+        "suppressed",
+        "unreachable"
+    };
+    const std::vector<std::string> obfuscationMarkers = {
+        "opaque predicate",
+        "bogus control",
+        "bogus branch",
+        "junk block",
+        "junk edge"
+    };
+
+    const bool hasDeadTarget = ContainsAnyInsensitive(context, deadTargets);
+    const bool hasAction = ContainsAnyInsensitive(context, actions);
+    const bool hasObfuscationMarker = ContainsAnyInsensitive(context, obfuscationMarkers);
+    return (hasDeadTarget && hasAction) || (hasObfuscationMarker && hasDeadTarget);
 }
 
 bool ContainsMemorySensitiveSubstitutionMarker(const std::string& text)
 {
     return text.find('[') != std::string::npos
+        || text.find('*') != std::string::npos
+        || ContainsInsensitive(text, " ptr ")
         || ContainsInsensitive(text, "dereference")
         || ContainsInsensitive(text, "pointer")
-        || ContainsInsensitive(text, "memory")
-        || ContainsInsensitive(text, "mem")
+        || ContainsInsensitive(text, "memory operand")
+        || ContainsInsensitive(text, "memory dereference")
         || ContainsInsensitive(text, "load")
         || ContainsInsensitive(text, "store")
         || ContainsInsensitive(text, "global")
@@ -973,6 +1034,93 @@ void CollectKeywordContexts(
     }
 }
 
+std::vector<std::string> CollectOpaqueDeadEdgeClaimContexts(const AnalyzeResponse& response)
+{
+    std::vector<std::string> contexts;
+    const std::vector<std::string> keywords = {
+        "opaque predicate",
+        "bogus control",
+        "bogus branch",
+        "dead branch",
+        "dead block",
+        "dead edge",
+        "junk block",
+        "pruned",
+        "removed",
+        "eliminated"
+    };
+
+    for (const std::string& keyword : keywords)
+    {
+        CollectKeywordContexts(response.Summary, keyword, contexts);
+        CollectKeywordContexts(response.PseudoC, keyword, contexts);
+    }
+
+    std::vector<std::string> filtered;
+
+    for (const std::string& context : contexts)
+    {
+        if (IsOpaqueDeadEdgeClaimContext(context))
+        {
+            filtered.push_back(context);
+        }
+    }
+
+    return filtered;
+}
+
+bool IsNegatedSubstitutionClaimContext(const std::string& context)
+{
+    const std::vector<std::string> markers = {
+        "no substitution",
+        "did not apply",
+        "do not apply",
+        "did not simplify",
+        "do not simplify",
+        "without applying",
+        "not simplified",
+        "not canonicalized",
+        "unavailable",
+        "unproven",
+        "insufficient",
+        "unknown"
+    };
+
+    return ContainsAnyInsensitive(context, markers);
+}
+
+bool IsSubstitutionSimplificationClaimContext(const std::string& context)
+{
+    if (IsNegatedSubstitutionClaimContext(context))
+    {
+        return false;
+    }
+
+    const std::vector<std::string> substitutionMarkers = {
+        "instruction substitution",
+        "substitution idiom",
+        "algebraic identity",
+        "substitution"
+    };
+    const std::vector<std::string> actions = {
+        "applied",
+        "apply",
+        "simplified",
+        "simplify",
+        "canonicalized",
+        "canonicalize",
+        "replaced",
+        "replace",
+        "folded",
+        "fold",
+        "identity",
+        "=>"
+    };
+
+    return ContainsAnyInsensitive(context, substitutionMarkers)
+        && ContainsAnyInsensitive(context, actions);
+}
+
 std::vector<std::string> CollectSubstitutionClaimContexts(const AnalyzeResponse& response)
 {
     std::vector<std::string> contexts;
@@ -991,16 +1139,31 @@ std::vector<std::string> CollectSubstitutionClaimContexts(const AnalyzeResponse&
         CollectKeywordContexts(response.PseudoC, keyword, contexts);
     }
 
-    return contexts;
+    std::vector<std::string> filtered;
+
+    for (const std::string& context : contexts)
+    {
+        if (IsSubstitutionSimplificationClaimContext(context))
+        {
+            filtered.push_back(context);
+        }
+    }
+
+    return filtered;
+}
+
+bool MentionsOpaqueDeadEdgeClaim(const AnalyzeResponse& response)
+{
+    return !CollectOpaqueDeadEdgeClaimContexts(response).empty();
+}
+
+bool MentionsSubstitutionSimplificationClaim(const AnalyzeResponse& response)
+{
+    return !CollectSubstitutionClaimContexts(response).empty();
 }
 
 bool MentionsMemorySensitiveSubstitutionClaim(const AnalyzeResponse& response)
 {
-    if (!MentionsSubstitutionSimplificationClaim(response))
-    {
-        return false;
-    }
-
     const std::vector<std::string> contexts = CollectSubstitutionClaimContexts(response);
 
     for (const std::string& context : contexts)
