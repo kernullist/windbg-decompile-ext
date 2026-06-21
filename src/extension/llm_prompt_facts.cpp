@@ -614,7 +614,9 @@ double ScorePromptSwitch(const SwitchInfo& info)
     return score;
 }
 
-std::vector<size_t> SelectRepresentativeBlockIndices(const AnalyzeRequest& request)
+std::vector<size_t> SelectRepresentativeBlockIndices(
+    const AnalyzeRequest& request,
+    size_t requestedLimit)
 {
     struct BlockScore
     {
@@ -630,7 +632,8 @@ std::vector<size_t> SelectRepresentativeBlockIndices(const AnalyzeRequest& reque
         return indices;
     }
 
-    const size_t limit = totalBlocks < kPromptBlockLimit ? totalBlocks : kPromptBlockLimit;
+    const size_t cappedLimit = requestedLimit == 0 ? 1 : requestedLimit;
+    const size_t limit = totalBlocks < cappedLimit ? totalBlocks : cappedLimit;
     const InstructionIndex instructionIndex = BuildInstructionIndex(request);
     std::set<size_t> selected;
     indices.push_back(0);
@@ -998,7 +1001,7 @@ JsonValue BuildBlocksJson(const AnalyzeRequest& request, bool* truncated)
 {
     JsonValue blocks = JsonValue::MakeArray();
     const InstructionIndex instructionByAddress = BuildInstructionIndex(request);
-    const std::vector<size_t> selectedIndices = SelectRepresentativeBlockIndices(request);
+    const std::vector<size_t> selectedIndices = SelectRepresentativeBlockIndices(request, kPromptBlockCompactLimit);
 
     if (truncated != nullptr)
     {
@@ -1011,8 +1014,12 @@ JsonValue BuildBlocksJson(const AnalyzeRequest& request, bool* truncated)
         JsonValue item = JsonValue::MakeObject();
         JsonValue instructionHeadSample = JsonValue::MakeArray();
         JsonValue instructionTailSample = JsonValue::MakeArray();
-        const size_t headCount = block.InstructionAddresses.size() < kPromptBlockInstructionLimit ? block.InstructionAddresses.size() : kPromptBlockInstructionLimit;
-        const size_t tailCount = block.InstructionAddresses.size() < 4 ? block.InstructionAddresses.size() : 4;
+        const size_t headCount = block.InstructionAddresses.size() < kPromptBlockInstructionCompactLimit
+            ? block.InstructionAddresses.size()
+            : kPromptBlockInstructionCompactLimit;
+        const size_t tailCount = block.InstructionAddresses.size() < kPromptBlockInstructionCompactTailLimit
+            ? block.InstructionAddresses.size()
+            : kPromptBlockInstructionCompactTailLimit;
 
         for (size_t instructionOffset = 0; instructionOffset < headCount; ++instructionOffset)
         {
@@ -1132,7 +1139,7 @@ JsonValue BuildMemoryAccessesJson(const AnalyzeRequest& request, bool* truncated
 {
     JsonValue array = JsonValue::MakeArray();
     const InstructionIndex instructionByAddress = BuildInstructionIndex(request);
-    const std::vector<size_t> indices = SelectSpreadIndices(request.Facts.MemoryAccesses.size(), kPromptMemoryAccessLimit);
+    const std::vector<size_t> indices = SelectSpreadIndices(request.Facts.MemoryAccesses.size(), kPromptMemoryAccessCompactLimit);
 
     if (truncated != nullptr)
     {
@@ -1414,6 +1421,235 @@ JsonValue BuildCallArgumentsJson(const AnalyzeRequest& request, bool* truncated)
     return BuildCallArgumentGroupsJson(request, BuildCallArgumentPromptGroups(request, nullptr), truncated);
 }
 
+const CallTargetInfo* FindPromptCallTargetBySite(const AnalyzeRequest& request, uint64_t site)
+{
+    for (const CallTargetInfo& call : request.Facts.CallTargets)
+    {
+        if (call.Site == site)
+        {
+            return &call;
+        }
+    }
+
+    return nullptr;
+}
+
+const CallSite* FindPromptCallSiteBySite(
+    const std::vector<CallSite>& calls,
+    uint64_t site)
+{
+    for (const CallSite& call : calls)
+    {
+        if (call.Site == site)
+        {
+            return &call;
+        }
+    }
+
+    return nullptr;
+}
+
+std::string ResolvePromptCallDisplayName(
+    const AnalyzeRequest& request,
+    uint64_t site)
+{
+    const CallTargetInfo* target = FindPromptCallTargetBySite(request, site);
+
+    if (target != nullptr && !target->DisplayName.empty())
+    {
+        return target->DisplayName;
+    }
+
+    const CallSite* directCall = FindPromptCallSiteBySite(request.Facts.Calls, site);
+
+    if (directCall != nullptr)
+    {
+        return directCall->Target;
+    }
+
+    const CallSite* indirectCall = FindPromptCallSiteBySite(request.Facts.IndirectCalls, site);
+
+    if (indirectCall != nullptr)
+    {
+        return indirectCall->Target;
+    }
+
+    return std::string();
+}
+
+const IrValue* FindPromptCallResultBySite(const AnalyzeRequest& request, uint64_t site)
+{
+    const IrValue* best = nullptr;
+
+    for (const IrValue& value : request.Facts.IrValues)
+    {
+        if (value.DefSite != site || value.Kind != "call_result" || value.Confidence < 0.55)
+        {
+            continue;
+        }
+
+        if (best == nullptr || value.Confidence > best->Confidence)
+        {
+            best = &value;
+        }
+    }
+
+    return best;
+}
+
+JsonValue BuildHelperCallReturnValueJson(const IrValue* callResult)
+{
+    JsonValue object = JsonValue::MakeObject();
+
+    if (callResult == nullptr)
+    {
+        object.Set("present", JsonValue::MakeBoolean(false));
+        return object;
+    }
+
+    object.Set("present", JsonValue::MakeBoolean(true));
+    object.Set("value_id", JsonValue::MakeString(callResult->Id));
+    object.Set("target", JsonValue::MakeString(callResult->Target));
+    object.Set("expression", JsonValue::MakeString(callResult->Expression));
+    object.Set("canonical", JsonValue::MakeString(callResult->Canonical));
+    object.Set("uses", BuildStringArray(callResult->Uses, 8, nullptr));
+    object.Set("is_dead", JsonValue::MakeBoolean(callResult->IsDead));
+    object.Set("confidence", JsonValue::MakeNumber(callResult->Confidence));
+    object.Set("capture_policy", JsonValue::MakeString("If the helper return is used, emit target = callee(arguments) directly; never assign from an undefined placeholder such as result."));
+    return object;
+}
+
+double ScoreHelperCallContractGroup(
+    const AnalyzeRequest& request,
+    const CallArgumentPromptGroup& group)
+{
+    double score = 0.0;
+    const CallTargetInfo* target = FindPromptCallTargetBySite(request, group.Site);
+
+    if (target != nullptr)
+    {
+        score += 1.0 + ScorePromptCallTarget(*target);
+
+        if (target->TargetKind == "internal_direct")
+        {
+            score += 0.6;
+        }
+    }
+
+    for (const size_t argumentIndex : group.ArgumentIndices)
+    {
+        if (argumentIndex >= request.Facts.CallArguments.size())
+        {
+            continue;
+        }
+
+        const CallArgumentFact& argument = request.Facts.CallArguments[argumentIndex];
+        score += argument.Confidence;
+
+        if (argument.Expression.find('^') != std::string::npos
+            || argument.Expression.find('|') != std::string::npos
+            || argument.Expression.find('&') != std::string::npos
+            || argument.Expression.find('+') != std::string::npos
+            || argument.Expression.find('-') != std::string::npos
+            || argument.Expression.find('*') != std::string::npos
+            || argument.Expression.find('(') != std::string::npos)
+        {
+            score += 0.45;
+        }
+    }
+
+    return score;
+}
+
+JsonValue BuildHelperCallContractGroupsJson(
+    const AnalyzeRequest& request,
+    const std::vector<CallArgumentPromptGroup>& groups,
+    bool* truncated)
+{
+    JsonValue array = JsonValue::MakeArray();
+    const std::vector<size_t> sampled = SelectRankedSpreadIndices(
+        groups.size(),
+        kPromptHelperCallContractLimit,
+        [&request, &groups](size_t index)
+        {
+            return ScoreHelperCallContractGroup(request, groups[index]);
+        });
+
+    if (truncated != nullptr)
+    {
+        *truncated = groups.size() > sampled.size();
+    }
+
+    for (size_t relativeIndex : sampled)
+    {
+        const CallArgumentPromptGroup& group = groups[relativeIndex];
+        const CallTargetInfo* target = FindPromptCallTargetBySite(request, group.Site);
+        const IrValue* callResult = FindPromptCallResultBySite(request, group.Site);
+        std::vector<size_t> argumentIndices = group.ArgumentIndices;
+        JsonValue item = JsonValue::MakeObject();
+        JsonValue arguments = JsonValue::MakeArray();
+
+        std::sort(
+            argumentIndices.begin(),
+            argumentIndices.end(),
+            [&request](size_t left, size_t right)
+            {
+                const uint32_t leftOrdinal = left < request.Facts.CallArguments.size()
+                    ? request.Facts.CallArguments[left].Ordinal
+                    : 0;
+                const uint32_t rightOrdinal = right < request.Facts.CallArguments.size()
+                    ? request.Facts.CallArguments[right].Ordinal
+                    : 0;
+
+                if (leftOrdinal != rightOrdinal)
+                {
+                    return leftOrdinal < rightOrdinal;
+                }
+
+                return left < right;
+            });
+
+        for (const size_t argumentIndex : argumentIndices)
+        {
+            if (argumentIndex >= request.Facts.CallArguments.size())
+            {
+                continue;
+            }
+
+            JsonValue argument = BuildCallArgumentJsonItem(request.Facts.CallArguments[argumentIndex]);
+            argument.Set("expression_required", JsonValue::MakeBoolean(true));
+            arguments.PushBack(argument);
+        }
+
+        item.Set("site", JsonValue::MakeString(HexU64(group.Site)));
+        item.Set("callee", JsonValue::MakeString(ResolvePromptCallDisplayName(request, group.Site)));
+        item.Set("target_kind", JsonValue::MakeString(target != nullptr ? target->TargetKind : std::string()));
+        item.Set("target_address", JsonValue::MakeString(target != nullptr ? HexU64(target->TargetAddress) : std::string()));
+        item.Set("required", JsonValue::MakeBoolean(true));
+        item.Set("argument_count", JsonValue::MakeNumber(static_cast<double>(arguments.GetArray().size())));
+        item.Set("argument_policy", JsonValue::MakeString("Emit helper calls with these argument expressions exactly; do not drop operands, operators, or nested expressions."));
+        item.Set("arguments", arguments);
+        item.Set("return_value", BuildHelperCallReturnValueJson(callResult));
+        item.Set("confidence", JsonValue::MakeNumber(target != nullptr ? target->Confidence : 0.0));
+        array.PushBack(item);
+    }
+
+    return array;
+}
+
+JsonValue BuildHelperCallContractJson(const AnalyzeRequest& request, bool* truncated)
+{
+    return BuildHelperCallContractGroupsJson(request, BuildCallArgumentPromptGroups(request, nullptr), truncated);
+}
+
+JsonValue BuildHelperCallContractJsonForAddresses(
+    const AnalyzeRequest& request,
+    const std::set<uint64_t>& instructionAddresses,
+    bool* truncated)
+{
+    return BuildHelperCallContractGroupsJson(request, BuildCallArgumentPromptGroups(request, &instructionAddresses), truncated);
+}
+
 JsonValue BuildValueMergesJson(const AnalyzeRequest& request, bool* truncated)
 {
     JsonValue array = JsonValue::MakeArray();
@@ -1444,7 +1680,7 @@ JsonValue BuildIrValuesJson(const AnalyzeRequest& request, bool* truncated)
     JsonValue array = JsonValue::MakeArray();
     const std::vector<size_t> indices = SelectRankedSpreadIndices(
         request.Facts.IrValues.size(),
-        kPromptIrValueLimit,
+        kPromptIrValueCompactLimit,
         [&request](size_t index)
         {
             return ScorePromptIrValue(request.Facts.IrValues[index]);
@@ -1529,10 +1765,13 @@ JsonValue BuildIrValuesJsonForBlocks(
     return array;
 }
 
-JsonValue BuildReachingValuesJson(const std::vector<ReachingValue>& values, bool* truncated)
+JsonValue BuildReachingValuesJson(
+    const std::vector<ReachingValue>& values,
+    size_t limit,
+    bool* truncated)
 {
     JsonValue array = JsonValue::MakeArray();
-    const size_t count = values.size() < kPromptBlockValueEntryLimit ? values.size() : kPromptBlockValueEntryLimit;
+    const size_t count = values.size() < limit ? values.size() : limit;
 
     if (truncated != nullptr)
     {
@@ -1558,7 +1797,7 @@ JsonValue BuildBlockValueStatesJson(const AnalyzeRequest& request, bool* truncat
 {
     JsonValue array = JsonValue::MakeArray();
     bool anyTruncated = false;
-    const std::vector<size_t> indices = SelectSpreadIndices(request.Facts.BlockValueStates.size(), kPromptBlockValueStateLimit);
+    const std::vector<size_t> indices = SelectSpreadIndices(request.Facts.BlockValueStates.size(), kPromptBlockValueStateCompactLimit);
 
     if (request.Facts.BlockValueStates.size() > indices.size())
     {
@@ -1572,8 +1811,8 @@ JsonValue BuildBlockValueStatesJson(const AnalyzeRequest& request, bool* truncat
         bool liveOutTruncated = false;
         JsonValue item = JsonValue::MakeObject();
         item.Set("block_id", JsonValue::MakeString(state.BlockId));
-        item.Set("live_in", BuildReachingValuesJson(state.LiveIn, &liveInTruncated));
-        item.Set("live_out", BuildReachingValuesJson(state.LiveOut, &liveOutTruncated));
+        item.Set("live_in", BuildReachingValuesJson(state.LiveIn, kPromptBlockValueEntryCompactLimit, &liveInTruncated));
+        item.Set("live_out", BuildReachingValuesJson(state.LiveOut, kPromptBlockValueEntryCompactLimit, &liveOutTruncated));
         item.Set("converged", JsonValue::MakeBoolean(state.Converged));
         item.Set("confidence", JsonValue::MakeNumber(state.Confidence));
         array.PushBack(item);
@@ -1620,8 +1859,8 @@ JsonValue BuildBlockValueStatesJsonForBlocks(
         bool liveOutTruncated = false;
         JsonValue item = JsonValue::MakeObject();
         item.Set("block_id", JsonValue::MakeString(state.BlockId));
-        item.Set("live_in", BuildReachingValuesJson(state.LiveIn, &liveInTruncated));
-        item.Set("live_out", BuildReachingValuesJson(state.LiveOut, &liveOutTruncated));
+        item.Set("live_in", BuildReachingValuesJson(state.LiveIn, kPromptBlockValueEntryLimit, &liveInTruncated));
+        item.Set("live_out", BuildReachingValuesJson(state.LiveOut, kPromptBlockValueEntryLimit, &liveOutTruncated));
         item.Set("converged", JsonValue::MakeBoolean(state.Converged));
         item.Set("confidence", JsonValue::MakeNumber(state.Confidence));
         array.PushBack(item);
@@ -2212,7 +2451,7 @@ JsonValue BuildTypeHintsJson(const AnalyzeRequest& request, bool* truncated)
     JsonValue array = JsonValue::MakeArray();
     const std::vector<size_t> indices = SelectRankedSpreadIndices(
         request.Facts.TypeHints.size(),
-        kPromptTypeHintLimit,
+        kPromptTypeHintCompactLimit,
         [&request](size_t index)
         {
             return ScorePromptTypeHint(request.Facts.TypeHints[index]);
@@ -2906,7 +3145,12 @@ JsonValue BuildCountsJson(const AnalyzeRequest& request)
 
 JsonValue BuildGraphSummaryJson(
     const AnalyzeRequest& request,
-    const std::set<std::string>* blockIds)
+    const std::set<std::string>* blockIds,
+    size_t controlFlowLimit,
+    size_t conditionLimit,
+    size_t semanticEdgeLimit,
+    size_t importantBlockLimit,
+    size_t blockSelectionLimit)
 {
     JsonValue graph = JsonValue::MakeObject();
     JsonValue entry = JsonValue::MakeObject();
@@ -2925,7 +3169,7 @@ JsonValue BuildGraphSummaryJson(
 
     for (size_t index = 0;
         index < request.Facts.ControlFlow.size()
-        && regions.GetArray().size() < kPromptControlFlowLimit;
+        && regions.GetArray().size() < controlFlowLimit;
         ++index)
     {
         const ControlFlowRegion& region = request.Facts.ControlFlow[index];
@@ -2948,7 +3192,7 @@ JsonValue BuildGraphSummaryJson(
 
     for (size_t index = 0;
         index < request.Facts.NormalizedConditions.size()
-        && conditions.GetArray().size() < kPromptNormalizedConditionLimit;
+        && conditions.GetArray().size() < conditionLimit;
         ++index)
     {
         const NormalizedCondition& condition = request.Facts.NormalizedConditions[index];
@@ -2972,7 +3216,7 @@ JsonValue BuildGraphSummaryJson(
 
     for (size_t index = 0;
         index < request.Facts.SemanticControlFlow.Edges.size()
-        && semanticEdges.GetArray().size() < kPromptSemanticControlFlowEdgeLimit;
+        && semanticEdges.GetArray().size() < semanticEdgeLimit;
         ++index)
     {
         const SemanticControlFlowEdge& edge = request.Facts.SemanticControlFlow.Edges[index];
@@ -2993,10 +3237,15 @@ JsonValue BuildGraphSummaryJson(
     }
 
     const InstructionIndex instructionByAddress = BuildInstructionIndex(request);
-    const std::vector<size_t> blockIndices = SelectRepresentativeBlockIndices(request);
+    const std::vector<size_t> blockIndices = SelectRepresentativeBlockIndices(request, blockSelectionLimit);
 
     for (size_t selectedIndex : blockIndices)
     {
+        if (importantBlocks.GetArray().size() >= importantBlockLimit)
+        {
+            break;
+        }
+
         const BasicBlock& block = request.Facts.Blocks[selectedIndex];
 
         if (!IsPromptBlockSelected(blockIds, block.Id))
@@ -3027,14 +3276,28 @@ JsonValue BuildGraphSummaryJson(
 
 JsonValue BuildGraphSummaryJson(const AnalyzeRequest& request)
 {
-    return BuildGraphSummaryJson(request, nullptr);
+    return BuildGraphSummaryJson(
+        request,
+        nullptr,
+        kPromptGraphSummaryControlFlowCompactLimit,
+        kPromptGraphSummaryConditionCompactLimit,
+        kPromptGraphSummarySemanticEdgeCompactLimit,
+        kPromptGraphSummaryImportantBlockCompactLimit,
+        kPromptBlockCompactLimit);
 }
 
 JsonValue BuildGraphSummaryJsonForBlocks(
     const AnalyzeRequest& request,
     const std::set<std::string>& blockIds)
 {
-    return BuildGraphSummaryJson(request, &blockIds);
+    return BuildGraphSummaryJson(
+        request,
+        &blockIds,
+        kPromptControlFlowLimit,
+        kPromptNormalizedConditionLimit,
+        kPromptSemanticControlFlowEdgeLimit,
+        kPromptBlockLimit,
+        kPromptBlockLimit);
 }
 
 JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
@@ -3055,6 +3318,7 @@ JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
     bool recoveredArgumentsTruncated = false;
     bool recoveredLocalsTruncated = false;
     bool callArgumentsTruncated = false;
+    bool helperCallContractTruncated = false;
     bool valueMergesTruncated = false;
     bool irValuesTruncated = false;
     bool blockValueStatesTruncated = false;
@@ -3091,8 +3355,16 @@ JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
 
     selection.Set("block_strategy", JsonValue::MakeString("entry + feature-heavy blocks + spread sampling"));
     selection.Set("fact_strategy", JsonValue::MakeString("ranked high-signal facts + spread sampling"));
+    selection.Set("prompt_profile", JsonValue::MakeString("single_pass_compact_with_helper_call_contract"));
     selection.Set("instruction_window_limit", JsonValue::MakeNumber(static_cast<double>(kPromptInstructionWindowLimit)));
-    selection.Set("block_limit", JsonValue::MakeNumber(static_cast<double>(kPromptBlockLimit)));
+    selection.Set("block_limit", JsonValue::MakeNumber(static_cast<double>(kPromptBlockCompactLimit)));
+    selection.Set("block_instruction_head_limit", JsonValue::MakeNumber(static_cast<double>(kPromptBlockInstructionCompactLimit)));
+    selection.Set("block_instruction_tail_limit", JsonValue::MakeNumber(static_cast<double>(kPromptBlockInstructionCompactTailLimit)));
+    selection.Set("memory_access_limit", JsonValue::MakeNumber(static_cast<double>(kPromptMemoryAccessCompactLimit)));
+    selection.Set("ir_value_limit", JsonValue::MakeNumber(static_cast<double>(kPromptIrValueCompactLimit)));
+    selection.Set("block_value_state_limit", JsonValue::MakeNumber(static_cast<double>(kPromptBlockValueStateCompactLimit)));
+    selection.Set("type_hint_limit", JsonValue::MakeNumber(static_cast<double>(kPromptTypeHintCompactLimit)));
+    selection.Set("helper_call_contract_required", JsonValue::MakeBoolean(true));
 
     root.Set("arch", JsonValue::MakeString(request.Facts.Arch));
     root.Set("mode", JsonValue::MakeString(request.Facts.Mode == AnalysisMode::LiveMemory ? "live" : "file"));
@@ -3122,6 +3394,7 @@ JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
     root.Set("recovered_arguments", BuildRecoveredArgumentsJson(request, &recoveredArgumentsTruncated));
     root.Set("recovered_locals", BuildRecoveredLocalsJson(request, &recoveredLocalsTruncated));
     root.Set("call_arguments", BuildCallArgumentsJson(request, &callArgumentsTruncated));
+    root.Set("helper_call_contract", BuildHelperCallContractJson(request, &helperCallContractTruncated));
     root.Set("value_merges", BuildValueMergesJson(request, &valueMergesTruncated));
     root.Set("ir_values", BuildIrValuesJson(request, &irValuesTruncated));
     root.Set("block_value_states", BuildBlockValueStatesJson(request, &blockValueStatesTruncated));
@@ -3155,6 +3428,7 @@ JsonValue BuildPromptFactsJson(const AnalyzeRequest& request)
     truncation.Set("recovered_arguments", JsonValue::MakeBoolean(recoveredArgumentsTruncated));
     truncation.Set("recovered_locals", JsonValue::MakeBoolean(recoveredLocalsTruncated));
     truncation.Set("call_arguments", JsonValue::MakeBoolean(callArgumentsTruncated));
+    truncation.Set("helper_call_contract", JsonValue::MakeBoolean(helperCallContractTruncated));
     truncation.Set("value_merges", JsonValue::MakeBoolean(valueMergesTruncated));
     truncation.Set("ir_values", JsonValue::MakeBoolean(irValuesTruncated));
     truncation.Set("block_value_states", JsonValue::MakeBoolean(blockValueStatesTruncated));

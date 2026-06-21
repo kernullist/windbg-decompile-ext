@@ -15,21 +15,29 @@ namespace decomp
 inline constexpr size_t kPromptRegionLimit = 8;
 inline constexpr size_t kPromptBlockLimit = 48;
 inline constexpr size_t kPromptBlockInstructionLimit = 8;
+inline constexpr size_t kPromptBlockCompactLimit = 32;
+inline constexpr size_t kPromptBlockInstructionCompactLimit = 4;
+inline constexpr size_t kPromptBlockInstructionCompactTailLimit = 2;
 inline constexpr size_t kPromptDirectCallLimit = 32;
 inline constexpr size_t kPromptIndirectCallLimit = 24;
 inline constexpr size_t kPromptFactLimit = 32;
 inline constexpr size_t kPromptUncertaintyLimit = 12;
 inline constexpr size_t kPromptSwitchLimit = 10;
 inline constexpr size_t kPromptMemoryAccessLimit = 32;
+inline constexpr size_t kPromptMemoryAccessCompactLimit = 18;
 inline constexpr size_t kPromptInstructionWindowLimit = 20;
 inline constexpr size_t kPromptRecoveredArgumentLimit = 8;
 inline constexpr size_t kPromptRecoveredLocalLimit = 24;
 inline constexpr size_t kPromptStackPointerLimit = 32;
 inline constexpr size_t kPromptCallArgumentLimit = 32;
+inline constexpr size_t kPromptHelperCallContractLimit = 24;
 inline constexpr size_t kPromptValueMergeLimit = 16;
 inline constexpr size_t kPromptIrValueLimit = 32;
+inline constexpr size_t kPromptIrValueCompactLimit = 24;
 inline constexpr size_t kPromptBlockValueStateLimit = 24;
 inline constexpr size_t kPromptBlockValueEntryLimit = 12;
+inline constexpr size_t kPromptBlockValueStateCompactLimit = 16;
+inline constexpr size_t kPromptBlockValueEntryCompactLimit = 6;
 inline constexpr size_t kPromptObfuscationStateVariableLimit = 8;
 inline constexpr size_t kPromptObfuscationDispatcherLimit = 8;
 inline constexpr size_t kPromptObfuscationEdgeLimit = 24;
@@ -39,7 +47,12 @@ inline constexpr size_t kPromptObfuscationNoteLimit = 8;
 inline constexpr size_t kPromptSemanticControlFlowEdgeLimit = 32;
 inline constexpr size_t kPromptSemanticControlFlowNoteLimit = 8;
 inline constexpr size_t kPromptControlFlowLimit = 24;
+inline constexpr size_t kPromptGraphSummaryControlFlowCompactLimit = 12;
+inline constexpr size_t kPromptGraphSummaryConditionCompactLimit = 16;
+inline constexpr size_t kPromptGraphSummarySemanticEdgeCompactLimit = 20;
+inline constexpr size_t kPromptGraphSummaryImportantBlockCompactLimit = 20;
 inline constexpr size_t kPromptTypeHintLimit = 32;
+inline constexpr size_t kPromptTypeHintCompactLimit = 24;
 inline constexpr size_t kPromptIdiomLimit = 24;
 inline constexpr size_t kPromptCalleeSummaryLimit = 32;
 inline constexpr size_t kPromptDataReferenceLimit = 24;
@@ -123,6 +136,11 @@ JsonValue BuildStackPointerJsonForAddresses(
     const std::set<uint64_t>& instructionAddresses,
     bool* truncated);
 JsonValue BuildCallArgumentsJson(const AnalyzeRequest& request, bool* truncated);
+JsonValue BuildHelperCallContractJson(const AnalyzeRequest& request, bool* truncated);
+JsonValue BuildHelperCallContractJsonForAddresses(
+    const AnalyzeRequest& request,
+    const std::set<uint64_t>& instructionAddresses,
+    bool* truncated);
 JsonValue BuildValueMergesJson(const AnalyzeRequest& request, bool* truncated);
 JsonValue BuildIrValuesJson(const AnalyzeRequest& request, bool* truncated);
 JsonValue BuildIrValuesJsonForBlocks(

@@ -57,10 +57,10 @@ std::string BuildVerifierIssueCorrectionHint(const VerificationIssue& issue)
             {
                 "obfuscation.dispatcher_claim_without_evidence",
                 "obfuscation.raw_dispatcher_loop_without_uncertainty",
-                nullptr
+                "obfuscation.raw_dispatcher_emitted_with_deobf_on"
             },
-            2,
-            "Use obfuscation.dispatchers.recovered_edges or semantic_control_flow edges for recovered structure; do not present a raw dispatcher loop as source logic unless uncertainty is explicit."
+            3,
+            "Use obfuscation.dispatchers.recovered_edges or semantic_control_flow edges for recovered structure; when deobf is enabled and safe_to_rewrite_control_flow is true, do not emit a raw magic-state dispatcher chain as the primary pseudo_c."
         },
         {
             {
@@ -74,11 +74,11 @@ std::string BuildVerifierIssueCorrectionHint(const VerificationIssue& issue)
         {
             {
                 "control_flow.loop_without_back_edge",
-                nullptr,
+                "control_flow.infinite_loop_without_exit",
                 nullptr
             },
-            1,
-            "Do not introduce source-level loops unless recovered raw CFG or semantic_control_flow evidence contains a back edge; keep dispatcher-shaped flow explicit or list loop recovery as uncertainty."
+            2,
+            "Do not introduce source-level loops unless recovered raw CFG or semantic_control_flow evidence contains a back edge; if an infinite dispatcher loop is emitted, include a real break, return, or loop condition for the recovered exit state."
         },
         {
             {
@@ -128,11 +128,11 @@ std::string BuildVerifierIssueCorrectionHint(const VerificationIssue& issue)
         {
             {
                 "call.argument_expression_omitted",
-                nullptr,
-                nullptr
+                "call.result_not_captured",
+                "identifier.undefined_result_placeholder"
             },
-            1,
-            "Rewrite recovered helper calls using the exact recovered call_arguments expressions, preserving operands and operators; do not substitute pointer names, state variables, or simplified expressions unless the exact expression is listed in call_arguments or ir_values."
+            3,
+            "Rewrite recovered helper calls using exact helper_call_contract and call_arguments expressions; capture used helper returns as target = Callee(args) directly and never assign from undefined placeholders such as result."
         }
     };
 
@@ -151,6 +151,46 @@ std::string BuildVerifierIssueCorrectionHint(const VerificationIssue& issue)
 
     return std::string();
 }
+
+bool IsHardVerifierIssue(const VerificationIssue& issue)
+{
+    return issue.Severity == "error";
+}
+}
+
+size_t CountHardVerifierIssues(const VerifyReport& report)
+{
+    size_t count = 0;
+
+    for (const VerificationIssue& issue : report.Issues)
+    {
+        if (IsHardVerifierIssue(issue))
+        {
+            ++count;
+        }
+    }
+
+    return count;
+}
+
+bool ShouldAcceptVerifierFeedbackRetry(
+    const VerifyReport& originalReport,
+    const VerifyReport& retryReport)
+{
+    const size_t originalHardIssues = CountHardVerifierIssues(originalReport);
+    const size_t retryHardIssues = CountHardVerifierIssues(retryReport);
+
+    if (originalHardIssues != 0)
+    {
+        return retryHardIssues < originalHardIssues;
+    }
+
+    if (retryReport.AdjustedConfidence + 0.02 >= originalReport.AdjustedConfidence)
+    {
+        return true;
+    }
+
+    return retryReport.FactConflicts < originalReport.FactConflicts;
 }
 
 bool ShouldRetryWithVerifierFeedback(const VerifyReport& report)

@@ -2,6 +2,7 @@
 #include "decomp/json.h"
 #include "decomp/llm_client.h"
 #include "decomp/llm_prompt_facts.h"
+#include "decomp/llm_verifier_feedback.h"
 #include "decomp/protocol.h"
 #include "decomp/string_utils.h"
 #include "decomp/verifier.h"
@@ -1150,6 +1151,21 @@ void TestAnalyzerSnapshot()
     Expect(promptDump.find("\"evidence_graph\"") != std::string::npos, "prompt snapshot should include evidence_graph");
 
     const decomp::JsonValue promptFacts = ParseDebugPromptFactsJson(promptDump);
+    ExpectJsonNumberAtMost(
+        promptFacts,
+        { "selection", "block_limit" },
+        static_cast<double>(decomp::kPromptBlockCompactLimit),
+        "single-pass prompt should advertise compact block limit");
+    const decomp::JsonValue* promptBlocks = ExpectJsonArrayPath(promptFacts, { "blocks" }, "prompt blocks should be an array");
+    const decomp::JsonValue* promptMemoryAccesses = ExpectJsonArrayPath(promptFacts, { "memory_accesses" }, "prompt memory accesses should be an array");
+    const decomp::JsonValue* promptIrValues = ExpectJsonArrayPath(promptFacts, { "ir_values" }, "prompt IR values should be an array");
+    const decomp::JsonValue* promptBlockValueStates = ExpectJsonArrayPath(promptFacts, { "block_value_states" }, "prompt block value states should be an array");
+    const decomp::JsonValue* promptTypeHints = ExpectJsonArrayPath(promptFacts, { "type_hints" }, "prompt type hints should be an array");
+    Expect(promptBlocks != nullptr && promptBlocks->GetArray().size() <= decomp::kPromptBlockCompactLimit, "single-pass prompt should use compact block selection");
+    Expect(promptMemoryAccesses != nullptr && promptMemoryAccesses->GetArray().size() <= decomp::kPromptMemoryAccessCompactLimit, "single-pass prompt should use compact memory access selection");
+    Expect(promptIrValues != nullptr && promptIrValues->GetArray().size() <= decomp::kPromptIrValueCompactLimit, "single-pass prompt should use compact IR value selection");
+    Expect(promptBlockValueStates != nullptr && promptBlockValueStates->GetArray().size() <= decomp::kPromptBlockValueStateCompactLimit, "single-pass prompt should use compact block value state selection");
+    Expect(promptTypeHints != nullptr && promptTypeHints->GetArray().size() <= decomp::kPromptTypeHintCompactLimit, "single-pass prompt should use compact type hint selection");
     ExpectJsonNumberAtMost(
         promptFacts,
         { "evidence_graph", "counts", "selected_nodes" },
@@ -2773,6 +2789,7 @@ void TestPromptCallArgumentPackingSnapshot()
 
     const std::string dump = decomp::BuildDebugPromptDump(request);
     Expect(dump.find("\"call_arguments\"") != std::string::npos, "prompt dump should include call argument facts");
+    Expect(dump.find("\"helper_call_contract\"") != std::string::npos, "prompt dump should include helper call argument contracts");
     Expect(dump.find("\"argument_count\"") != std::string::npos, "prompt dump should pack call arguments by call site");
     Expect(dump.find("\"arguments\"") != std::string::npos, "prompt dump should include grouped call argument lists");
     Expect(dump.find("\"fact_strategy\"") != std::string::npos, "prompt dump should describe ranked fact selection");
@@ -2963,15 +2980,105 @@ void TestVerifierCoverageSnapshot()
     expressionArg2.Confidence = 0.82;
     callExpressionRequest.Facts.CallArguments.push_back(expressionArg2);
 
+    decomp::IrValue expressionCallResult;
+    expressionCallResult.Id = "call_result_1024";
+    expressionCallResult.BlockId = "bb3";
+    expressionCallResult.DefSite = 0x1024;
+    expressionCallResult.Target = "accumulator";
+    expressionCallResult.Expression = "sample!AddSubstituted(accumulator ^ shifted, 0x10203041)";
+    expressionCallResult.Canonical = expressionCallResult.Expression;
+    expressionCallResult.Kind = "call_result";
+    expressionCallResult.Uses = { "return_accumulator" };
+    expressionCallResult.Confidence = 0.82;
+    callExpressionRequest.Facts.IrValues.push_back(expressionCallResult);
+
+    bool helperContractTruncated = false;
+    const decomp::JsonValue helperContract = decomp::BuildHelperCallContractJson(callExpressionRequest, &helperContractTruncated);
+    bool foundHelperContract = false;
+    bool foundExactExpressionArgument = false;
+    bool foundLiteralExpressionArgument = false;
+    bool foundReturnValueContract = false;
+
+    for (const decomp::JsonValue& item : helperContract.GetArray())
+    {
+        const decomp::JsonValue* callee = item.Find("callee");
+        const decomp::JsonValue* arguments = item.Find("arguments");
+        const decomp::JsonValue* returnValue = item.Find("return_value");
+
+        if (callee == nullptr || !callee->IsString() || callee->GetString() != "sample!AddSubstituted")
+        {
+            continue;
+        }
+
+        foundHelperContract = true;
+
+        if (returnValue != nullptr && returnValue->IsObject())
+        {
+            const decomp::JsonValue* present = returnValue->Find("present");
+            const decomp::JsonValue* target = returnValue->Find("target");
+            const decomp::JsonValue* capturePolicy = returnValue->Find("capture_policy");
+            foundReturnValueContract = present != nullptr
+                && present->IsBoolean()
+                && present->GetBoolean()
+                && target != nullptr
+                && target->IsString()
+                && target->GetString() == "accumulator"
+                && capturePolicy != nullptr
+                && capturePolicy->IsString()
+                && capturePolicy->GetString().find("target = callee(arguments)") != std::string::npos;
+        }
+
+        if (arguments == nullptr || !arguments->IsArray())
+        {
+            continue;
+        }
+
+        for (const decomp::JsonValue& argument : arguments->GetArray())
+        {
+            const decomp::JsonValue* expression = argument.Find("expression");
+            const decomp::JsonValue* required = argument.Find("expression_required");
+
+            if (expression == nullptr || !expression->IsString())
+            {
+                continue;
+            }
+
+            if (required == nullptr || !required->IsBoolean() || !required->GetBoolean())
+            {
+                continue;
+            }
+
+            if (expression->GetString() == "accumulator ^ shifted")
+            {
+                foundExactExpressionArgument = true;
+            }
+            else if (expression->GetString() == "0x10203041")
+            {
+                foundLiteralExpressionArgument = true;
+            }
+        }
+    }
+
+    const std::string callExpressionPromptDump = decomp::BuildDebugPromptDump(callExpressionRequest);
+    Expect(!helperContractTruncated, "single helper call contract should not be truncated");
+    Expect(foundHelperContract, "helper call contract should include the recovered helper callee");
+    Expect(foundExactExpressionArgument, "helper call contract should preserve exact recovered expression arguments");
+    Expect(foundLiteralExpressionArgument, "helper call contract should preserve literal recovered expression arguments");
+    Expect(foundReturnValueContract, "helper call contract should require direct capture of used helper returns");
+    Expect(callExpressionPromptDump.find("\"helper_call_contract\"") != std::string::npos, "prompt dump should expose helper call contract JSON");
+    Expect(callExpressionPromptDump.find("accumulator ^ shifted") != std::string::npos, "prompt dump should expose exact helper argument expression");
+    Expect(callExpressionPromptDump.find("\"return_value\"") != std::string::npos, "prompt dump should expose helper return-value contract");
+
     decomp::AnalyzeResponse normalizedExpressionCallResponse;
     normalizedExpressionCallResponse.Status = "ok";
-    normalizedExpressionCallResponse.PseudoC = "void f(void) { sample_AddSubstituted(accumulator ^ shifted, 0x10203041); }";
+    normalizedExpressionCallResponse.PseudoC = "void f(void) { accumulator = sample_AddSubstituted(accumulator ^ shifted, 0x10203041); }";
     normalizedExpressionCallResponse.Summary = "calls helper with recovered expression";
     normalizedExpressionCallResponse.Confidence = 0.92;
 
     const decomp::VerifyReport normalizedExpressionCallReport = decomp::VerifyResponse(callExpressionRequest, normalizedExpressionCallResponse);
     Expect(!HasIssueCode(normalizedExpressionCallReport, "call.recovered_targets_omitted"), "verifier should match recovered helper calls with module-prefix underscore normalization");
     Expect(!HasIssueCode(normalizedExpressionCallReport, "call.argument_expression_omitted"), "verifier should accept preserved recovered helper call argument expressions");
+    Expect(!HasIssueCode(normalizedExpressionCallReport, "call.result_not_captured"), "verifier should accept direct capture of used helper call results");
 
     decomp::AnalyzeResponse droppedExpressionCallResponse;
     droppedExpressionCallResponse.Status = "ok";
@@ -2982,10 +3089,35 @@ void TestVerifierCoverageSnapshot()
     const decomp::VerifyReport droppedExpressionCallReport = decomp::VerifyResponse(callExpressionRequest, droppedExpressionCallResponse);
     Expect(!HasIssueCode(droppedExpressionCallReport, "call.recovered_targets_omitted"), "verifier should not misreport a normalized helper call as omitted when checking argument loss");
     Expect(HasIssueCode(droppedExpressionCallReport, "call.argument_expression_omitted"), "verifier should flag recovered helper call argument expression operand loss");
+    Expect(HasIssueCode(droppedExpressionCallReport, "call.result_not_captured"), "verifier should flag used helper call results emitted as standalone statements");
     Expect(HasIssueSeverity(droppedExpressionCallReport, "call.argument_expression_omitted", "error"), "verifier should hard-fail recovered helper call argument expression operand loss");
     Expect(droppedExpressionCallReport.FactConflicts >= 2, "helper call argument expression loss should carry a stronger confidence penalty");
+    Expect(decomp::CountHardVerifierIssues(droppedExpressionCallReport) >= 2, "hard verifier issue count should include helper expression and return capture loss");
+    Expect(!decomp::ShouldAcceptVerifierFeedbackRetry(droppedExpressionCallReport, droppedExpressionCallReport), "verifier feedback retry should reject unchanged hard verifier issues");
+    Expect(decomp::ShouldAcceptVerifierFeedbackRetry(droppedExpressionCallReport, normalizedExpressionCallReport), "verifier feedback retry should accept responses that resolve hard verifier issues");
     const std::string droppedExpressionFeedbackPrompt = decomp::BuildDebugVerifierFeedbackPrompt(droppedExpressionCallReport);
-    Expect(droppedExpressionFeedbackPrompt.find("exact recovered call_arguments expressions") != std::string::npos, "verifier feedback should require exact recovered call argument expressions");
+    Expect(droppedExpressionFeedbackPrompt.find("helper_call_contract and call_arguments") != std::string::npos, "verifier feedback should require exact helper call contracts");
+    Expect(droppedExpressionFeedbackPrompt.find("target = Callee(args)") != std::string::npos, "verifier feedback should require direct helper return capture");
+
+    decomp::AnalyzeResponse undefinedResultResponse;
+    undefinedResultResponse.Status = "ok";
+    undefinedResultResponse.PseudoC = "void f(void) { sample_AddSubstituted(accumulator ^ shifted, 0x10203041); accumulator = result; }";
+    undefinedResultResponse.Summary = "calls helper and assigns a placeholder result";
+    undefinedResultResponse.Confidence = 0.92;
+
+    const decomp::VerifyReport undefinedResultReport = decomp::VerifyResponse(callExpressionRequest, undefinedResultResponse);
+    Expect(HasIssueCode(undefinedResultReport, "identifier.undefined_result_placeholder"), "verifier should flag undefined helper result placeholders");
+    Expect(HasIssueSeverity(undefinedResultReport, "identifier.undefined_result_placeholder", "error"), "undefined helper result placeholders should be hard errors");
+
+    decomp::AnalyzeResponse assignedPlaceholderResponse;
+    assignedPlaceholderResponse.Status = "ok";
+    assignedPlaceholderResponse.PseudoC = "void f(void) { unsigned tmp_result = sample_AddSubstituted(accumulator ^ shifted, 0x10203041); accumulator = tmp_result; }";
+    assignedPlaceholderResponse.Summary = "captures a helper result through an invented placeholder";
+    assignedPlaceholderResponse.Confidence = 0.92;
+
+    const decomp::VerifyReport assignedPlaceholderReport = decomp::VerifyResponse(callExpressionRequest, assignedPlaceholderResponse);
+    Expect(HasIssueCode(assignedPlaceholderReport, "identifier.undefined_result_placeholder"), "verifier should flag assigned but ungrounded helper result placeholders");
+    Expect(HasIssueSeverity(assignedPlaceholderReport, "identifier.undefined_result_placeholder", "error"), "assigned helper result placeholders should be hard errors");
 
     decomp::AnalyzeResponse changedOperatorCallResponse;
     changedOperatorCallResponse.Status = "ok";
@@ -3333,6 +3465,33 @@ void TestVerifierCoverageSnapshot()
     const std::string rawDispatcherFeedbackPrompt = decomp::BuildDebugVerifierFeedbackPrompt(rawDispatcherLoopReport);
     Expect(rawDispatcherFeedbackPrompt.find("raw dispatcher state machine loop") != std::string::npos, "verifier feedback should include raw dispatcher loop claim text");
     Expect(rawDispatcherFeedbackPrompt.find("obfuscation.dispatchers.recovered_edges") != std::string::npos, "verifier feedback should name dispatcher recovery fact paths");
+
+    decomp::AnalyzeResponse rawDispatcherChainResponse;
+    rawDispatcherChainResponse.Status = "ok";
+    rawDispatcherChainResponse.PseudoC =
+        "void f(void) { unsigned state = 0x11A0C001; "
+        "if (state == 0x11A0C001) { state = 0x22B0C002; } "
+        "else if (state == 0x22B0C002) { state = 0x44D0C004; } "
+        "else if (state == 0x44D0C004) { state = 0xAAD0C00A; } }";
+    rawDispatcherChainResponse.Summary = "keeps the flattened dispatcher state chain as pseudo-C";
+    rawDispatcherChainResponse.Confidence = 0.52;
+
+    const decomp::VerifyReport rawDispatcherChainReport = decomp::VerifyResponse(dispatcherConflictRequest, rawDispatcherChainResponse);
+    Expect(HasIssueCode(rawDispatcherChainReport, "obfuscation.raw_dispatcher_emitted_with_deobf_on"), "deobf:on verifier should reject raw magic-state dispatcher chains when semantic recovery is safe");
+    Expect(HasIssueSeverity(rawDispatcherChainReport, "obfuscation.raw_dispatcher_emitted_with_deobf_on", "error"), "raw dispatcher chains in deobf:on mode should be hard errors");
+
+    decomp::AnalyzeResponse infiniteDispatcherLoopResponse;
+    infiniteDispatcherLoopResponse.Status = "ok";
+    infiniteDispatcherLoopResponse.PseudoC =
+        "unsigned int f(void) { unsigned state = 0x11A0C001; "
+        "do { if (state == 0xAAD0C00A) { state = 0xAAD0C00A; } "
+        "if (state != 0xAAD0C00A) { continue; } } while (1); return state; }";
+    infiniteDispatcherLoopResponse.Summary = "dispatcher reaches an exit state";
+    infiniteDispatcherLoopResponse.Confidence = 0.52;
+
+    const decomp::VerifyReport infiniteDispatcherLoopReport = decomp::VerifyResponse(dispatcherConflictRequest, infiniteDispatcherLoopResponse);
+    Expect(HasIssueCode(infiniteDispatcherLoopReport, "control_flow.infinite_loop_without_exit"), "verifier should reject infinite loops that do not visibly break or return on recovered exits");
+    Expect(HasIssueSeverity(infiniteDispatcherLoopReport, "control_flow.infinite_loop_without_exit", "error"), "infinite loop without exit should be a hard verifier error");
 
     decomp::AnalyzeResponse rawDispatcherLoopUncertaintyResponse = rawDispatcherLoopResponse;
     rawDispatcherLoopUncertaintyResponse.Uncertainties.push_back("raw dispatcher loop retained as fallback uncertainty");

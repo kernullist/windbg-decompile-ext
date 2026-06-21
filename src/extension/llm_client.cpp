@@ -2027,11 +2027,12 @@ std::string BuildChunkSystemPrompt(const AnalyzeRequest& request)
         "Write summary_localized and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_steps, state_updates, observed_calls, observed_memory, identifiers, and API names in English or C-style. "
         "Do not invent external call targets that are not present in the input. "
-        "Use selection, analyzer_skeleton, recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, block_value_states, normalized_conditions, control_flow, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, data_references, call_targets, type_hints, idioms, callee_summaries, evidence_graph, and pdb facts as high-signal semantic hints when present. "
+        "Use selection, analyzer_skeleton, recovered_arguments, recovered_locals, call_arguments, helper_call_contract, stack_pointer, ir_values, block_value_states, normalized_conditions, control_flow, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, data_references, call_targets, type_hints, idioms, callee_summaries, evidence_graph, and pdb facts as high-signal semantic hints when present. "
         "Treat analyzer_skeleton as a chunk-local refinement scaffold, not as finished source. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "When reconstructing flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never use data reads such as bytes[index] as state values. "
-        "Preserve helper call argument expressions from call_arguments and ir_values, including operands and operators. "
+        "Preserve helper call argument expressions from helper_call_contract, call_arguments, and ir_values, including operands and operators; helper_call_contract is the highest-priority call-argument and return-value contract. "
+        "When helper_call_contract.return_value.present is true and the return is used, capture it as target = Callee(args) directly; never invent undefined placeholders such as result. "
         "Use control_flow loop, branch, and switch region metadata as structure evidence without inventing unsupported regions. "
         "Use abi facts for Microsoft x64 stack home slots, tail-call, thunk, no-return, and frame-base hints. "
         "Use session_policy to distinguish live, dump, kernel, and trace-like analysis constraints. "
@@ -2061,13 +2062,14 @@ std::string BuildChunkUserPrompt(
     prompt += ".\n";
     prompt += "3. Keep pseudo_steps and state_updates concrete and operation-focused.\n";
     prompt += "4. Preserve visible reads, writes, comparisons, and branches instead of replacing them with generic comments.\n";
-    prompt += "5. Use selection, analyzer_skeleton, recovered_arguments, recovered_locals, call_arguments, stack_pointer, ir_values, block_value_states, normalized_conditions, control_flow, abi, session_policy, observed_behavior, data_references, call_targets, type_hints, idioms, callee_summaries, and pdb facts when they improve naming, prompt-coverage-aware uncertainty, stack-frame context, reaching-value state, region structure, calling convention, session constraints, observed runtime state, expression simplification, or type/side-effect hints.\n";
+    prompt += "5. Use selection, analyzer_skeleton, recovered_arguments, recovered_locals, call_arguments, helper_call_contract, stack_pointer, ir_values, block_value_states, normalized_conditions, control_flow, abi, session_policy, observed_behavior, data_references, call_targets, type_hints, idioms, callee_summaries, and pdb facts when they improve naming, prompt-coverage-aware uncertainty, stack-frame context, reaching-value state, region structure, calling convention, session constraints, observed runtime state, expression simplification, or type/side-effect hints.\n";
     prompt += "6. If the chunk is partial, say what is missing, but still describe the concrete work visible in this chunk.\n";
     prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
     prompt += "8. evidence.blocks must reference only block ids present in this chunk.\n";
     prompt += "9. Use graph_summary to keep chunk-local control-flow claims aligned with function-level CFG evidence.\n";
     prompt += "10. Use chunk_boundary live_in_values, live_out_values, and crossing edges to preserve state that enters or leaves this chunk.\n";
-    prompt += "11. For flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never replace a state transition with a data read such as bytes[index]. Preserve helper call argument expressions from call_arguments and ir_values without dropping operands or operators.\n";
+    prompt += "11. For flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never replace a state transition with a data read such as bytes[index]. Preserve helper call argument expressions from helper_call_contract, call_arguments, and ir_values without dropping operands or operators.\n";
+    prompt += "12. When helper_call_contract lists a call site, any emitted helper call for that site or callee must use the listed argument expressions exactly; if return_value.present is true, capture the helper return directly as target = callee(arguments), never as a later assignment from result.\n";
     return prompt;
 }
 
@@ -2079,10 +2081,11 @@ std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
         "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style. "
         "Use the chunk plans, coverage metadata, summary alignment, quality, evidence, risk metadata, per-chunk risk details, merge review plan, confidence policy, acceptance checks, output contract, traceability matrix, obfuscation policy, deobfuscation plan, deobfuscation output contract, and deobfuscation conflict policy, and summaries to produce a fuller function-level pseudocode than a single-pass summary. "
-        "Use selection, blocks, direct_calls, indirect_calls, recovered_arguments, recovered_locals, call_arguments, stack_pointer, memory_accesses, ir_values, switches, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, control_flow, type_hints, idioms, callee_summaries, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, and pdb facts to preserve semantic names, prompt coverage limits, block grounding, call-site grounding, stack-frame context, reaching-value state, memory side effects, switch dispatch intent, control-flow intent, debugger-session constraints, and observed runtime context. "
+        "Use selection, blocks, direct_calls, indirect_calls, recovered_arguments, recovered_locals, call_arguments, helper_call_contract, stack_pointer, memory_accesses, ir_values, switches, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, control_flow, type_hints, idioms, callee_summaries, abi, session_policy, observed_behavior, obfuscation, semantic_control_flow, and pdb facts to preserve semantic names, prompt coverage limits, block grounding, call-site grounding, stack-frame context, reaching-value state, memory side effects, switch dispatch intent, control-flow intent, debugger-session constraints, and observed runtime context. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and keep unresolved state transitions uncertain. "
         "When reconstructing flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never use data reads such as bytes[index] as state values. "
-        "Preserve helper call argument expressions from call_arguments and ir_values, including operands and operators. "
+        "Preserve helper call argument expressions from helper_call_contract, call_arguments, and ir_values, including operands and operators; helper_call_contract is the highest-priority call-argument and return-value contract. "
+        "When helper_call_contract.return_value.present is true and the return is used, capture it as target = Callee(args) directly; never invent undefined placeholders such as result. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
         "Prefer reconstructing concrete reads, writes, branches, and helper interactions when the chunk evidence supports them. "
         "Do not invent calls or fields that are not grounded by the chunk summaries or global facts. "
@@ -2107,7 +2110,7 @@ std::string BuildMergeUserPrompt(
     prompt += ".\n";
     prompt += "3. Build a richer pseudo_c than a short high-level summary; use the chunk evidence to cover the main body.\n";
     prompt += "4. Preserve unknowns with UNKNOWN_TYPE instead of omitting entire regions of logic.\n";
-    prompt += "5. Use selection, blocks, direct_calls, indirect_calls, recovered_arguments, recovered_locals, call_arguments, stack_pointer, memory_accesses, ir_values, switches, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, type_hints, idioms, callee_summaries, abi, session_policy, observed_behavior, and pdb facts when they help produce more concrete block-grounded calls, prompt-coverage-aware uncertainty, names, reaching values, memory reads/writes, switch dispatches, conditions, stack-frame context, runtime context, or session-aware uncertainty.\n";
+    prompt += "5. Use selection, blocks, direct_calls, indirect_calls, recovered_arguments, recovered_locals, call_arguments, helper_call_contract, stack_pointer, memory_accesses, ir_values, switches, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, type_hints, idioms, callee_summaries, abi, session_policy, observed_behavior, and pdb facts when they help produce more concrete block-grounded calls, prompt-coverage-aware uncertainty, names, reaching values, memory reads/writes, switch dispatches, conditions, stack-frame context, runtime context, or session-aware uncertainty.\n";
     prompt += "6. If chunks disagree or coverage remains partial, explain that in uncertainties, but still keep the visible operations explicit.\n";
     prompt += "7. evidence must be an array of objects shaped like {\\\"claim\\\": string, \\\"blocks\\\": [string, ...]}.\n";
     prompt += "8. evidence.blocks must reference block ids that appear in the chunk summaries.\n";
@@ -2121,7 +2124,8 @@ std::string BuildMergeUserPrompt(
     prompt += "16. Follow chunking.merge_deobfuscation_output_contract when reflecting deobfuscation decisions into pseudo_c, summary, uncertainties, evidence, and confidence.\n";
     prompt += "17. Follow chunking.merge_deobfuscation_conflict_policy when semantic overlay, recovered edges, raw CFG, and chunk claims disagree.\n";
     prompt += "18. Treat the analyzer skeleton and graph-derived facts as a draft to refine; do not invent unsupported loops, switches, or calls during merge.\n";
-    prompt += "19. For flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never replace a state transition with a data read such as bytes[index]. Preserve helper call argument expressions from call_arguments and ir_values without dropping operands or operators.\n";
+    prompt += "19. For flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never replace a state transition with a data read such as bytes[index]. Preserve helper call argument expressions from helper_call_contract, call_arguments, and ir_values without dropping operands or operators.\n";
+    prompt += "20. When helper_call_contract lists a call site, any emitted helper call for that site or callee must use the listed argument expressions exactly; if return_value.present is true, capture the helper return directly as target = callee(arguments), never as a later assignment from result.\n";
     return prompt;
 }
 
@@ -2135,10 +2139,11 @@ std::string BuildSystemPrompt(const AnalyzeRequest& request)
         "Use UNKNOWN_TYPE for uncertain types. "
         "Write summary and uncertainties in the configured display language: " + DescribePreferredNaturalLanguage(request) + ". "
         "Keep pseudo_c, params, locals, evidence, identifiers, and API names in English or C-style as appropriate. "
-        "Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, obfuscation, semantic_control_flow, type_hints, idioms, callee_summaries, graph_summary, session_policy, observed_behavior, and pdb facts as high-confidence semantic hints when available. "
+        "Use recovered_arguments, recovered_locals, call_arguments, helper_call_contract, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, obfuscation, semantic_control_flow, type_hints, idioms, callee_summaries, graph_summary, session_policy, observed_behavior, and pdb facts as high-confidence semantic hints when available. "
         "When semantic_control_flow exposes high-confidence non-dead edges, prefer those edges over raw dispatcher loop edges and do not render the dispatcher as business logic unless recovery confidence is low. "
         "When reconstructing flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never use data reads such as bytes[index] as state values. "
-        "Preserve helper call argument expressions from call_arguments and ir_values, including operands and operators. "
+        "Preserve helper call argument expressions from helper_call_contract, call_arguments, and ir_values, including operands and operators; helper_call_contract is the highest-priority call-argument and return-value contract. "
+        "When helper_call_contract.return_value.present is true and the return is used, capture it as target = Callee(args) directly; never invent undefined placeholders such as result. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
         "Use evidence.blocks values that reference only valid basic block ids from the input. "
         "Blocks are a representative selection, not necessarily the first contiguous blocks in the function. "
@@ -2165,7 +2170,7 @@ std::string BuildUserPrompt(const AnalyzeRequest& request)
     prompt += "5. evidence.blocks must reference existing basic block ids.\n";
     prompt += "6. Treat blocks as representative high-signal samples, not as the only reachable blocks in order.\n";
     prompt += "7. Use instruction_window_head, instruction_window_middle, and instruction_window_tail to infer prologue, body, and late-path behavior.\n";
-    prompt += "8. Use recovered_arguments, recovered_locals, call_arguments, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, obfuscation, semantic_control_flow, type_hints, idioms, callee_summaries, session_policy, observed_behavior, and pdb facts when they improve variable names, helper summaries, branch expressions, or observed behavior notes.\n";
+    prompt += "8. Use recovered_arguments, recovered_locals, call_arguments, helper_call_contract, normalized_conditions, data_references, call_targets, evidence_graph, block_value_states, value_merges, obfuscation, semantic_control_flow, type_hints, idioms, callee_summaries, session_policy, observed_behavior, and pdb facts when they improve variable names, helper summaries, branch expressions, or observed behavior notes.\n";
     prompt += "9. Prefer concrete pseudocode statements over summary comments when a memory read, write, compare, or branch is explicitly visible in the facts.\n";
     prompt += "10. If control flow is incomplete, keep visible operations explicit and mark only the missing pieces as uncertain.\n";
     prompt += "11. If truncation flags are true, preserve that uncertainty instead of over-claiming.\n";
@@ -2173,7 +2178,8 @@ std::string BuildUserPrompt(const AnalyzeRequest& request)
     prompt += "13. Use graph_summary as the authoritative CFG/region outline; do not invent loops, switches, or branches that graph_summary and control_flow do not support.\n";
     prompt += "14. If semantic_control_flow contains high-confidence non-dead edges, reconstruct control flow from those edges before describing raw dispatcher blocks; keep missing state transitions uncertain.\n";
     prompt += "15. Use semantic_control_flow dead edges and obfuscation.opaque_predicates only to justify proven dead edges, and use obfuscation.substitution_idioms only as local simplification evidence.\n";
-    prompt += "16. For flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never replace a state transition with a data read such as bytes[index]. Preserve helper call argument expressions from call_arguments and ir_values without dropping operands or operators.\n";
+    prompt += "16. For flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never replace a state transition with a data read such as bytes[index]. Preserve helper call argument expressions from helper_call_contract, call_arguments, and ir_values without dropping operands or operators.\n";
+    prompt += "17. When helper_call_contract lists a call site, any emitted helper call for that site or callee must use the listed argument expressions exactly; if return_value.present is true, capture the helper return directly as target = callee(arguments), never as a later assignment from result.\n";
     return prompt;
 }
 
@@ -2491,6 +2497,8 @@ bool HttpPostBody(
         }
 
         std::string response;
+        size_t responseChunkCount = 0;
+        size_t nextResponseProgressLog = 256 * 1024;
         bool readSucceeded = true;
 
         for (;;)
@@ -2527,7 +2535,20 @@ bool HttpPostBody(
 
             chunk.resize(read);
             response += chunk;
-            LogVerbose(config, "LLM HTTP response chunk bytes=" + std::to_string(read) + " total=" + std::to_string(response.size()));
+            ++responseChunkCount;
+
+            if (response.size() >= nextResponseProgressLog)
+            {
+                LogVerbose(
+                    config,
+                    "LLM HTTP response progress chunks=" + std::to_string(responseChunkCount)
+                        + " total=" + std::to_string(response.size()));
+
+                while (nextResponseProgressLog <= response.size())
+                {
+                    nextResponseProgressLog += 256 * 1024;
+                }
+            }
         }
 
         if (!readSucceeded)
@@ -2536,6 +2557,10 @@ bool HttpPostBody(
         }
 
         responseBody = response;
+        LogVerbose(
+            config,
+            "LLM HTTP response read chunks=" + std::to_string(responseChunkCount)
+                + " bytes=" + std::to_string(responseBody.size()));
 
         DWORD statusCode = 0;
 
@@ -4027,22 +4052,31 @@ bool ParseAndMaybeRetryWithVerifier(
             + " conflicts=" + std::to_string(retryResponse.Verifier.FactConflicts)
             + " issues=" + std::to_string(retryResponse.Verifier.Issues.size()));
 
-    if (retryResponse.Verifier.AdjustedConfidence + 0.02 >= response.Verifier.AdjustedConfidence
-        || retryResponse.Verifier.FactConflicts < response.Verifier.FactConflicts)
+    if (ShouldAcceptVerifierFeedbackRetry(response.Verifier, retryResponse.Verifier))
     {
+        const size_t originalHardIssues = CountHardVerifierIssues(response.Verifier);
+        const size_t retryHardIssues = CountHardVerifierIssues(retryResponse.Verifier);
         response = std::move(retryResponse);
-        response.Provider = providerName + "-verifier-feedback";
+        response.Provider = retryHardIssues == 0
+            ? providerName + "-verifier-feedback"
+            : providerName + "-verifier-feedback-partial";
         response.RawModelJson = retryJson;
         response.Status = response.Status.empty() ? "ok" : response.Status;
-        response.Uncertainties.push_back("verifier feedback retry was applied");
+        response.Uncertainties.push_back(originalHardIssues == 0
+            ? "verifier feedback retry was applied"
+            : "verifier feedback retry reduced hard verifier issues");
         LogVerbose(config, "verifier feedback retry applied");
         return true;
     }
 
-    response.Provider = providerName + "-verifier-feedback-kept-original";
+    response.Provider = CountHardVerifierIssues(response.Verifier) == 0
+        ? providerName + "-verifier-feedback-kept-original"
+        : providerName + "-verifier-feedback-unresolved";
     response.RawModelJson = initialJson;
     response.Status = response.Status.empty() ? "ok" : response.Status;
-    response.Uncertainties.push_back("verifier feedback retry did not improve adjusted confidence enough");
+    response.Uncertainties.push_back(CountHardVerifierIssues(response.Verifier) == 0
+        ? "verifier feedback retry did not improve adjusted confidence enough"
+        : "verifier feedback retry kept original because hard verifier issues remain");
     LogVerbose(config, "verifier feedback retry rejected; keeping original response");
     return true;
 }

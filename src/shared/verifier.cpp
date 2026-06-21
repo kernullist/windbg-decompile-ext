@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <exception>
+#include <map>
 #include <set>
 #include <unordered_set>
 #include <utility>
@@ -61,6 +62,8 @@ bool GraphHasBackEdge(const AnalysisFacts& facts)
 }
 
 bool HasCodeTokenText(const AnalyzeResponse& response, const std::string& value);
+bool IsGroundedRecoveredName(const AnalyzeRequest& request, const std::string& name);
+bool IsKnownResponseName(const AnalyzeRequest& request, const std::string& name);
 
 bool MentionsLoop(const AnalyzeResponse& response)
 {
@@ -1000,6 +1003,257 @@ bool LooksLikeAssignedCallResult(const AnalyzeResponse& response, const std::str
                 break;
             }
         }
+    }
+
+    return false;
+}
+
+bool CallOccurrenceCapturesResult(
+    const std::vector<PseudoCodeToken>& tokens,
+    size_t callIndex)
+{
+    for (size_t cursor = callIndex; cursor > 0 && callIndex - cursor < 12; --cursor)
+    {
+        const PseudoCodeToken& previous = tokens[cursor - 1U];
+
+        if (TokenTextEquals(previous, "return"))
+        {
+            return true;
+        }
+
+        if (previous.Kind == "operator" && previous.Text == "=")
+        {
+            return true;
+        }
+
+        if (previous.Text == ";" || previous.Text == "{" || previous.Text == "}")
+        {
+            break;
+        }
+    }
+
+    return false;
+}
+
+size_t CountCapturedCallResultOccurrences(
+    const AnalyzeResponse& response,
+    const std::string& callee)
+{
+    if (callee.empty())
+    {
+        return 0;
+    }
+
+    size_t captured = 0;
+    const std::vector<std::string> candidates = BuildSymbolCandidates(callee);
+    const std::vector<PseudoCodeToken> tokens = CodeTokens(response);
+
+    for (size_t index = 0; index + 1U < tokens.size(); ++index)
+    {
+        if (tokens[index].Kind != "function_name" || tokens[index + 1U].Text != "(")
+        {
+            continue;
+        }
+
+        bool matches = false;
+
+        for (const std::string& candidate : candidates)
+        {
+            matches = matches || TokenTextEquals(tokens[index], candidate);
+        }
+
+        if (matches && CallOccurrenceCapturesResult(tokens, index))
+        {
+            ++captured;
+        }
+    }
+
+    return captured;
+}
+
+bool HasRequiredRecoveredCallResultAtSite(const AnalysisFacts& facts, uint64_t site)
+{
+    for (const IrValue& value : facts.IrValues)
+    {
+        if (value.DefSite != site
+            || value.Kind != "call_result"
+            || value.Confidence < 0.60
+            || value.Target.empty()
+            || value.IsDead)
+        {
+            continue;
+        }
+
+        if (!value.Uses.empty())
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::string BuildRequiredCallResultEvidence(const AnalysisFacts& facts, uint64_t site)
+{
+    for (const IrValue& value : facts.IrValues)
+    {
+        if (value.DefSite == site
+            && value.Kind == "call_result"
+            && value.Confidence >= 0.60
+            && !value.Target.empty())
+        {
+            return HexU64(site) + " target=" + value.Target + " uses=" + std::to_string(value.Uses.size());
+        }
+    }
+
+    return HexU64(site);
+}
+
+bool IsPlaceholderResultName(const std::string& name)
+{
+    const std::string lower = ToLowerAscii(name);
+    return lower == "result"
+        || lower == "call_result"
+        || lower == "helper_result"
+        || lower == "tmp_result"
+        || lower == "return_value";
+}
+
+bool IsResultPlaceholderUse(
+    const AnalyzeRequest& request,
+    const std::vector<PseudoCodeToken>& tokens,
+    size_t index)
+{
+    if (tokens[index].Kind != "identifier" || !IsPlaceholderResultName(tokens[index].Text))
+    {
+        return false;
+    }
+
+    if (IsGroundedRecoveredName(request, tokens[index].Text))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+size_t FindMatchingBrace(const std::string& text, size_t openBrace)
+{
+    if (openBrace >= text.size() || text[openBrace] != '{')
+    {
+        return std::string::npos;
+    }
+
+    size_t depth = 0;
+
+    for (size_t index = openBrace; index < text.size(); ++index)
+    {
+        if (text[index] == '{')
+        {
+            ++depth;
+        }
+        else if (text[index] == '}')
+        {
+            if (depth == 0)
+            {
+                return std::string::npos;
+            }
+
+            --depth;
+
+            if (depth == 0)
+            {
+                return index;
+            }
+        }
+    }
+
+    return std::string::npos;
+}
+
+bool LoopBodyHasEscape(const std::string& body)
+{
+    return ContainsInsensitive(body, "break;")
+        || ContainsInsensitive(body, "return ")
+        || ContainsInsensitive(body, "return;")
+        || ContainsInsensitive(body, "goto ");
+}
+
+bool HasInfiniteLoopConditionNear(const std::string& text, size_t position)
+{
+    const size_t end = (std::min)(text.size(), position + 96);
+    const std::string window = LowerNoSpace(text.substr(position, end - position));
+    return window.find("while(1)") != std::string::npos
+        || window.find("while(true)") != std::string::npos
+        || window.find("for(;;)") != std::string::npos;
+}
+
+bool ResponseHasInfiniteLoopWithoutEscape(const AnalyzeResponse& response)
+{
+    const std::string& pseudo = response.PseudoC;
+    const std::string lower = ToLowerAscii(pseudo);
+    size_t position = 0;
+
+    while ((position = lower.find("do", position)) != std::string::npos)
+    {
+        const bool leftBoundary = position == 0 || !std::isalnum(static_cast<unsigned char>(lower[position - 1U]));
+        const bool rightBoundary = position + 2U >= lower.size() || !std::isalnum(static_cast<unsigned char>(lower[position + 2U]));
+
+        if (leftBoundary && rightBoundary)
+        {
+            const size_t openBrace = pseudo.find('{', position + 2U);
+            const size_t closeBrace = FindMatchingBrace(pseudo, openBrace);
+
+            if (openBrace != std::string::npos
+                && closeBrace != std::string::npos
+                && HasInfiniteLoopConditionNear(pseudo, closeBrace)
+                && !LoopBodyHasEscape(pseudo.substr(openBrace, closeBrace - openBrace + 1U)))
+            {
+                return true;
+            }
+        }
+
+        position += 2U;
+    }
+
+    position = 0;
+
+    while ((position = lower.find("while", position)) != std::string::npos)
+    {
+        if (HasInfiniteLoopConditionNear(pseudo, position))
+        {
+            const size_t openBrace = pseudo.find('{', position);
+            const size_t closeBrace = FindMatchingBrace(pseudo, openBrace);
+
+            if (openBrace != std::string::npos
+                && closeBrace != std::string::npos
+                && !LoopBodyHasEscape(pseudo.substr(openBrace, closeBrace - openBrace + 1U)))
+            {
+                return true;
+            }
+        }
+
+        position += 5U;
+    }
+
+    position = 0;
+
+    while ((position = lower.find("for", position)) != std::string::npos)
+    {
+        if (HasInfiniteLoopConditionNear(pseudo, position))
+        {
+            const size_t openBrace = pseudo.find('{', position);
+            const size_t closeBrace = FindMatchingBrace(pseudo, openBrace);
+
+            if (openBrace != std::string::npos
+                && closeBrace != std::string::npos
+                && !LoopBodyHasEscape(pseudo.substr(openBrace, closeBrace - openBrace + 1U)))
+            {
+                return true;
+            }
+        }
+
+        position += 3U;
     }
 
     return false;
@@ -2093,6 +2347,89 @@ void CheckRecoveredCallArgumentExpressionConsistency(const AnalyzeRequest& reque
     }
 }
 
+void CheckRecoveredCallResultConsistency(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
+{
+    std::map<std::string, size_t> requiredResultsByCallee;
+    std::map<std::string, std::string> evidenceByCallee;
+
+    for (const CallTargetInfo& call : request.Facts.CallTargets)
+    {
+        if (call.DisplayName.empty() || call.Confidence < 0.65)
+        {
+            continue;
+        }
+
+        if (!HasRequiredRecoveredCallResultAtSite(request.Facts, call.Site))
+        {
+            continue;
+        }
+
+        ++requiredResultsByCallee[call.DisplayName];
+        evidenceByCallee[call.DisplayName] = BuildRequiredCallResultEvidence(request.Facts, call.Site);
+    }
+
+    size_t ignoredResults = 0;
+    std::vector<std::string> contexts;
+
+    for (const auto& required : requiredResultsByCallee)
+    {
+        if (!ContainsCallText(response, required.first))
+        {
+            continue;
+        }
+
+        const size_t captured = CountCapturedCallResultOccurrences(response, required.first);
+
+        if (captured >= required.second)
+        {
+            continue;
+        }
+
+        ignoredResults += required.second - captured;
+        contexts.push_back(required.first + " " + evidenceByCallee[required.first]);
+    }
+
+    if (ignoredResults != 0)
+    {
+        report.FactConflicts += 2;
+        AddIssue(
+            report,
+            "call.result_not_captured",
+            "error",
+            "pseudo_c emits recovered helper calls as standalone statements even though analyzer dataflow uses their return values",
+            BuildClaimContextEvidence(contexts));
+    }
+}
+
+void CheckUndefinedResultPlaceholders(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
+{
+    const std::vector<PseudoCodeToken> tokens = CodeTokens(response);
+    size_t placeholderUses = 0;
+    std::vector<std::string> contexts;
+
+    for (size_t index = 0; index < tokens.size(); ++index)
+    {
+        if (!IsResultPlaceholderUse(request, tokens, index))
+        {
+            continue;
+        }
+
+        ++placeholderUses;
+        contexts.push_back(tokens[index].Text);
+    }
+
+    if (placeholderUses != 0)
+    {
+        report.FactConflicts += 2;
+        AddIssue(
+            report,
+            "identifier.undefined_result_placeholder",
+            "error",
+            "pseudo_c uses an ungrounded helper-result placeholder instead of assigning the helper return directly",
+            BuildClaimContextEvidence(contexts));
+    }
+}
+
 std::set<std::string> BuildObfuscationStateVariableCandidates(const AnalysisFacts& facts)
 {
     std::set<std::string> candidates;
@@ -2117,7 +2454,11 @@ std::set<std::string> BuildObfuscationStateVariableCandidates(const AnalysisFact
     {
         candidates.insert("state");
         candidates.insert("dispatcher_state");
+        candidates.insert("dispatcherstate");
+        candidates.insert("dispatch_state");
+        candidates.insert("dispatchstate");
         candidates.insert("current_state");
+        candidates.insert("currentstate");
     }
 
     return candidates;
@@ -2236,6 +2577,95 @@ bool ResponseUsesObfuscationStateAssignments(
     }
 
     return false;
+}
+
+size_t CountObfuscationStateComparisons(
+    const std::vector<PseudoCodeToken>& tokens,
+    const std::set<std::string>& stateVariables)
+{
+    size_t count = 0;
+
+    for (size_t index = 0; index + 1U < tokens.size(); ++index)
+    {
+        if (tokens[index].Kind != "identifier")
+        {
+            continue;
+        }
+
+        if (stateVariables.find(ToLowerAscii(tokens[index].Text)) == stateVariables.end())
+        {
+            continue;
+        }
+
+        if (tokens[index + 1U].Text == "==" || tokens[index + 1U].Text == "!=")
+        {
+            ++count;
+        }
+    }
+
+    return count;
+}
+
+void CheckRawDispatcherShapeInDeobfuscatedOutput(
+    const AnalyzeRequest& request,
+    const AnalyzeResponse& response,
+    VerifyReport& report)
+{
+    if (!request.Facts.DeobfuscationReadiness.Enabled
+        || !request.Facts.DeobfuscationReadiness.SafeToRewriteControlFlow
+        || !HasHighConfidenceDispatcherRecovery(request.Facts))
+    {
+        return;
+    }
+
+    const std::set<std::string> stateVariables = BuildObfuscationStateVariableCandidates(request.Facts);
+
+    if (stateVariables.empty())
+    {
+        return;
+    }
+
+    const std::vector<PseudoCodeToken> tokens = CodeTokens(response);
+    const size_t stateComparisons = CountObfuscationStateComparisons(tokens, stateVariables);
+
+    if (stateComparisons < 3)
+    {
+        return;
+    }
+
+    report.FactConflicts += 2;
+    AddIssue(
+        report,
+        "obfuscation.raw_dispatcher_emitted_with_deobf_on",
+        "error",
+        "deobf:on output keeps a raw flattened state-dispatch chain despite safe recovered dispatcher edges",
+        "state_comparisons=" + std::to_string(stateComparisons));
+}
+
+void CheckInfiniteLoopEscapeConsistency(
+    const AnalyzeRequest& request,
+    const AnalyzeResponse& response,
+    VerifyReport& report)
+{
+    if (!ResponseHasInfiniteLoopWithoutEscape(response))
+    {
+        return;
+    }
+
+    if (!HasReturnInstruction(request.Facts)
+        && !HasHighConfidenceDispatcherRecovery(request.Facts)
+        && !request.Facts.DeobfuscationReadiness.SafeToRewriteControlFlow)
+    {
+        return;
+    }
+
+    report.FactConflicts += 2;
+    AddIssue(
+        report,
+        "control_flow.infinite_loop_without_exit",
+        "error",
+        "pseudo_c emits an unconditional infinite loop without a visible break, return, or goto despite recovered function exit evidence",
+        "infinite_loop_without_escape=true");
 }
 
 std::set<std::string> CollectAssignedObfuscationStateValues(
@@ -2637,7 +3067,7 @@ void CheckObfuscationStateAssignments(const AnalyzeRequest& request, const Analy
     }
 }
 
-bool IsKnownResponseName(const AnalyzeRequest& request, const std::string& name)
+bool IsGroundedRecoveredName(const AnalyzeRequest& request, const std::string& name)
 {
     if (name.empty())
     {
@@ -2682,6 +3112,16 @@ bool IsKnownResponseName(const AnalyzeRequest& request, const std::string& name)
         {
             return true;
         }
+    }
+
+    return false;
+}
+
+bool IsKnownResponseName(const AnalyzeRequest& request, const std::string& name)
+{
+    if (IsGroundedRecoveredName(request, name))
+    {
+        return true;
     }
 
     auto hasNumericSuffix = [&name](const std::string& prefix)
@@ -3415,8 +3855,12 @@ VerifyReport VerifyResponse(const AnalyzeRequest& request, AnalyzeResponse& resp
     CheckRecoveredCallCoverage(request, response, report);
     CheckRecoveredCallArgumentConsistency(request, response, report);
     CheckRecoveredCallArgumentExpressionConsistency(request, response, report);
+    CheckRecoveredCallResultConsistency(request, response, report);
+    CheckUndefinedResultPlaceholders(request, response, report);
+    CheckRawDispatcherShapeInDeobfuscatedOutput(request, response, report);
     CheckObfuscationStateAssignments(request, response, report);
     CheckObfuscationStateTransitionAssignments(request, response, report);
+    CheckInfiniteLoopEscapeConsistency(request, response, report);
     CheckResponseNameGrounding(request, response, report);
     CheckEvidenceCoverage(request, response, report);
     CheckEvidenceGraphConsistency(request, response, report);

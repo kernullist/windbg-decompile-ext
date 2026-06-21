@@ -653,6 +653,7 @@ JsonValue BuildChunkFactsJson(
     bool recoveredArgumentsTruncated = false;
     bool recoveredLocalsTruncated = false;
     bool callArgumentsTruncated = false;
+    bool helperCallContractTruncated = false;
     bool valueMergesTruncated = false;
     bool irValuesTruncated = false;
     bool blockValueStatesTruncated = false;
@@ -700,6 +701,7 @@ JsonValue BuildChunkFactsJson(
     selection.Set("global_uncertainty_limit", JsonValue::MakeNumber(static_cast<double>(kChunkPromptUncertaintyLimit)));
     selection.Set("chunk_block_count", JsonValue::MakeNumber(static_cast<double>(plan.BlockIndices.size())));
     selection.Set("total_chunks", JsonValue::MakeNumber(static_cast<double>(plan.TotalChunks)));
+    selection.Set("helper_call_contract_required", JsonValue::MakeBoolean(true));
 
     functionOverview.Set("query_text", JsonValue::MakeString(request.Facts.QueryText));
     functionOverview.Set("query_address", JsonValue::MakeString(HexU64(request.Facts.QueryAddress)));
@@ -757,6 +759,7 @@ JsonValue BuildChunkFactsJson(
     root.Set("recovered_arguments", BuildRecoveredArgumentsJson(request, &recoveredArgumentsTruncated));
     root.Set("recovered_locals", BuildRecoveredLocalsJson(request, &recoveredLocalsTruncated));
     root.Set("call_arguments", BuildCallArgumentsJsonForAddresses(request, instructionAddresses, &callArgumentsTruncated));
+    root.Set("helper_call_contract", BuildHelperCallContractJsonForAddresses(request, instructionAddresses, &helperCallContractTruncated));
     root.Set("value_merges", BuildValueMergesJsonForBlocks(request, blockIds, &valueMergesTruncated));
     root.Set("ir_values", BuildIrValuesJsonForBlocks(request, blockIds, &irValuesTruncated));
     root.Set("block_value_states", BuildBlockValueStatesJsonForBlocks(request, blockIds, &blockValueStatesTruncated));
@@ -787,6 +790,7 @@ JsonValue BuildChunkFactsJson(
     truncation.Set("recovered_arguments", JsonValue::MakeBoolean(recoveredArgumentsTruncated));
     truncation.Set("recovered_locals", JsonValue::MakeBoolean(recoveredLocalsTruncated));
     truncation.Set("call_arguments", JsonValue::MakeBoolean(callArgumentsTruncated));
+    truncation.Set("helper_call_contract", JsonValue::MakeBoolean(helperCallContractTruncated));
     truncation.Set("value_merges", JsonValue::MakeBoolean(valueMergesTruncated));
     truncation.Set("ir_values", JsonValue::MakeBoolean(irValuesTruncated));
     truncation.Set("block_value_states", JsonValue::MakeBoolean(blockValueStatesTruncated));
@@ -2522,6 +2526,7 @@ JsonValue BuildMergeFactsJson(
     bool recoveredArgumentsTruncated = false;
     bool recoveredLocalsTruncated = false;
     bool callArgumentsTruncated = false;
+    bool helperCallContractTruncated = false;
     bool valueMergesTruncated = false;
     bool irValuesTruncated = false;
     bool blockValueStatesTruncated = false;
@@ -2561,8 +2566,10 @@ JsonValue BuildMergeFactsJson(
 
     selection.Set("block_strategy", JsonValue::MakeString("entry + feature-heavy blocks + spread sampling"));
     selection.Set("fact_strategy", JsonValue::MakeString("ranked high-signal facts + spread sampling"));
+    selection.Set("prompt_profile", JsonValue::MakeString("merge_compact_with_helper_call_contract"));
     selection.Set("instruction_window_limit", JsonValue::MakeNumber(static_cast<double>(kPromptInstructionWindowLimit)));
-    selection.Set("block_limit", JsonValue::MakeNumber(static_cast<double>(kPromptBlockLimit)));
+    selection.Set("block_limit", JsonValue::MakeNumber(static_cast<double>(kPromptBlockCompactLimit)));
+    selection.Set("helper_call_contract_required", JsonValue::MakeBoolean(true));
 
     const size_t totalBlockCount = request.Facts.Blocks.size();
     const size_t coveredBlockCount = CountValidMergeCoveredBlocks(coveredBlocks, totalBlockCount);
@@ -2620,6 +2627,7 @@ JsonValue BuildMergeFactsJson(
     root.Set("recovered_arguments", BuildRecoveredArgumentsJson(request, &recoveredArgumentsTruncated));
     root.Set("recovered_locals", BuildRecoveredLocalsJson(request, &recoveredLocalsTruncated));
     root.Set("call_arguments", BuildCallArgumentsJson(request, &callArgumentsTruncated));
+    root.Set("helper_call_contract", BuildHelperCallContractJson(request, &helperCallContractTruncated));
     root.Set("value_merges", BuildValueMergesJson(request, &valueMergesTruncated));
     root.Set("ir_values", BuildIrValuesJson(request, &irValuesTruncated));
     root.Set("block_value_states", BuildBlockValueStatesJson(request, &blockValueStatesTruncated));
@@ -2656,6 +2664,7 @@ JsonValue BuildMergeFactsJson(
     truncation.Set("recovered_arguments", JsonValue::MakeBoolean(recoveredArgumentsTruncated));
     truncation.Set("recovered_locals", JsonValue::MakeBoolean(recoveredLocalsTruncated));
     truncation.Set("call_arguments", JsonValue::MakeBoolean(callArgumentsTruncated));
+    truncation.Set("helper_call_contract", JsonValue::MakeBoolean(helperCallContractTruncated));
     truncation.Set("value_merges", JsonValue::MakeBoolean(valueMergesTruncated));
     truncation.Set("ir_values", JsonValue::MakeBoolean(irValuesTruncated));
     truncation.Set("block_value_states", JsonValue::MakeBoolean(blockValueStatesTruncated));
