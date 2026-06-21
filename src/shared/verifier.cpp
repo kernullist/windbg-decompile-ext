@@ -1008,9 +1008,70 @@ bool LooksLikeAssignedCallResult(const AnalyzeResponse& response, const std::str
     return false;
 }
 
-bool CallOccurrenceCapturesResult(
+std::string FindAssignmentLhsIdentifier(
     const std::vector<PseudoCodeToken>& tokens,
-    size_t callIndex)
+    size_t equalsIndex)
+{
+    if (equalsIndex == 0 || equalsIndex >= tokens.size())
+    {
+        return std::string();
+    }
+
+    for (size_t cursor = equalsIndex; cursor > 0 && equalsIndex - cursor < 8; --cursor)
+    {
+        const PseudoCodeToken& previous = tokens[cursor - 1U];
+
+        if (previous.Kind == "identifier" || previous.Kind == "function_name")
+        {
+            return previous.Text;
+        }
+
+        if (previous.Text == ";" || previous.Text == "{" || previous.Text == "}" || previous.Text == ",")
+        {
+            break;
+        }
+    }
+
+    return std::string();
+}
+
+bool IdentifierMatchesExpectedTarget(const std::string& identifier, const std::string& expectedTarget)
+{
+    if (expectedTarget.empty())
+    {
+        return !identifier.empty();
+    }
+
+    if (LowerNoSpace(identifier) == LowerNoSpace(expectedTarget))
+    {
+        return true;
+    }
+
+    std::string trailingIdentifier;
+
+    for (size_t cursor = expectedTarget.size(); cursor > 0; --cursor)
+    {
+        const char ch = expectedTarget[cursor - 1U];
+
+        if (std::isalnum(static_cast<unsigned char>(ch)) != 0 || ch == '_')
+        {
+            trailingIdentifier.push_back(ch);
+        }
+        else if (!trailingIdentifier.empty())
+        {
+            break;
+        }
+    }
+
+    std::reverse(trailingIdentifier.begin(), trailingIdentifier.end());
+    return !trailingIdentifier.empty()
+        && ToLowerAscii(identifier) == ToLowerAscii(trailingIdentifier);
+}
+
+bool CallOccurrenceCapturesExpectedResult(
+    const std::vector<PseudoCodeToken>& tokens,
+    size_t callIndex,
+    const std::string& expectedTarget)
 {
     for (size_t cursor = callIndex; cursor > 0 && callIndex - cursor < 12; --cursor)
     {
@@ -1023,7 +1084,8 @@ bool CallOccurrenceCapturesResult(
 
         if (previous.Kind == "operator" && previous.Text == "=")
         {
-            return true;
+            const std::string lhs = FindAssignmentLhsIdentifier(tokens, cursor - 1U);
+            return IdentifierMatchesExpectedTarget(lhs, expectedTarget);
         }
 
         if (previous.Text == ";" || previous.Text == "{" || previous.Text == "}")
@@ -1037,7 +1099,8 @@ bool CallOccurrenceCapturesResult(
 
 size_t CountCapturedCallResultOccurrences(
     const AnalyzeResponse& response,
-    const std::string& callee)
+    const std::string& callee,
+    const std::string& expectedTarget)
 {
     if (callee.empty())
     {
@@ -1062,7 +1125,7 @@ size_t CountCapturedCallResultOccurrences(
             matches = matches || TokenTextEquals(tokens[index], candidate);
         }
 
-        if (matches && CallOccurrenceCapturesResult(tokens, index))
+        if (matches && CallOccurrenceCapturesExpectedResult(tokens, index, expectedTarget))
         {
             ++captured;
         }
@@ -1071,7 +1134,7 @@ size_t CountCapturedCallResultOccurrences(
     return captured;
 }
 
-bool HasRequiredRecoveredCallResultAtSite(const AnalysisFacts& facts, uint64_t site)
+const IrValue* FindRequiredRecoveredCallResultAtSite(const AnalysisFacts& facts, uint64_t site)
 {
     for (const IrValue& value : facts.IrValues)
     {
@@ -1086,11 +1149,11 @@ bool HasRequiredRecoveredCallResultAtSite(const AnalysisFacts& facts, uint64_t s
 
         if (!value.Uses.empty())
         {
-            return true;
+            return &value;
         }
     }
 
-    return false;
+    return nullptr;
 }
 
 std::string BuildRequiredCallResultEvidence(const AnalysisFacts& facts, uint64_t site)
@@ -2349,8 +2412,8 @@ void CheckRecoveredCallArgumentExpressionConsistency(const AnalyzeRequest& reque
 
 void CheckRecoveredCallResultConsistency(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
 {
-    std::map<std::string, size_t> requiredResultsByCallee;
-    std::map<std::string, std::string> evidenceByCallee;
+    std::map<std::pair<std::string, std::string>, size_t> requiredResults;
+    std::map<std::pair<std::string, std::string>, std::string> evidenceByResult;
 
     for (const CallTargetInfo& call : request.Facts.CallTargets)
     {
@@ -2359,26 +2422,32 @@ void CheckRecoveredCallResultConsistency(const AnalyzeRequest& request, const An
             continue;
         }
 
-        if (!HasRequiredRecoveredCallResultAtSite(request.Facts, call.Site))
+        const IrValue* callResult = FindRequiredRecoveredCallResultAtSite(request.Facts, call.Site);
+
+        if (callResult == nullptr)
         {
             continue;
         }
 
-        ++requiredResultsByCallee[call.DisplayName];
-        evidenceByCallee[call.DisplayName] = BuildRequiredCallResultEvidence(request.Facts, call.Site);
+        const std::pair<std::string, std::string> key(call.DisplayName, callResult->Target);
+        ++requiredResults[key];
+        evidenceByResult[key] = BuildRequiredCallResultEvidence(request.Facts, call.Site);
     }
 
     size_t ignoredResults = 0;
     std::vector<std::string> contexts;
 
-    for (const auto& required : requiredResultsByCallee)
+    for (const auto& required : requiredResults)
     {
-        if (!ContainsCallText(response, required.first))
+        const std::string& callee = required.first.first;
+        const std::string& target = required.first.second;
+
+        if (!ContainsCallText(response, callee))
         {
             continue;
         }
 
-        const size_t captured = CountCapturedCallResultOccurrences(response, required.first);
+        const size_t captured = CountCapturedCallResultOccurrences(response, callee, target);
 
         if (captured >= required.second)
         {
@@ -2386,7 +2455,7 @@ void CheckRecoveredCallResultConsistency(const AnalyzeRequest& request, const An
         }
 
         ignoredResults += required.second - captured;
-        contexts.push_back(required.first + " " + evidenceByCallee[required.first]);
+        contexts.push_back(callee + " target=" + target + " " + evidenceByResult[required.first]);
     }
 
     if (ignoredResults != 0)
@@ -2396,7 +2465,7 @@ void CheckRecoveredCallResultConsistency(const AnalyzeRequest& request, const An
             report,
             "call.result_not_captured",
             "error",
-            "pseudo_c emits recovered helper calls as standalone statements even though analyzer dataflow uses their return values",
+            "pseudo_c does not capture recovered helper returns directly into the analyzer result target",
             BuildClaimContextEvidence(contexts));
     }
 }

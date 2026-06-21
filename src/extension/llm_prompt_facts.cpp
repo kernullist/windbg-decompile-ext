@@ -1497,6 +1497,61 @@ const IrValue* FindPromptCallResultBySite(const AnalyzeRequest& request, uint64_
     return best;
 }
 
+std::vector<CallArgumentPromptGroup> BuildHelperCallContractPromptGroups(
+    const AnalyzeRequest& request,
+    const std::set<uint64_t>* instructionAddresses)
+{
+    std::vector<CallArgumentPromptGroup> groups = BuildCallArgumentPromptGroups(request, instructionAddresses);
+
+    auto addSite = [&groups, instructionAddresses](uint64_t site)
+    {
+        if (site == 0)
+        {
+            return;
+        }
+
+        if (instructionAddresses != nullptr && instructionAddresses->find(site) == instructionAddresses->end())
+        {
+            return;
+        }
+
+        const auto groupIt = std::find_if(
+            groups.begin(),
+            groups.end(),
+            [site](const CallArgumentPromptGroup& group)
+            {
+                return group.Site == site;
+            });
+
+        if (groupIt != groups.end())
+        {
+            return;
+        }
+
+        CallArgumentPromptGroup group;
+        group.Site = site;
+        groups.push_back(std::move(group));
+    };
+
+    for (const CallTargetInfo& call : request.Facts.CallTargets)
+    {
+        if (FindPromptCallResultBySite(request, call.Site) != nullptr)
+        {
+            addSite(call.Site);
+        }
+    }
+
+    for (const IrValue& value : request.Facts.IrValues)
+    {
+        if (value.Kind == "call_result" && value.Confidence >= 0.55)
+        {
+            addSite(value.DefSite);
+        }
+    }
+
+    return groups;
+}
+
 JsonValue BuildHelperCallReturnValueJson(const IrValue* callResult)
 {
     JsonValue object = JsonValue::MakeObject();
@@ -1525,6 +1580,7 @@ double ScoreHelperCallContractGroup(
 {
     double score = 0.0;
     const CallTargetInfo* target = FindPromptCallTargetBySite(request, group.Site);
+    const IrValue* callResult = FindPromptCallResultBySite(request, group.Site);
 
     if (target != nullptr)
     {
@@ -1533,6 +1589,21 @@ double ScoreHelperCallContractGroup(
         if (target->TargetKind == "internal_direct")
         {
             score += 0.6;
+        }
+    }
+
+    if (callResult != nullptr)
+    {
+        score += 1.0 + callResult->Confidence;
+
+        if (!callResult->Uses.empty())
+        {
+            score += 0.5;
+        }
+
+        if (!callResult->Target.empty())
+        {
+            score += 0.3;
         }
     }
 
@@ -1639,7 +1710,7 @@ JsonValue BuildHelperCallContractGroupsJson(
 
 JsonValue BuildHelperCallContractJson(const AnalyzeRequest& request, bool* truncated)
 {
-    return BuildHelperCallContractGroupsJson(request, BuildCallArgumentPromptGroups(request, nullptr), truncated);
+    return BuildHelperCallContractGroupsJson(request, BuildHelperCallContractPromptGroups(request, nullptr), truncated);
 }
 
 JsonValue BuildHelperCallContractJsonForAddresses(
@@ -1647,7 +1718,7 @@ JsonValue BuildHelperCallContractJsonForAddresses(
     const std::set<uint64_t>& instructionAddresses,
     bool* truncated)
 {
-    return BuildHelperCallContractGroupsJson(request, BuildCallArgumentPromptGroups(request, &instructionAddresses), truncated);
+    return BuildHelperCallContractGroupsJson(request, BuildHelperCallContractPromptGroups(request, &instructionAddresses), truncated);
 }
 
 JsonValue BuildValueMergesJson(const AnalyzeRequest& request, bool* truncated)

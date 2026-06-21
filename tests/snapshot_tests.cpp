@@ -3069,6 +3069,66 @@ void TestVerifierCoverageSnapshot()
     Expect(callExpressionPromptDump.find("accumulator ^ shifted") != std::string::npos, "prompt dump should expose exact helper argument expression");
     Expect(callExpressionPromptDump.find("\"return_value\"") != std::string::npos, "prompt dump should expose helper return-value contract");
 
+    decomp::AnalyzeRequest returnOnlyContractRequest;
+    returnOnlyContractRequest.RequestId = "verifier_return_only_helper_contract_snapshot";
+    returnOnlyContractRequest.Facts = BuildDiamondFacts();
+
+    decomp::CallTargetInfo returnOnlyCall;
+    returnOnlyCall.Site = 0x1034;
+    returnOnlyCall.DisplayName = "sample!ZeroArgHelper";
+    returnOnlyCall.TargetKind = "internal_direct";
+    returnOnlyCall.Confidence = 0.86;
+    returnOnlyContractRequest.Facts.CallTargets.push_back(returnOnlyCall);
+
+    decomp::IrValue returnOnlyCallResult;
+    returnOnlyCallResult.Id = "call_result_1034";
+    returnOnlyCallResult.BlockId = "bb3";
+    returnOnlyCallResult.DefSite = 0x1034;
+    returnOnlyCallResult.Target = "accumulator";
+    returnOnlyCallResult.Expression = "sample!ZeroArgHelper()";
+    returnOnlyCallResult.Canonical = returnOnlyCallResult.Expression;
+    returnOnlyCallResult.Kind = "call_result";
+    returnOnlyCallResult.Uses = { "return_accumulator" };
+    returnOnlyCallResult.Confidence = 0.84;
+    returnOnlyContractRequest.Facts.IrValues.push_back(returnOnlyCallResult);
+
+    bool returnOnlyContractTruncated = false;
+    const decomp::JsonValue returnOnlyContract = decomp::BuildHelperCallContractJson(returnOnlyContractRequest, &returnOnlyContractTruncated);
+    bool foundReturnOnlyContract = false;
+    bool foundReturnOnlyValueContract = false;
+
+    for (const decomp::JsonValue& item : returnOnlyContract.GetArray())
+    {
+        const decomp::JsonValue* callee = item.Find("callee");
+        const decomp::JsonValue* argumentCount = item.Find("argument_count");
+        const decomp::JsonValue* returnValue = item.Find("return_value");
+
+        if (callee == nullptr || !callee->IsString() || callee->GetString() != "sample!ZeroArgHelper")
+        {
+            continue;
+        }
+
+        foundReturnOnlyContract = argumentCount != nullptr
+            && argumentCount->IsNumber()
+            && argumentCount->GetNumber() == 0.0;
+
+        if (returnValue != nullptr && returnValue->IsObject())
+        {
+            const decomp::JsonValue* present = returnValue->Find("present");
+            const decomp::JsonValue* target = returnValue->Find("target");
+            foundReturnOnlyValueContract = present != nullptr
+                && present->IsBoolean()
+                && present->GetBoolean()
+                && target != nullptr
+                && target->IsString()
+                && target->GetString() == "accumulator";
+        }
+    }
+
+    Expect(!returnOnlyContractTruncated, "single return-only helper contract should not be truncated");
+    Expect(foundReturnOnlyContract, "helper call contract should include return-only helper calls without recovered call arguments");
+    Expect(foundReturnOnlyValueContract, "return-only helper contract should preserve used return values");
+
     decomp::AnalyzeResponse normalizedExpressionCallResponse;
     normalizedExpressionCallResponse.Status = "ok";
     normalizedExpressionCallResponse.PseudoC = "void f(void) { accumulator = sample_AddSubstituted(accumulator ^ shifted, 0x10203041); }";
@@ -3118,6 +3178,16 @@ void TestVerifierCoverageSnapshot()
     const decomp::VerifyReport assignedPlaceholderReport = decomp::VerifyResponse(callExpressionRequest, assignedPlaceholderResponse);
     Expect(HasIssueCode(assignedPlaceholderReport, "identifier.undefined_result_placeholder"), "verifier should flag assigned but ungrounded helper result placeholders");
     Expect(HasIssueSeverity(assignedPlaceholderReport, "identifier.undefined_result_placeholder", "error"), "assigned helper result placeholders should be hard errors");
+
+    decomp::AnalyzeResponse wrongTargetCaptureResponse;
+    wrongTargetCaptureResponse.Status = "ok";
+    wrongTargetCaptureResponse.PseudoC = "void f(void) { unsigned helper_value = sample_AddSubstituted(accumulator ^ shifted, 0x10203041); accumulator = helper_value; }";
+    wrongTargetCaptureResponse.Summary = "captures a helper result through an arbitrary temporary";
+    wrongTargetCaptureResponse.Confidence = 0.92;
+
+    const decomp::VerifyReport wrongTargetCaptureReport = decomp::VerifyResponse(callExpressionRequest, wrongTargetCaptureResponse);
+    Expect(HasIssueCode(wrongTargetCaptureReport, "call.result_not_captured"), "verifier should reject helper result captures that do not assign the recovered result target directly");
+    Expect(HasIssueSeverity(wrongTargetCaptureReport, "call.result_not_captured", "error"), "wrong helper result target capture should be a hard error");
 
     decomp::AnalyzeResponse changedOperatorCallResponse;
     changedOperatorCallResponse.Status = "ok";
