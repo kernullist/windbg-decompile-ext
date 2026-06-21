@@ -128,6 +128,30 @@ bool JsonStringArrayContains(const decomp::JsonValue* value, const std::string& 
     return false;
 }
 
+decomp::JsonValue ParseDebugPromptFactsJson(const std::string& promptDump)
+{
+    const std::string marker = "prompt_facts_json:\n";
+    const size_t markerOffset = promptDump.find(marker);
+    Expect(markerOffset != std::string::npos, "debug prompt dump should include prompt facts JSON marker");
+
+    if (markerOffset == std::string::npos)
+    {
+        return decomp::JsonValue::MakeObject();
+    }
+
+    const std::string factsJson = promptDump.substr(markerOffset + marker.size());
+    const decomp::JsonParseResult parsed = decomp::ParseJson(factsJson);
+    Expect(parsed.Success, "debug prompt facts JSON should parse: " + parsed.Error);
+    Expect(parsed.Value.IsObject(), "debug prompt facts JSON should be an object");
+
+    if (!parsed.Success || !parsed.Value.IsObject())
+    {
+        return decomp::JsonValue::MakeObject();
+    }
+
+    return parsed.Value;
+}
+
 void ExpectJsonBooleanValue(
     const decomp::JsonValue& root,
     std::initializer_list<std::string> path,
@@ -200,6 +224,19 @@ bool HasIssueCode(const decomp::VerifyReport& report, const std::string& code)
     for (const decomp::VerificationIssue& issue : report.Issues)
     {
         if (issue.Code == code)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool HasIssueSeverity(const decomp::VerifyReport& report, const std::string& code, const std::string& severity)
+{
+    for (const decomp::VerificationIssue& issue : report.Issues)
+    {
+        if (issue.Code == code && issue.Severity == severity)
         {
             return true;
         }

@@ -124,6 +124,15 @@ std::string BuildVerifierIssueCorrectionHint(const VerificationIssue& issue)
             },
             1,
             "When block_value_states are unconverged, avoid definitive reaching-value or alias-sensitive rewrites; add uncertainty and cap confidence until dataflow convergence is proven."
+        },
+        {
+            {
+                "call.argument_expression_omitted",
+                nullptr,
+                nullptr
+            },
+            1,
+            "Rewrite recovered helper calls using the exact recovered call_arguments expressions, preserving operands and operators; do not substitute pointer names, state variables, or simplified expressions unless the exact expression is listed in call_arguments or ir_values."
         }
     };
 

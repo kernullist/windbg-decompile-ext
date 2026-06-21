@@ -1,6 +1,7 @@
 #include "decomp/analyzer.h"
 #include "decomp/json.h"
 #include "decomp/llm_client.h"
+#include "decomp/llm_prompt_facts.h"
 #include "decomp/protocol.h"
 #include "decomp/string_utils.h"
 #include "decomp/verifier.h"
@@ -1147,6 +1148,18 @@ void TestAnalyzerSnapshot()
     Expect(promptDump.find("\"analyzer_skeleton\"") != std::string::npos, "prompt snapshot should include analyzer_skeleton");
     Expect(promptDump.find("\"block_value_states\"") != std::string::npos, "prompt snapshot should include block_value_states");
     Expect(promptDump.find("\"evidence_graph\"") != std::string::npos, "prompt snapshot should include evidence_graph");
+
+    const decomp::JsonValue promptFacts = ParseDebugPromptFactsJson(promptDump);
+    ExpectJsonNumberAtMost(
+        promptFacts,
+        { "evidence_graph", "counts", "selected_nodes" },
+        static_cast<double>(decomp::kPromptEvidenceNodeCompactLimit),
+        "prompt evidence graph should use compact node limit");
+    ExpectJsonNumberAtMost(
+        promptFacts,
+        { "evidence_graph", "counts", "selected_edges" },
+        static_cast<double>(decomp::kPromptEvidenceEdgeCompactLimit),
+        "prompt evidence graph should use compact edge limit");
 }
 
 void TestIrUseSnapshot()
@@ -2969,6 +2982,10 @@ void TestVerifierCoverageSnapshot()
     const decomp::VerifyReport droppedExpressionCallReport = decomp::VerifyResponse(callExpressionRequest, droppedExpressionCallResponse);
     Expect(!HasIssueCode(droppedExpressionCallReport, "call.recovered_targets_omitted"), "verifier should not misreport a normalized helper call as omitted when checking argument loss");
     Expect(HasIssueCode(droppedExpressionCallReport, "call.argument_expression_omitted"), "verifier should flag recovered helper call argument expression operand loss");
+    Expect(HasIssueSeverity(droppedExpressionCallReport, "call.argument_expression_omitted", "error"), "verifier should hard-fail recovered helper call argument expression operand loss");
+    Expect(droppedExpressionCallReport.FactConflicts >= 2, "helper call argument expression loss should carry a stronger confidence penalty");
+    const std::string droppedExpressionFeedbackPrompt = decomp::BuildDebugVerifierFeedbackPrompt(droppedExpressionCallReport);
+    Expect(droppedExpressionFeedbackPrompt.find("exact recovered call_arguments expressions") != std::string::npos, "verifier feedback should require exact recovered call argument expressions");
 
     decomp::AnalyzeResponse changedOperatorCallResponse;
     changedOperatorCallResponse.Status = "ok";
@@ -2978,6 +2995,7 @@ void TestVerifierCoverageSnapshot()
 
     const decomp::VerifyReport changedOperatorCallReport = decomp::VerifyResponse(callExpressionRequest, changedOperatorCallResponse);
     Expect(HasIssueCode(changedOperatorCallReport, "call.argument_expression_omitted"), "verifier should flag recovered helper call argument operator changes");
+    Expect(HasIssueSeverity(changedOperatorCallReport, "call.argument_expression_omitted", "error"), "verifier should hard-fail recovered helper call argument operator changes");
 
     decomp::AnalyzeRequest prototypeOnlyRequest;
     prototypeOnlyRequest.RequestId = "verifier_prototype_arity_snapshot";

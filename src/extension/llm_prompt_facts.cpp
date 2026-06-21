@@ -2684,7 +2684,11 @@ double ScorePromptEvidenceNode(const EvidenceNode& node)
     {
         score += 0.90;
     }
-    else if (node.Kind == "call_target" || node.Kind == "callee_summary")
+    else if (node.Kind == "call_target" || node.Kind == "callee_summary" || node.Kind == "call_argument")
+    {
+        score += 0.75;
+    }
+    else if (StartsWithInsensitive(node.Kind, "obfuscation.") || StartsWithInsensitive(node.Kind, "semantic_cfg."))
     {
         score += 0.75;
     }
@@ -2739,11 +2743,14 @@ JsonValue BuildEvidenceGraphJson(
     const AnalyzeRequest& request,
     const std::set<std::string>* blockIds,
     const std::set<uint64_t>* instructionAddresses,
+    size_t nodeLimit,
+    size_t edgeLimit,
     bool* truncated)
 {
     JsonValue object = JsonValue::MakeObject();
     JsonValue nodes = JsonValue::MakeArray();
     JsonValue edges = JsonValue::MakeArray();
+    JsonValue counts = JsonValue::MakeObject();
     bool notesTruncated = false;
     std::set<std::string> selectedNodeIds;
     const EvidenceGraphFacts& graph = request.Facts.EvidenceGraph;
@@ -2759,7 +2766,7 @@ JsonValue BuildEvidenceGraphJson(
 
     const std::vector<size_t> nodeIndices = SelectRankedSpreadIndices(
         filteredNodeIndices.size(),
-        kPromptEvidenceNodeLimit,
+        nodeLimit,
         [&graph, &filteredNodeIndices](size_t relativeIndex)
         {
             return ScorePromptEvidenceNode(graph.Nodes[filteredNodeIndices[relativeIndex]]);
@@ -2782,7 +2789,7 @@ JsonValue BuildEvidenceGraphJson(
 
     for (const EvidenceEdge& edge : graph.Edges)
     {
-        if (edges.GetArray().size() >= kPromptEvidenceEdgeLimit)
+        if (edges.GetArray().size() >= edgeLimit)
         {
             break;
         }
@@ -2801,11 +2808,24 @@ JsonValue BuildEvidenceGraphJson(
         edges.PushBack(item);
     }
 
+    counts.Set("total_nodes", JsonValue::MakeNumber(static_cast<double>(graph.Nodes.size())));
+    counts.Set("total_edges", JsonValue::MakeNumber(static_cast<double>(graph.Edges.size())));
+    counts.Set("eligible_nodes", JsonValue::MakeNumber(static_cast<double>(filteredNodeIndices.size())));
+    counts.Set("selected_nodes", JsonValue::MakeNumber(static_cast<double>(nodes.GetArray().size())));
+    counts.Set("selected_edges", JsonValue::MakeNumber(static_cast<double>(edges.GetArray().size())));
+    counts.Set("node_limit", JsonValue::MakeNumber(static_cast<double>(nodeLimit)));
+    counts.Set("edge_limit", JsonValue::MakeNumber(static_cast<double>(edgeLimit)));
     object.Set("nodes", nodes);
     object.Set("edges", edges);
+    object.Set("counts", counts);
     object.Set("notes", BuildStringArray(graph.Notes, kPromptEvidenceNoteLimit, &notesTruncated));
     object.Set("coverage", JsonValue::MakeNumber(graph.Coverage));
     object.Set("scope", JsonValue::MakeString(blockIds == nullptr && instructionAddresses == nullptr ? "function" : "chunk"));
+    object.Set(
+        "selection_policy",
+        JsonValue::MakeString(blockIds == nullptr && instructionAddresses == nullptr
+            ? "compact ranked high-signal evidence plus spread sampling"
+            : "chunk-scoped ranked evidence plus spread sampling"));
 
     if (truncated != nullptr)
     {
@@ -2819,7 +2839,13 @@ JsonValue BuildEvidenceGraphJson(
 
 JsonValue BuildEvidenceGraphJson(const AnalyzeRequest& request, bool* truncated)
 {
-    return BuildEvidenceGraphJson(request, nullptr, nullptr, truncated);
+    return BuildEvidenceGraphJson(
+        request,
+        nullptr,
+        nullptr,
+        kPromptEvidenceNodeCompactLimit,
+        kPromptEvidenceEdgeCompactLimit,
+        truncated);
 }
 
 JsonValue BuildEvidenceGraphJsonForScope(
@@ -2828,7 +2854,13 @@ JsonValue BuildEvidenceGraphJsonForScope(
     const std::set<uint64_t>& instructionAddresses,
     bool* truncated)
 {
-    return BuildEvidenceGraphJson(request, &blockIds, &instructionAddresses, truncated);
+    return BuildEvidenceGraphJson(
+        request,
+        &blockIds,
+        &instructionAddresses,
+        kPromptEvidenceNodeLimit,
+        kPromptEvidenceEdgeLimit,
+        truncated);
 }
 
 JsonValue BuildCountsJson(const AnalyzeRequest& request)

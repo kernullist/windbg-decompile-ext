@@ -2083,11 +2083,11 @@ void CheckRecoveredCallArgumentExpressionConsistency(const AnalyzeRequest& reque
 
     if (suspiciousCalls != 0)
     {
-        ++report.FactConflicts;
+        report.FactConflicts += 2;
         AddIssue(
             report,
             "call.argument_expression_omitted",
-            "warning",
+            "error",
             "pseudo_c calls recovered callees but drops high-confidence recovered argument expression operands",
             "calls_with_argument_expression_loss=" + std::to_string(suspiciousCalls));
     }
