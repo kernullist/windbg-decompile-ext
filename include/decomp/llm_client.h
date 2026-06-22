@@ -88,14 +88,27 @@ std::string BuildDebugFirstChunkPromptDump(
 std::string BuildDebugMergePromptDump(
     const AnalyzeRequest& request,
     const LlmClientConfig& config);
+std::string BuildDebugTokenPressureCompactPromptDump(const AnalyzeRequest& request);
 std::string BuildDebugVerifierFeedbackPrompt(const VerifyReport& report);
 bool DebugParseChunkAnalysisJson(
     const std::string& text,
     bool& repaired,
     size_t& uncertaintyCount,
     std::string& error);
+bool DebugExtractAffordableCompletionTokenBudget(
+    const std::string& providerError,
+    uint32_t& budget);
+bool DebugIsProviderTokenPressureError(const std::string& providerError);
+bool DebugIsProviderCreditExhaustedError(const std::string& providerError);
+bool DebugShouldSkipSinglePassAfterChunkedFailure(const std::string& chunkedError);
+uint32_t DebugChooseTokenPressureCompletionBudget(
+    const LlmClientConfig& config,
+    const std::string& providerError);
 void ApplyDebugMergeOutputPolicy(
     const AnalyzeRequest& request,
     const LlmClientConfig& config,
+    AnalyzeResponse& response);
+void ApplyDebugResponseGroundingPolicy(
+    const AnalyzeRequest& request,
     AnalyzeResponse& response);
 }

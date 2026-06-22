@@ -48,10 +48,10 @@ std::string BuildVerifierIssueCorrectionHint(const VerificationIssue& issue)
             {
                 "obfuscation.substitution_claim_without_evidence",
                 "obfuscation.substitution_memory_semantics_claim",
-                nullptr
+                "obfuscation.constant_return_contradiction"
             },
-            2,
-            "Remove unsupported substitution rewrites; use obfuscation.substitution_idioms only for local scalar simplifications and keep pointer, load, store, volatile, or alias-sensitive expressions uncertain."
+            3,
+            "Remove unsupported substitution rewrites; use obfuscation.substitution_idioms only for local scalar simplifications, keep pointer, load, store, volatile, or alias-sensitive expressions uncertain, and honor proven opaque constant-return predicate bits exactly."
         },
         {
             {
@@ -127,9 +127,18 @@ std::string BuildVerifierIssueCorrectionHint(const VerificationIssue& issue)
         },
         {
             {
+                "call.arguments_excess",
                 "call.argument_expression_omitted",
                 "call.result_not_captured",
-                "identifier.undefined_result_placeholder"
+            },
+            3,
+            "Rewrite recovered helper calls using exact helper_call_contract and call_arguments expressions; capture used helper returns as target = Callee(args) directly and never assign from undefined placeholders such as result."
+        },
+        {
+            {
+                "identifier.undefined_result_placeholder",
+                nullptr,
+                nullptr
             },
             3,
             "Rewrite recovered helper calls using exact helper_call_contract and call_arguments expressions; capture used helper returns as target = Callee(args) directly and never assign from undefined placeholders such as result."

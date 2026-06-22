@@ -314,12 +314,21 @@ std::string BuildChunkAnalyzerSkeletonPseudoC(
         text += "    /* opaque predicate: block="
             + predicate.BlockId
             + " result="
-            + predicate.ConstantResult
-            + " live="
-            + predicate.LiveTargetBlock
-            + " dead="
-            + predicate.DeadTargetBlock
-            + " */\n";
+            + predicate.ConstantResult;
+
+        if (!predicate.LiveTargetBlock.empty() || !predicate.DeadTargetBlock.empty())
+        {
+            text += " live="
+                + predicate.LiveTargetBlock
+                + " dead="
+                + predicate.DeadTargetBlock;
+        }
+        else
+        {
+            text += " constant_return=true";
+        }
+
+        text += " */\n";
         ++emitted;
     }
 

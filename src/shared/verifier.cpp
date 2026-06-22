@@ -87,11 +87,29 @@ bool MentionsNoReturn(const AnalyzeResponse& response)
         || ContainsInsensitive(response.PseudoC, "[[noreturn]]");
 }
 
+bool MentionsBranchInSummary(const std::string& summary)
+{
+    if (!ContainsInsensitive(summary, "branch"))
+    {
+        return false;
+    }
+
+    if (ContainsInsensitive(summary, "no branch")
+        || ContainsInsensitive(summary, "no branches")
+        || ContainsInsensitive(summary, "without branch")
+        || ContainsInsensitive(summary, "branchless"))
+    {
+        return false;
+    }
+
+    return true;
+}
+
 bool MentionsBranch(const AnalyzeResponse& response)
 {
     return HasCodeTokenText(response, "if")
         || HasCodeTokenText(response, "else")
-        || ContainsInsensitive(response.Summary, "branch");
+        || MentionsBranchInSummary(response.Summary);
 }
 
 bool HasConditionalBranchEvidence(const AnalysisFacts& facts)
@@ -240,7 +258,7 @@ bool IsDeadEdgeClaimContext(const std::string& context)
         || ContainsInsensitive(context, "prune")
         || ContainsInsensitive(context, "removed")
         || ContainsInsensitive(context, "omitted")
-        || ContainsInsensitive(context, "opaque")
+        || ContainsInsensitive(context, "opaque predicate")
         || ContainsInsensitive(context, "bogus")
         || ContainsInsensitive(context, "junk");
 }
@@ -1993,6 +2011,99 @@ bool MentionsMemorySensitiveSubstitutionClaim(const AnalyzeResponse& response)
     return !CollectMemorySensitiveSubstitutionClaimContexts(response).empty();
 }
 
+std::string NormalizeOpaqueConstantResult(const std::string& value)
+{
+    const std::string normalized = ToLowerAscii(TrimCopy(value));
+
+    if (normalized == "1" || normalized == "true")
+    {
+        return "1";
+    }
+
+    if (normalized == "0" || normalized == "false")
+    {
+        return "0";
+    }
+
+    return std::string();
+}
+
+bool IsOpaqueConstantReturnPredicate(const OpaquePredicateFact& predicate)
+{
+    return predicate.Confidence >= 0.85
+        && predicate.LiveTargetBlock.empty()
+        && predicate.DeadTargetBlock.empty()
+        && ContainsInsensitive(predicate.Predicate, "return_low_bit")
+        && !NormalizeOpaqueConstantResult(predicate.ConstantResult).empty();
+}
+
+bool ResponseClaimsOppositeOpaqueConstant(const AnalyzeResponse& response, const std::string& expected)
+{
+    const std::string compactPseudo = LowerNoSpace(response.PseudoC);
+    const std::string summary = ToLowerAscii(response.Summary);
+
+    if (expected == "0")
+    {
+        return compactPseudo.find("return1;") != std::string::npos
+            || compactPseudo.find("return(1);") != std::string::npos
+            || compactPseudo.find("returntrue;") != std::string::npos
+            || compactPseudo.find("return(true);") != std::string::npos
+            || ContainsInsensitive(summary, "always returns 1")
+            || ContainsInsensitive(summary, "always return 1")
+            || ContainsInsensitive(summary, "returns 1")
+            || ContainsInsensitive(summary, "return 1")
+            || ContainsInsensitive(summary, "always returns true")
+            || ContainsInsensitive(summary, "always true")
+            || ContainsInsensitive(summary, "returns true");
+    }
+
+    if (expected == "1")
+    {
+        return compactPseudo.find("return0;") != std::string::npos
+            || compactPseudo.find("return(0);") != std::string::npos
+            || compactPseudo.find("returnfalse;") != std::string::npos
+            || compactPseudo.find("return(false);") != std::string::npos
+            || ContainsInsensitive(summary, "always returns 0")
+            || ContainsInsensitive(summary, "always return 0")
+            || ContainsInsensitive(summary, "returns 0")
+            || ContainsInsensitive(summary, "return 0")
+            || ContainsInsensitive(summary, "always returns false")
+            || ContainsInsensitive(summary, "always false")
+            || ContainsInsensitive(summary, "returns false");
+    }
+
+    return false;
+}
+
+void CheckOpaqueConstantReturnSupport(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
+{
+    if (response.Confidence <= 0.60)
+    {
+        return;
+    }
+
+    for (const OpaquePredicateFact& predicate : request.Facts.Obfuscation.OpaquePredicates)
+    {
+        if (!IsOpaqueConstantReturnPredicate(predicate))
+        {
+            continue;
+        }
+
+        const std::string expected = NormalizeOpaqueConstantResult(predicate.ConstantResult);
+
+        if (ResponseClaimsOppositeOpaqueConstant(response, expected))
+        {
+            ++report.FactConflicts;
+            AddIssue(
+                report,
+                "obfuscation.constant_return_contradiction",
+                "error",
+                "pseudo_c or summary contradicts a proven opaque-predicate constant return bit",
+                "expected_return_low_bit=" + expected + " evidence=" + predicate.Evidence);
+        }
+    }
+}
+
 void CheckObfuscationClaimSupport(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
 {
     if (response.Confidence <= 0.60)
@@ -2139,7 +2250,7 @@ void CheckClaimedControlFlowEdgeSupport(const AnalyzeRequest& request, const Ana
 
 void CheckRecoveredCallCoverage(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
 {
-    if (response.Confidence <= 0.65)
+    if (response.Confidence <= 0.60)
     {
         return;
     }
@@ -2204,13 +2315,26 @@ uint32_t PrototypeParameterArity(const std::vector<PrototypeParameter>& paramete
 
 void CheckRecoveredCallArgumentConsistency(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
 {
-    if (response.Confidence <= 0.65)
+    if (response.Confidence <= 0.60)
     {
         return;
     }
 
     size_t suspiciousCalls = 0;
+    size_t excessiveCalls = 0;
     std::set<uint64_t> checkedSites;
+    std::map<std::string, uint32_t> expectedArityByCallee;
+
+    auto rememberExpectedArity = [&expectedArityByCallee](const std::string& callee, uint32_t arity)
+    {
+        if (callee.empty() || arity == 0)
+        {
+            return;
+        }
+
+        uint32_t& expected = expectedArityByCallee[callee];
+        expected = (std::max)(expected, arity);
+    };
 
     for (const CallTargetInfo& call : request.Facts.CallTargets)
     {
@@ -2227,6 +2351,8 @@ void CheckRecoveredCallArgumentConsistency(const AnalyzeRequest& request, const 
         {
             continue;
         }
+
+        rememberExpectedArity(call.DisplayName, expectedArity);
 
         const std::vector<uint32_t> pseudoArities = FindCallArities(response, call.DisplayName);
 
@@ -2261,6 +2387,8 @@ void CheckRecoveredCallArgumentConsistency(const AnalyzeRequest& request, const 
             continue;
         }
 
+        rememberExpectedArity(summary.Callee, expectedArity);
+
         const std::vector<uint32_t> pseudoArities = FindCallArities(response, summary.Callee);
 
         if (pseudoArities.empty())
@@ -2276,6 +2404,19 @@ void CheckRecoveredCallArgumentConsistency(const AnalyzeRequest& request, const 
         }
     }
 
+    for (const auto& expected : expectedArityByCallee)
+    {
+        const std::vector<uint32_t> pseudoArities = FindCallArities(response, expected.first);
+
+        for (const uint32_t pseudoArity : pseudoArities)
+        {
+            if (pseudoArity > expected.second)
+            {
+                ++excessiveCalls;
+            }
+        }
+    }
+
     if (suspiciousCalls != 0)
     {
         AddIssue(
@@ -2285,6 +2426,17 @@ void CheckRecoveredCallArgumentConsistency(const AnalyzeRequest& request, const 
             "pseudo_c calls recovered callees with fewer arguments than recovered call-site or prototype facts",
             "calls_with_too_few_arguments=" + std::to_string(suspiciousCalls));
         ++report.MissingEvidence;
+    }
+
+    if (excessiveCalls != 0)
+    {
+        ++report.FactConflicts;
+        AddIssue(
+            report,
+            "call.arguments_excess",
+            "error",
+            "pseudo_c calls recovered callees with more arguments than recovered call-site or prototype facts",
+            "calls_with_too_many_arguments=" + std::to_string(excessiveCalls));
     }
 }
 
@@ -2342,7 +2494,7 @@ bool PseudoCallPreservesRecoveredExpressions(
 
 void CheckRecoveredCallArgumentExpressionConsistency(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
 {
-    if (response.Confidence <= 0.65)
+    if (response.Confidence <= 0.60)
     {
         return;
     }
@@ -2472,6 +2624,27 @@ void CheckRecoveredCallResultConsistency(const AnalyzeRequest& request, const An
 
 void CheckUndefinedResultPlaceholders(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
 {
+    bool hasRequiredCallResult = false;
+
+    for (const CallTargetInfo& call : request.Facts.CallTargets)
+    {
+        if (call.DisplayName.empty() || call.Confidence < 0.65)
+        {
+            continue;
+        }
+
+        if (FindRequiredRecoveredCallResultAtSite(request.Facts, call.Site) != nullptr)
+        {
+            hasRequiredCallResult = true;
+            break;
+        }
+    }
+
+    if (!hasRequiredCallResult)
+    {
+        return;
+    }
+
     const std::vector<PseudoCodeToken> tokens = CodeTokens(response);
     size_t placeholderUses = 0;
     std::vector<std::string> contexts;
@@ -3918,6 +4091,7 @@ VerifyReport VerifyResponse(const AnalyzeRequest& request, AnalyzeResponse& resp
     CheckPseudoBranchDensity(request, response, report);
     CheckSwitchEvidenceConsistency(request, response, report);
     CheckObfuscationClaimSupport(request, response, report);
+    CheckOpaqueConstantReturnSupport(request, response, report);
     CheckDeobfuscationConflictPolicy(request, response, report);
     CheckClaimedControlFlowEdgeSupport(request, response, report);
     CheckCalleeSummaryConsistency(request, response, report);

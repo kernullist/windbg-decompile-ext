@@ -8,6 +8,7 @@
 #include "decomp/verifier.h"
 #include "snapshot_test_helpers.h"
 
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -138,6 +139,35 @@ const decomp::ObfuscationDispatcher* FindHighConfidenceDispatcher(const decomp::
     return nullptr;
 }
 
+size_t MaxChunkPlanBlockCount(const decomp::JsonValue* chunkPlans)
+{
+    size_t maxBlockCount = 0;
+
+    if (chunkPlans == nullptr || !chunkPlans->IsArray())
+    {
+        return maxBlockCount;
+    }
+
+    for (const decomp::JsonValue& item : chunkPlans->GetArray())
+    {
+        if (!item.IsObject())
+        {
+            continue;
+        }
+
+        const decomp::JsonValue* blockCount = item.Find("block_count");
+
+        if (blockCount == nullptr || !blockCount->IsNumber())
+        {
+            continue;
+        }
+
+        maxBlockCount = (std::max)(maxBlockCount, static_cast<size_t>(blockCount->GetNumber()));
+    }
+
+    return maxBlockCount;
+}
+
 decomp::AnalysisFacts BuildDiamondFacts()
 {
     decomp::ModuleInfo module;
@@ -266,6 +296,35 @@ decomp::AnalysisFacts BuildImplicitAndCallFacts()
         options,
         0x5000,
         0x5000,
+        regions,
+        bytes,
+        instructions);
+}
+
+decomp::AnalysisFacts BuildForwardedRegisterCallArgumentFacts()
+{
+    decomp::ModuleInfo module;
+    module.ModuleName = "snapshot";
+    module.ImageName = "snapshot.exe";
+    module.Base = 0x5200;
+    module.Size = 0x1000;
+
+    std::vector<decomp::FunctionRegion> regions = { { 0x5200, 0x5220 } };
+    std::vector<uint8_t> bytes(0x20, 0x90);
+    std::vector<decomp::DisassembledInstruction> instructions;
+    instructions.push_back(MakeInstruction(0x5200, 0x5205, "mov", "edx, 7"));
+    instructions.push_back(MakeInstruction(0x5205, 0x5208, "mov", "ecx, edx"));
+    instructions.push_back(MakeBranch(0x5208, 0x520d, "call", 0x5300));
+    instructions.push_back(MakeInstruction(0x520d, 0x520e, "ret"));
+
+    decomp::DecompOptions options;
+    return decomp::BuildAnalysisFacts(
+        "snapshot!ForwardedRegisterCallArgument",
+        module,
+        decomp::DebugSessionKind::User,
+        options,
+        0x5200,
+        0x5200,
         regions,
         bytes,
         instructions);
@@ -952,6 +1011,58 @@ decomp::AnalysisFacts BuildConditionalFlattenedDispatcherFacts()
         instructions);
 }
 
+decomp::AnalysisFacts BuildCompareTreeStackSlotFlattenedFacts()
+{
+    decomp::ModuleInfo module;
+    module.ModuleName = "snapshot";
+    module.ImageName = "snapshot.exe";
+    module.Base = 0x1b000;
+    module.Size = 0x1000;
+
+    std::vector<decomp::FunctionRegion> regions = { { 0x1b000, 0x1b0c0 } };
+    std::vector<uint8_t> bytes(0xc0, 0x90);
+    std::vector<decomp::DisassembledInstruction> instructions;
+    instructions.push_back(MakeInstruction(0x1b000, 0x1b004, "sub", "rsp, 0x48"));
+    instructions.push_back(MakeInstruction(0x1b004, 0x1b00c, "mov", "dword ptr [rsp+0x20], 0x11"));
+    instructions.push_back(MakeBranch(0x1b00c, 0x1b00e, "jmp", 0x1b080));
+    instructions.push_back(MakeInstruction(0x1b020, 0x1b023, "add", "edx, 1"));
+    instructions.push_back(MakeInstruction(0x1b023, 0x1b02b, "mov", "dword ptr [rsp+0x20], 0x22"));
+    instructions.push_back(MakeBranch(0x1b02b, 0x1b02d, "jmp", 0x1b080));
+    instructions.push_back(MakeInstruction(0x1b030, 0x1b033, "add", "edx, 2"));
+    instructions.push_back(MakeInstruction(0x1b033, 0x1b03b, "mov", "dword ptr [rsp+0x20], 0x33"));
+    instructions.push_back(MakeBranch(0x1b03b, 0x1b03d, "jmp", 0x1b080));
+    instructions.push_back(MakeInstruction(0x1b040, 0x1b042, "mov", "eax, edx"));
+    instructions.push_back(MakeInstruction(0x1b042, 0x1b046, "add", "rsp, 0x48"));
+    instructions.push_back(MakeInstruction(0x1b046, 0x1b047, "ret"));
+    instructions.push_back(MakeInstruction(0x1b050, 0x1b052, "xor", "edx, edx"));
+    instructions.push_back(MakeInstruction(0x1b052, 0x1b05a, "mov", "dword ptr [rsp+0x20], 0x44"));
+    instructions.push_back(MakeBranch(0x1b05a, 0x1b05c, "jmp", 0x1b080));
+    instructions.push_back(MakeInstruction(0x1b080, 0x1b084, "mov", "eax, [rsp+0x20]"));
+    instructions.push_back(MakeInstruction(0x1b084, 0x1b089, "cmp", "eax, 0x22"));
+    instructions.push_back(MakeBranch(0x1b089, 0x1b08b, "ja", 0x1b0a0));
+    instructions.push_back(MakeBranch(0x1b08b, 0x1b08d, "je", 0x1b030));
+    instructions.push_back(MakeInstruction(0x1b08d, 0x1b092, "cmp", "eax, 0x11"));
+    instructions.push_back(MakeBranch(0x1b092, 0x1b094, "je", 0x1b020));
+    instructions.push_back(MakeBranch(0x1b094, 0x1b096, "jmp", 0x1b050));
+    instructions.push_back(MakeInstruction(0x1b0a0, 0x1b0a5, "cmp", "eax, 0x33"));
+    instructions.push_back(MakeBranch(0x1b0a5, 0x1b0a7, "je", 0x1b040));
+    instructions.push_back(MakeInstruction(0x1b0a7, 0x1b0ac, "cmp", "eax, 0x44"));
+    instructions.push_back(MakeBranch(0x1b0ac, 0x1b0ae, "jne", 0x1b080));
+    instructions.push_back(MakeBranch(0x1b0ae, 0x1b0b0, "jmp", 0x1b040));
+
+    decomp::DecompOptions options;
+    return decomp::BuildAnalysisFacts(
+        "snapshot!CompareTreeStackSlotFlattened",
+        module,
+        decomp::DebugSessionKind::User,
+        options,
+        0x1b000,
+        0x1b000,
+        regions,
+        bytes,
+        instructions);
+}
+
 decomp::AnalysisFacts BuildOpaquePredicateFacts()
 {
     decomp::ModuleInfo module;
@@ -978,6 +1089,53 @@ decomp::AnalysisFacts BuildOpaquePredicateFacts()
         options,
         0x18000,
         0x18000,
+        regions,
+        bytes,
+        instructions);
+}
+
+decomp::AnalysisFacts BuildOpaqueParityReturnFacts(bool inverted)
+{
+    decomp::ModuleInfo module;
+    module.ModuleName = "snapshot";
+    module.ImageName = "snapshot.exe";
+    module.Base = 0x18100;
+    module.Size = 0x1000;
+
+    const uint64_t base = inverted ? 0x18180 : 0x18100;
+    std::vector<decomp::FunctionRegion> regions = { { base, base + 0x40 } };
+    std::vector<uint8_t> bytes(0x40, 0x90);
+    std::vector<decomp::DisassembledInstruction> instructions;
+    instructions.push_back(MakeInstruction(base + 0x00, base + 0x03, "mov", "eax, dword ptr [snapshot!g_salt]"));
+    instructions.push_back(MakeInstruction(base + 0x03, base + 0x06, "add", "eax, ecx"));
+    instructions.push_back(MakeInstruction(base + 0x06, base + 0x09, "or", "eax, 1"));
+    instructions.push_back(MakeInstruction(base + 0x09, base + 0x0c, "mov", "dword ptr [rsp+8], eax"));
+    instructions.push_back(MakeInstruction(base + 0x0c, base + 0x0f, "mov", "eax, dword ptr [rsp+8]"));
+    instructions.push_back(MakeInstruction(base + 0x0f, base + 0x12, "mov", "ecx, dword ptr [rsp+8]"));
+    instructions.push_back(MakeInstruction(base + 0x12, base + 0x15, "imul", "eax, ecx"));
+    instructions.push_back(MakeInstruction(base + 0x15, base + 0x18, "mov", "ecx, dword ptr [rsp+8]"));
+    instructions.push_back(MakeInstruction(base + 0x18, base + 0x1b, "sub", "eax, ecx"));
+
+    if (inverted)
+    {
+        instructions.push_back(MakeInstruction(base + 0x1b, base + 0x1d, "not", "al"));
+        instructions.push_back(MakeInstruction(base + 0x1d, base + 0x20, "and", "al, 1"));
+        instructions.push_back(MakeInstruction(base + 0x20, base + 0x21, "ret"));
+    }
+    else
+    {
+        instructions.push_back(MakeInstruction(base + 0x1b, base + 0x1e, "and", "al, 1"));
+        instructions.push_back(MakeInstruction(base + 0x1e, base + 0x1f, "ret"));
+    }
+
+    decomp::DecompOptions options;
+    return decomp::BuildAnalysisFacts(
+        inverted ? "snapshot!OpaqueParityTrue" : "snapshot!OpaqueParityFalse",
+        module,
+        decomp::DebugSessionKind::User,
+        options,
+        base,
+        base,
         regions,
         bytes,
         instructions);
@@ -1325,6 +1483,25 @@ void TestImplicitAndCallSnapshot()
     }
 
     Expect(foundCallArg2, "call-site argument facts should capture rdx=5 before the call");
+
+    const decomp::AnalysisFacts forwardedCallFacts = BuildForwardedRegisterCallArgumentFacts();
+    bool foundForwardedArg1 = false;
+    bool leakedForwardedArg2 = false;
+
+    for (const decomp::CallArgumentFact& argument : forwardedCallFacts.CallArguments)
+    {
+        if (argument.Site == 0x5208 && argument.Ordinal == 1 && argument.Location == "rcx" && argument.Expression == "7")
+        {
+            foundForwardedArg1 = true;
+        }
+        else if (argument.Site == 0x5208 && argument.Ordinal == 2)
+        {
+            leakedForwardedArg2 = true;
+        }
+    }
+
+    Expect(foundForwardedArg1, "call-site argument facts should preserve register-forwarded first arguments");
+    Expect(!leakedForwardedArg2, "register-forwarded temporaries should not leak as independent higher ordinal call arguments");
 }
 
 void TestCallArgumentStackWindowSnapshot()
@@ -2172,6 +2349,7 @@ void TestObfuscationFactsSnapshot()
 
     const decomp::JsonValue* mergeChunkPlans = ExpectJsonArrayPath(mergeFactsJson, { "chunking", "chunk_plans" }, "chunking.chunk_plans should be an array");
     Expect(mergeChunkPlans != nullptr && !mergeChunkPlans->GetArray().empty(), "chunking.chunk_plans should not be empty");
+    Expect(MaxChunkPlanBlockCount(mergeChunkPlans) <= static_cast<size_t>(chunkConfig.ChunkBlockLimit), "chunk planner should keep final merge plans within the configured block limit");
 
     ExpectJsonObjectPath(mergeFactsJson, { "chunking", "summary_alignment" }, "chunking.summary_alignment should be an object");
     ExpectJsonBooleanPath(mergeFactsJson, { "chunking", "summary_alignment", "alignment_complete" }, "summary alignment completion should be boolean");
@@ -2313,6 +2491,37 @@ void TestObfuscationFactsSnapshot()
     const decomp::AnalysisFacts fanInCompareLoopFacts = BuildFanInCompareLoopFacts();
     Expect(FindHighConfidenceDispatcher(fanInCompareLoopFacts) == nullptr, "fan-in compare loop without state writes should not become a flattening dispatcher");
 
+    const decomp::AnalysisFacts compareTreeStackSlotFacts = BuildCompareTreeStackSlotFlattenedFacts();
+    const decomp::ObfuscationDispatcher* compareTreeDispatcher = FindHighConfidenceDispatcher(compareTreeStackSlotFacts);
+    bool foundCompareTreeLocalState = false;
+    bool foundCompareTreeRecoveredEdge = false;
+
+    Expect(compareTreeDispatcher != nullptr, "stack-slot compare-tree flattened fixture should recover a high-confidence dispatcher");
+
+    if (compareTreeDispatcher != nullptr)
+    {
+        foundCompareTreeLocalState = compareTreeDispatcher->StateVariable.find("slot_") != std::string::npos
+            || compareTreeDispatcher->StateVariable.find("[") != std::string::npos;
+        foundCompareTreeRecoveredEdge = compareTreeDispatcher->RecoveredEdges.size() >= 2;
+    }
+
+    Expect(foundCompareTreeLocalState, "compare-tree dispatcher should use the stack/local state alias instead of only the scratch register");
+    Expect(foundCompareTreeRecoveredEdge, "compare-tree dispatcher should recover state-write semantic edges through the dispatch funnel");
+    Expect(compareTreeStackSlotFacts.DeobfuscationReadiness.SafeToRewriteControlFlow, "compare-tree dispatcher readiness should allow semantic CFG rewrite");
+
+    decomp::AnalyzeRequest compareTreeChunkRequest;
+    compareTreeChunkRequest.RequestId = "compare_tree_chunk_plan_snapshot";
+    compareTreeChunkRequest.Facts = compareTreeStackSlotFacts;
+
+    decomp::LlmClientConfig compareTreeChunkConfig;
+    compareTreeChunkConfig.ChunkBlockLimit = 4;
+    compareTreeChunkConfig.ChunkCountLimit = 8;
+
+    const std::string compareTreeMergePromptDump = decomp::BuildDebugMergePromptDump(compareTreeChunkRequest, compareTreeChunkConfig);
+    const decomp::JsonValue compareTreeMergeFactsJson = ParseDebugMergeFactsJson(compareTreeMergePromptDump);
+    const decomp::JsonValue* compareTreeChunkPlans = ExpectJsonArrayPath(compareTreeMergeFactsJson, { "chunking", "chunk_plans" }, "compare-tree merge facts should expose chunk plans");
+    Expect(MaxChunkPlanBlockCount(compareTreeChunkPlans) <= static_cast<size_t>(compareTreeChunkConfig.ChunkBlockLimit), "compare-tree chunk planner should keep compare-tree dispatcher plans within the configured block limit");
+
     const decomp::AnalysisFacts switchFacts = BuildSwitchFlattenedDispatcherFacts();
     const decomp::ObfuscationDispatcher* switchDispatcher = FindHighConfidenceDispatcher(switchFacts);
     const decomp::BasicBlock* arithmeticBody = FindBlockStartingAt(switchFacts, 0x16020);
@@ -2407,6 +2616,53 @@ void TestObfuscationFactsSnapshot()
     const std::string opaquePromptDump = decomp::BuildDebugPromptDump(opaqueRequest);
     Expect(opaquePromptDump.find("\"opaque_predicates\"") != std::string::npos, "prompt dump should include opaque predicate facts");
     Expect(opaquePromptDump.find("opaque predicate:") != std::string::npos, "analyzer skeleton should render opaque predicate proof comments");
+
+    const decomp::AnalysisFacts opaqueParityFalseFacts = BuildOpaqueParityReturnFacts(false);
+    const decomp::AnalysisFacts opaqueParityTrueFacts = BuildOpaqueParityReturnFacts(true);
+    bool foundOpaqueParityFalse = false;
+    bool foundOpaqueParityTrue = false;
+    bool foundOpaqueParitySubstitution = false;
+
+    for (const decomp::OpaquePredicateFact& predicate : opaqueParityFalseFacts.Obfuscation.OpaquePredicates)
+    {
+        if (predicate.ConstantResult == "0"
+            && predicate.LiveTargetBlock.empty()
+            && predicate.DeadTargetBlock.empty()
+            && predicate.Predicate.find("return_low_bit") != std::string::npos)
+        {
+            foundOpaqueParityFalse = true;
+        }
+    }
+
+    for (const decomp::OpaquePredicateFact& predicate : opaqueParityTrueFacts.Obfuscation.OpaquePredicates)
+    {
+        if (predicate.ConstantResult == "1"
+            && predicate.LiveTargetBlock.empty()
+            && predicate.DeadTargetBlock.empty()
+            && predicate.Predicate.find("return_low_bit") != std::string::npos)
+        {
+            foundOpaqueParityTrue = true;
+        }
+    }
+
+    for (const decomp::SubstitutionIdiomFact& idiom : opaqueParityFalseFacts.Obfuscation.SubstitutionIdioms)
+    {
+        if (idiom.Pattern == "odd_square_minus_self_parity" && idiom.SimplifiedExpression == "0")
+        {
+            foundOpaqueParitySubstitution = true;
+        }
+    }
+
+    Expect(foundOpaqueParityFalse, "opaque parity return fixture should prove the false return bit");
+    Expect(foundOpaqueParityTrue, "opaque parity return fixture should prove the inverted true return bit");
+    Expect(foundOpaqueParitySubstitution, "opaque parity return fixture should emit a substitution simplification");
+    Expect(ContainsFactSubstring(opaqueParityFalseFacts, "result=0"), "opaque parity detail fact should preserve the false constant result");
+
+    decomp::AnalyzeRequest opaqueParityRequest;
+    opaqueParityRequest.RequestId = "obfuscation_parity_return_prompt_snapshot";
+    opaqueParityRequest.Facts = opaqueParityFalseFacts;
+    const std::string opaqueParityPromptDump = decomp::BuildDebugPromptDump(opaqueParityRequest);
+    Expect(opaqueParityPromptDump.find("constant_return=true") != std::string::npos, "prompt skeleton should mark opaque parity facts as constant-return evidence");
 
     const decomp::AnalysisFacts substitutionFacts = BuildSubstitutionFacts();
     bool foundAddZero = false;
@@ -2512,6 +2768,15 @@ void TestObfuscationFactsSnapshot()
     Expect(ollvmPromptDump.find("semantic edge:") != std::string::npos, "OLLVM-like analyzer skeleton should render semantic CFG overlay comments");
     Expect(ollvmPromptDump.find("opaque predicate:") != std::string::npos, "OLLVM-like analyzer skeleton should render opaque predicate comments");
     Expect(ollvmPromptDump.find("substitution:") != std::string::npos, "OLLVM-like analyzer skeleton should render substitution comments");
+
+    const std::string ollvmTokenPressurePromptDump = decomp::BuildDebugTokenPressureCompactPromptDump(ollvmRequest);
+    Expect(!ollvmTokenPressurePromptDump.empty(), "OLLVM-like token-pressure compact prompt should be available");
+    Expect(ollvmTokenPressurePromptDump.size() < ollvmPromptDump.size(), "token-pressure compact prompt should be smaller than the standard prompt");
+    Expect(ollvmTokenPressurePromptDump.find("token_pressure_compact") != std::string::npos, "token-pressure compact prompt should expose its prompt profile");
+    Expect(ollvmTokenPressurePromptDump.find("\"dispatchers\"") != std::string::npos, "token-pressure compact prompt should retain dispatcher facts");
+    Expect(ollvmTokenPressurePromptDump.find("\"deobfuscation_readiness\"") != std::string::npos, "token-pressure compact prompt should retain deobfuscation readiness");
+    Expect(ollvmTokenPressurePromptDump.find("\"call_arguments\"") != std::string::npos, "token-pressure compact prompt should retain helper call argument facts");
+    Expect(ollvmTokenPressurePromptDump.find("Do not emit raw magic-state dispatcher chains") != std::string::npos, "token-pressure compact prompt should preserve deobfuscation output policy");
 
     decomp::AnalyzeResponse badStateResponse;
     badStateResponse.Status = "ok";
@@ -2880,6 +3145,54 @@ void TestVerifierSnapshot()
     Expect(HasIssueCode(loopReport, "control_flow.loop_without_back_edge"), "verifier snapshot should flag unsupported loop claims");
     const std::string loopFeedbackPrompt = decomp::BuildDebugVerifierFeedbackPrompt(loopReport);
     Expect(loopFeedbackPrompt.find("raw CFG or semantic_control_flow evidence contains a back edge") != std::string::npos, "verifier feedback should name loop back-edge grounding");
+
+    decomp::AnalyzeRequest straightLineRequest;
+    straightLineRequest.RequestId = "branch_summary_snapshot";
+    straightLineRequest.Facts = BuildImplicitAndCallFacts();
+
+    decomp::AnalyzeResponse noBranchSummaryResponse;
+    noBranchSummaryResponse.Status = "ok";
+    noBranchSummaryResponse.PseudoC = "unsigned int f(unsigned int x) { return x; }";
+    noBranchSummaryResponse.Summary = "No branches or calls exist in the emitted pseudocode.";
+    noBranchSummaryResponse.Confidence = 0.88;
+
+    const decomp::VerifyReport noBranchSummaryReport = decomp::VerifyResponse(straightLineRequest, noBranchSummaryResponse);
+    Expect(!HasIssueCode(noBranchSummaryReport, "branch.without_evidence"), "verifier should not treat negated branch wording as an unsupported branch claim");
+
+    decomp::AnalyzeResponse localResultResponse;
+    localResultResponse.Status = "ok";
+    localResultResponse.PseudoC = "unsigned int f(unsigned int x) { unsigned int result = x & 1; return result; }";
+    localResultResponse.Summary = "straight-line local result variable";
+    localResultResponse.Confidence = 0.88;
+
+    const decomp::VerifyReport localResultReport = decomp::VerifyResponse(straightLineRequest, localResultResponse);
+    Expect(!HasIssueCode(localResultReport, "identifier.undefined_result_placeholder"), "verifier should allow local result variables when no recovered helper result must be captured");
+
+    decomp::AnalyzeResponse branchSummaryResponse = noBranchSummaryResponse;
+    branchSummaryResponse.Summary = "The emitted pseudocode branches on the input value.";
+
+    const decomp::VerifyReport branchSummaryReport = decomp::VerifyResponse(straightLineRequest, branchSummaryResponse);
+    Expect(HasIssueCode(branchSummaryReport, "branch.without_evidence"), "verifier should still reject positive branch claims without branch evidence");
+
+    decomp::AnalyzeRequest opaqueParityRequest;
+    opaqueParityRequest.RequestId = "opaque_parity_constant_return_verifier";
+    opaqueParityRequest.Facts = BuildOpaqueParityReturnFacts(false);
+
+    decomp::AnalyzeResponse wrongOpaqueParityResponse;
+    wrongOpaqueParityResponse.Status = "ok";
+    wrongOpaqueParityResponse.PseudoC = "unsigned int f(unsigned int x) { return 1; }";
+    wrongOpaqueParityResponse.Summary = "The arithmetic keeps the value odd and always returns 1.";
+    wrongOpaqueParityResponse.Confidence = 0.88;
+
+    const decomp::VerifyReport wrongOpaqueParityReport = decomp::VerifyResponse(opaqueParityRequest, wrongOpaqueParityResponse);
+    Expect(HasIssueCode(wrongOpaqueParityReport, "obfuscation.constant_return_contradiction"), "verifier should reject opaque parity constant-return contradictions");
+
+    decomp::AnalyzeResponse rightOpaqueParityResponse = wrongOpaqueParityResponse;
+    rightOpaqueParityResponse.PseudoC = "unsigned int f(unsigned int x) { return 0; }";
+    rightOpaqueParityResponse.Summary = "The forced-odd square-minus-self parity is even, so the low return bit is 0.";
+
+    const decomp::VerifyReport rightOpaqueParityReport = decomp::VerifyResponse(opaqueParityRequest, rightOpaqueParityResponse);
+    Expect(!HasIssueCode(rightOpaqueParityReport, "obfuscation.constant_return_contradiction"), "verifier should allow the proven opaque parity return constant");
 }
 
 void TestVerifierCoverageSnapshot()
@@ -2944,6 +3257,12 @@ void TestVerifierCoverageSnapshot()
     Expect(!HasIssueCode(suffixReport, "call.recovered_targets_omitted"), "verifier should match recovered module-qualified calls by symbol suffix");
     Expect(HasIssueCode(suffixReport, "call.arguments_omitted"), "verifier should flag recovered call arguments omitted from pseudo calls");
 
+    decomp::AnalyzeResponse cappedSymbolSuffixResponse = symbolSuffixResponse;
+    cappedSymbolSuffixResponse.Confidence = 0.65;
+
+    const decomp::VerifyReport cappedSuffixReport = decomp::VerifyResponse(request, cappedSymbolSuffixResponse);
+    Expect(HasIssueCode(cappedSuffixReport, "call.arguments_omitted"), "verifier should still flag omitted helper arguments at merge-capped confidence");
+
     decomp::AnalyzeResponse symbolSuffixWithArgsResponse;
     symbolSuffixWithArgsResponse.Status = "ok";
     symbolSuffixWithArgsResponse.PseudoC = "void f(void) { ImportantHelper(1, 2); }";
@@ -2952,6 +3271,16 @@ void TestVerifierCoverageSnapshot()
 
     const decomp::VerifyReport suffixWithArgsReport = decomp::VerifyResponse(request, symbolSuffixWithArgsResponse);
     Expect(!HasIssueCode(suffixWithArgsReport, "call.arguments_omitted"), "verifier should accept pseudo calls that preserve recovered argument arity");
+
+    decomp::AnalyzeResponse symbolSuffixTooManyArgsResponse;
+    symbolSuffixTooManyArgsResponse.Status = "ok";
+    symbolSuffixTooManyArgsResponse.PseudoC = "void f(void) { ImportantHelper(1, 2, stale_r8); }";
+    symbolSuffixTooManyArgsResponse.Summary = "calls helper with stale extra argument";
+    symbolSuffixTooManyArgsResponse.Confidence = 0.92;
+
+    const decomp::VerifyReport suffixTooManyArgsReport = decomp::VerifyResponse(request, symbolSuffixTooManyArgsResponse);
+    Expect(HasIssueCode(suffixTooManyArgsReport, "call.arguments_excess"), "verifier should flag helper calls with extra stale arguments beyond recovered arity");
+    Expect(HasIssueSeverity(suffixTooManyArgsReport, "call.arguments_excess", "error"), "extra stale helper arguments should be a hard verifier error");
 
     decomp::AnalyzeRequest callExpressionRequest;
     callExpressionRequest.RequestId = "verifier_call_expression_snapshot";
@@ -3283,6 +3612,17 @@ void TestVerifierCoverageSnapshot()
     Expect(lowEvidenceFeedbackPrompt.find("block-grounded evidence entries") != std::string::npos, "verifier feedback should require block-grounded evidence coverage");
     Expect(lowEvidenceFeedbackPrompt.find("coverage gap") != std::string::npos, "verifier feedback should require uncertainty for evidence coverage gaps");
 
+    decomp::AnalyzeResponse ungroundedHighConfidenceResponse;
+    ungroundedHighConfidenceResponse.Status = "ok";
+    ungroundedHighConfidenceResponse.PseudoC = "void f(void) { ImportantHelper(1, 2); }";
+    ungroundedHighConfidenceResponse.Summary = "calls helper";
+    ungroundedHighConfidenceResponse.Confidence = 0.92;
+
+    decomp::ApplyDebugResponseGroundingPolicy(request, ungroundedHighConfidenceResponse);
+    Expect(ungroundedHighConfidenceResponse.Confidence <= 0.65, "LLM grounding policy should cap confidence when block evidence is omitted");
+    Expect(!ungroundedHighConfidenceResponse.Uncertainties.empty(), "LLM grounding policy should preserve missing evidence as uncertainty");
+    Expect(!HasIssueCode(ungroundedHighConfidenceResponse.Verifier, "evidence.missing_for_high_confidence"), "LLM grounding policy should avoid high-confidence missing-evidence warnings");
+
     decomp::AnalyzeRequest missingGraphRequest = request;
     missingGraphRequest.Facts.EvidenceGraph = decomp::EvidenceGraphFacts();
 
@@ -3487,6 +3827,16 @@ void TestVerifierCoverageSnapshot()
 
         const decomp::VerifyReport supportedSemanticEdgeReport = decomp::VerifyResponse(semanticRequest, supportedSemanticEdgeResponse);
         Expect(!HasIssueCode(supportedSemanticEdgeReport, "control_flow.edge_claim_without_evidence"), "verifier should allow recovered semantic CFG edge claims");
+
+        decomp::AnalyzeResponse opaqueNamedLivePathResponse;
+        opaqueNamedLivePathResponse.Status = "ok";
+        opaqueNamedLivePathResponse.PseudoC = "void f(void) { /* semantic edge: " + semanticEdge->SourceBlock + " -> " + semanticEdge->TargetBlock + ": OpaqueFalse path */ return; }";
+        opaqueNamedLivePathResponse.Summary = "uses an opaque-named helper path without claiming it is dead";
+        opaqueNamedLivePathResponse.Confidence = 0.91;
+
+        const decomp::VerifyReport opaqueNamedLivePathReport = decomp::VerifyResponse(semanticRequest, opaqueNamedLivePathResponse);
+        Expect(!HasIssueCode(opaqueNamedLivePathReport, "obfuscation.dead_edge_claim_without_matching_evidence"), "verifier should not treat opaque-named live paths as dead-edge claims");
+        Expect(!HasIssueCode(opaqueNamedLivePathReport, "obfuscation.dead_edge_rendered_as_live"), "verifier should not treat opaque-named live paths as rendered dead edges");
     }
 
     const decomp::AnalysisFacts opaqueFacts = BuildOpaquePredicateFacts();
@@ -3613,6 +3963,36 @@ void TestUxHelperSnapshot()
     Expect(config.ChunkCountLimit == 16, "default UX config should cap chunk count conservatively");
     Expect(config.ChunkCompletionTokens == 6000, "default UX config should leave room for chunk-local output");
     Expect(config.MergeCompletionTokens == 12000, "default UX config should leave room for merge output");
+
+    uint32_t affordableBudget = 0;
+    Expect(
+        decomp::DebugExtractAffordableCompletionTokenBudget(
+            "http status 402: This request requires more credits, or fewer max_tokens. You requested up to 12000 tokens, but can only afford 5402.",
+            affordableBudget),
+        "provider token budget errors should expose a reduced retry budget");
+    Expect(affordableBudget < 5402 && affordableBudget >= 512, "provider token budget retry should stay below the advertised affordable maximum");
+
+    uint32_t tinyAffordableBudget = 0;
+    const std::string tinyBudgetError = "http status 402: This request requires more credits, or fewer max_tokens. You requested up to 768 tokens, but can only afford 361.";
+    Expect(
+        decomp::DebugExtractAffordableCompletionTokenBudget(tinyBudgetError, tinyAffordableBudget),
+        "provider token budget parser should handle sub-512 affordable budgets");
+    Expect(tinyAffordableBudget < 361 && tinyAffordableBudget >= 128, "sub-512 provider budget should keep a safety margin without exceeding the affordable maximum");
+    Expect(
+        decomp::DebugChooseTokenPressureCompletionBudget(config, tinyBudgetError) <= tinyAffordableBudget,
+        "token-pressure compact retry should not exceed the provider affordable budget");
+    Expect(
+        decomp::DebugIsProviderTokenPressureError("http status 402: {\"error\":{\"message\":\"Insufficient credits. Add more using provider settings\",\"code\":402}}"),
+        "provider insufficient-credit errors should enter token-pressure fallback instead of larger-budget retry");
+    Expect(
+        decomp::DebugIsProviderCreditExhaustedError("http status 402: {\"error\":{\"message\":\"Insufficient credits. Add more using provider settings\",\"code\":402}}"),
+        "provider insufficient-credit errors should skip compact provider retries");
+    Expect(
+        decomp::DebugShouldSkipSinglePassAfterChunkedFailure("http status 402: {\"error\":{\"message\":\"Insufficient credits. Add more using provider settings\",\"code\":402}}"),
+        "chunked insufficient-credit failures should skip redundant single-pass provider calls");
+    Expect(
+        !decomp::DebugShouldSkipSinglePassAfterChunkedFailure("http status 402: {\"error\":{\"message\":\"Prompt tokens limit exceeded: 20000 > 400\",\"code\":402}}"),
+        "chunked prompt-token failures should keep lower-budget fallback opportunities available");
 
     decomp::LlmChunkPlanSummary plan = decomp::SummarizeLlmChunkPlan(request, config);
     Expect(!plan.UseChunked, "small UX plan should use single-pass analysis");

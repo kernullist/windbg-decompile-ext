@@ -1282,6 +1282,33 @@ std::vector<ChunkPlan> BuildChunkPlans(
         }
     };
 
+    auto normalizeGroup = [](std::vector<size_t>& group)
+    {
+        std::sort(group.begin(), group.end());
+        group.erase(std::unique(group.begin(), group.end()), group.end());
+    };
+
+    auto appendBoundedGroup = [&](std::vector<size_t> group)
+    {
+        normalizeGroup(group);
+
+        if (group.empty())
+        {
+            return;
+        }
+
+        for (size_t offset = 0; offset < group.size(); offset += maxBlocksPerChunk)
+        {
+            const size_t end = (std::min)(group.size(), offset + maxBlocksPerChunk);
+            std::vector<size_t> boundedGroup(group.begin() + static_cast<std::ptrdiff_t>(offset), group.begin() + static_cast<std::ptrdiff_t>(end));
+
+            if (!boundedGroup.empty())
+            {
+                groups.push_back(std::move(boundedGroup));
+            }
+        }
+    };
+
     auto findBlockContainingAddress = [&request](uint64_t address) -> size_t
     {
         for (size_t index = 0; index < request.Facts.Blocks.size(); ++index)
@@ -1304,26 +1331,24 @@ std::vector<ChunkPlan> BuildChunkPlans(
             return;
         }
 
-        std::sort(group.begin(), group.end());
-        group.erase(std::unique(group.begin(), group.end()), group.end());
+        normalizeGroup(group);
 
         const size_t first = group.front();
         const size_t last = group.back();
 
-        if (first > 0)
+        if (first > 0 && group.size() < maxBlocksPerChunk)
         {
             group.insert(group.begin(), first - 1U);
+            normalizeGroup(group);
         }
 
-        if (last + 1U < totalBlocks)
+        if (last + 1U < totalBlocks && group.size() < maxBlocksPerChunk)
         {
             group.push_back(last + 1U);
+            normalizeGroup(group);
         }
 
-        std::sort(group.begin(), group.end());
-        group.erase(std::unique(group.begin(), group.end()), group.end());
-
-        groups.push_back(std::move(group));
+        appendBoundedGroup(std::move(group));
     };
 
     for (const ControlFlowRegion& region : request.Facts.ControlFlow)
@@ -1414,12 +1439,17 @@ std::vector<ChunkPlan> BuildChunkPlans(
             std::vector<size_t>& previous = mergedGroups.back();
             const bool overlapsOrTouches = group.front() <= previous.back() + kChunkOverlapBlocks + 1U;
 
-            if (overlapsOrTouches && previous.size() + group.size() <= maxBlocksPerChunk + (kChunkOverlapBlocks * 2U))
+            if (overlapsOrTouches)
             {
-                previous.insert(previous.end(), group.begin(), group.end());
-                std::sort(previous.begin(), previous.end());
-                previous.erase(std::unique(previous.begin(), previous.end()), previous.end());
-                continue;
+                std::vector<size_t> combined = previous;
+                combined.insert(combined.end(), group.begin(), group.end());
+                normalizeGroup(combined);
+
+                if (combined.size() <= maxBlocksPerChunk)
+                {
+                    previous = std::move(combined);
+                    continue;
+                }
             }
         }
 
@@ -1486,21 +1516,32 @@ std::vector<ChunkPlan> BuildChunkPlans(
     {
         size_t bestIndex = 0;
         size_t bestSize = static_cast<size_t>(-1);
+        std::vector<size_t> bestCombined;
+        bool foundMerge = false;
 
         for (size_t index = 0; index + 1U < groups.size(); ++index)
         {
-            const size_t combinedSize = groups[index].size() + groups[index + 1U].size();
+            std::vector<size_t> combined = groups[index];
+            combined.insert(combined.end(), groups[index + 1U].begin(), groups[index + 1U].end());
+            normalizeGroup(combined);
 
-            if (combinedSize < bestSize)
+            const size_t combinedSize = combined.size();
+
+            if (combinedSize <= maxBlocksPerChunk && combinedSize < bestSize)
             {
                 bestSize = combinedSize;
                 bestIndex = index;
+                bestCombined = std::move(combined);
+                foundMerge = true;
             }
         }
 
-        groups[bestIndex].insert(groups[bestIndex].end(), groups[bestIndex + 1U].begin(), groups[bestIndex + 1U].end());
-        std::sort(groups[bestIndex].begin(), groups[bestIndex].end());
-        groups[bestIndex].erase(std::unique(groups[bestIndex].begin(), groups[bestIndex].end()), groups[bestIndex].end());
+        if (!foundMerge)
+        {
+            break;
+        }
+
+        groups[bestIndex] = std::move(bestCombined);
         groups.erase(groups.begin() + static_cast<std::ptrdiff_t>(bestIndex + 1U));
     }
 
@@ -1510,8 +1551,7 @@ std::vector<ChunkPlan> BuildChunkPlans(
     {
         std::vector<size_t>& group = groups[index];
 
-        std::sort(group.begin(), group.end());
-        group.erase(std::unique(group.begin(), group.end()), group.end());
+        normalizeGroup(group);
 
         if (group.empty())
         {
@@ -2177,9 +2217,268 @@ std::string BuildUserPrompt(const AnalyzeRequest& request)
     prompt += "12. Refine analyzer_skeleton instead of writing from scratch; preserve its evidence-backed regions, calls, idioms, and uncertainties unless contradicted by stronger facts.\n";
     prompt += "13. Use graph_summary as the authoritative CFG/region outline; do not invent loops, switches, or branches that graph_summary and control_flow do not support.\n";
     prompt += "14. If semantic_control_flow contains high-confidence non-dead edges, reconstruct control flow from those edges before describing raw dispatcher blocks; keep missing state transitions uncertain.\n";
-    prompt += "15. Use semantic_control_flow dead edges and obfuscation.opaque_predicates only to justify proven dead edges, and use obfuscation.substitution_idioms only as local simplification evidence.\n";
+    prompt += "15. Use semantic_control_flow dead edges and obfuscation.opaque_predicates to justify proven dead edges or proven constant-return predicate bits, and use obfuscation.substitution_idioms only as local simplification evidence.\n";
     prompt += "16. For flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never replace a state transition with a data read such as bytes[index]. Preserve helper call argument expressions from helper_call_contract, call_arguments, and ir_values without dropping operands or operators.\n";
     prompt += "17. When helper_call_contract lists a call site, any emitted helper call for that site or callee must use the listed argument expressions exactly; if return_value.present is true, capture the helper return directly as target = callee(arguments), never as a later assignment from result.\n";
+    return prompt;
+}
+
+std::unordered_map<uint64_t, const DisassembledInstruction*> BuildCompactInstructionMap(const AnalyzeRequest& request)
+{
+    std::unordered_map<uint64_t, const DisassembledInstruction*> instructionsByAddress;
+
+    for (const DisassembledInstruction& instruction : request.Facts.Instructions)
+    {
+        instructionsByAddress[instruction.Address] = &instruction;
+    }
+
+    return instructionsByAddress;
+}
+
+JsonValue BuildTokenPressureBlocksJson(const AnalyzeRequest& request)
+{
+    constexpr size_t kBlockLimit = 24;
+    constexpr size_t kInstructionPerBlockLimit = 4;
+    JsonValue blocks = JsonValue::MakeArray();
+    const std::unordered_map<uint64_t, const DisassembledInstruction*> instructionsByAddress = BuildCompactInstructionMap(request);
+    const size_t blockCount = (std::min)(request.Facts.Blocks.size(), kBlockLimit);
+
+    for (size_t index = 0; index < blockCount; ++index)
+    {
+        const BasicBlock& block = request.Facts.Blocks[index];
+        JsonValue item = JsonValue::MakeObject();
+        JsonValue instructions = JsonValue::MakeArray();
+
+        item.Set("id", JsonValue::MakeString(block.Id));
+        item.Set("start", JsonValue::MakeString(HexU64(block.StartAddress)));
+        item.Set("end", JsonValue::MakeString(HexU64(block.EndAddress)));
+        item.Set("successors", BuildStringArray(block.Successors, 4, nullptr));
+
+        const size_t instructionCount = (std::min)(block.InstructionAddresses.size(), kInstructionPerBlockLimit);
+
+        for (size_t instructionIndex = 0; instructionIndex < instructionCount; ++instructionIndex)
+        {
+            const auto instructionIt = instructionsByAddress.find(block.InstructionAddresses[instructionIndex]);
+
+            if (instructionIt != instructionsByAddress.end())
+            {
+                const DisassembledInstruction& instruction = *instructionIt->second;
+                JsonValue instructionItem = JsonValue::MakeObject();
+                instructionItem.Set("site", JsonValue::MakeString(HexU64(instruction.Address)));
+                instructionItem.Set("op", JsonValue::MakeString(instruction.OperationText.empty() ? instruction.Text : instruction.OperationText));
+                instructions.PushBack(instructionItem);
+            }
+        }
+
+        item.Set("instructions", instructions);
+        blocks.PushBack(item);
+    }
+
+    return blocks;
+}
+
+JsonValue BuildTokenPressureRecoveredArgumentsJson(const AnalyzeRequest& request)
+{
+    JsonValue arguments = JsonValue::MakeArray();
+    const size_t count = (std::min)(request.Facts.RecoveredArguments.size(), size_t{ 8 });
+
+    for (size_t index = 0; index < count; ++index)
+    {
+        const RecoveredArgument& argument = request.Facts.RecoveredArguments[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("name", JsonValue::MakeString(argument.Name));
+        item.Set("register", JsonValue::MakeString(argument.Register));
+        item.Set("type_hint", JsonValue::MakeString(argument.TypeHint));
+        item.Set("confidence", JsonValue::MakeNumber(argument.Confidence));
+        arguments.PushBack(item);
+    }
+
+    return arguments;
+}
+
+JsonValue BuildTokenPressureRecoveredLocalsJson(const AnalyzeRequest& request)
+{
+    JsonValue locals = JsonValue::MakeArray();
+    const size_t count = (std::min)(request.Facts.RecoveredLocals.size(), size_t{ 12 });
+
+    for (size_t index = 0; index < count; ++index)
+    {
+        const RecoveredLocal& local = request.Facts.RecoveredLocals[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("name", JsonValue::MakeString(local.Name));
+        item.Set("storage", JsonValue::MakeString(local.Storage));
+        item.Set("type_hint", JsonValue::MakeString(local.TypeHint));
+        item.Set("confidence", JsonValue::MakeNumber(local.Confidence));
+        locals.PushBack(item);
+    }
+
+    return locals;
+}
+
+JsonValue BuildTokenPressureCallTargetsJson(const AnalyzeRequest& request)
+{
+    JsonValue calls = JsonValue::MakeArray();
+    const size_t count = (std::min)(request.Facts.CallTargets.size(), size_t{ 16 });
+
+    for (size_t index = 0; index < count; ++index)
+    {
+        const CallTargetInfo& call = request.Facts.CallTargets[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("site", JsonValue::MakeString(HexU64(call.Site)));
+        item.Set("callee", JsonValue::MakeString(call.DisplayName));
+        item.Set("kind", JsonValue::MakeString(call.TargetKind));
+        item.Set("confidence", JsonValue::MakeNumber(call.Confidence));
+        calls.PushBack(item);
+    }
+
+    return calls;
+}
+
+JsonValue BuildTokenPressureCallArgumentsJson(const AnalyzeRequest& request)
+{
+    JsonValue arguments = JsonValue::MakeArray();
+    const size_t count = (std::min)(request.Facts.CallArguments.size(), size_t{ 32 });
+
+    for (size_t index = 0; index < count; ++index)
+    {
+        const CallArgumentFact& argument = request.Facts.CallArguments[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("site", JsonValue::MakeString(HexU64(argument.Site)));
+        item.Set("ordinal", JsonValue::MakeNumber(static_cast<double>(argument.Ordinal)));
+        item.Set("location", JsonValue::MakeString(argument.Location));
+        item.Set("expression", JsonValue::MakeString(argument.Expression));
+        item.Set("confidence", JsonValue::MakeNumber(argument.Confidence));
+        arguments.PushBack(item);
+    }
+
+    return arguments;
+}
+
+JsonValue BuildTokenPressureObfuscationJson(const AnalyzeRequest& request)
+{
+    JsonValue object = JsonValue::MakeObject();
+    JsonValue dispatchers = JsonValue::MakeArray();
+    JsonValue states = JsonValue::MakeArray();
+
+    const size_t stateCount = (std::min)(request.Facts.Obfuscation.StateVariables.size(), size_t{ 6 });
+
+    for (size_t index = 0; index < stateCount; ++index)
+    {
+        const ObfuscationStateVariable& variable = request.Facts.Obfuscation.StateVariables[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("name", JsonValue::MakeString(variable.Name));
+        item.Set("storage", JsonValue::MakeString(variable.Storage));
+        item.Set("reads", JsonValue::MakeNumber(static_cast<double>(variable.ReadCount)));
+        item.Set("writes", JsonValue::MakeNumber(static_cast<double>(variable.WriteCount)));
+        item.Set("confidence", JsonValue::MakeNumber(variable.Confidence));
+        states.PushBack(item);
+    }
+
+    const size_t dispatcherCount = (std::min)(request.Facts.Obfuscation.Dispatchers.size(), size_t{ 4 });
+
+    for (size_t index = 0; index < dispatcherCount; ++index)
+    {
+        const ObfuscationDispatcher& dispatcher = request.Facts.Obfuscation.Dispatchers[index];
+        JsonValue item = JsonValue::MakeObject();
+        JsonValue edges = JsonValue::MakeArray();
+        const size_t edgeCount = (std::min)(dispatcher.RecoveredEdges.size(), size_t{ 12 });
+
+        item.Set("header_block", JsonValue::MakeString(dispatcher.HeaderBlock));
+        item.Set("kind", JsonValue::MakeString(dispatcher.Kind));
+        item.Set("state_variable", JsonValue::MakeString(dispatcher.StateVariable));
+        item.Set("dispatcher_blocks", BuildStringArray(dispatcher.DispatcherBlocks, 8, nullptr));
+        item.Set("confidence", JsonValue::MakeNumber(dispatcher.Confidence));
+
+        for (size_t edgeIndex = 0; edgeIndex < edgeCount; ++edgeIndex)
+        {
+            const RecoveredControlFlowEdge& edge = dispatcher.RecoveredEdges[edgeIndex];
+            JsonValue edgeItem = JsonValue::MakeObject();
+            edgeItem.Set("source", JsonValue::MakeString(edge.SourceBlock));
+            edgeItem.Set("target", JsonValue::MakeString(edge.TargetBlock));
+            edgeItem.Set("condition", JsonValue::MakeString(edge.Condition));
+            edgeItem.Set("state_value", JsonValue::MakeString(edge.StateValue));
+            edgeItem.Set("confidence", JsonValue::MakeNumber(edge.Confidence));
+            edges.PushBack(edgeItem);
+        }
+
+        item.Set("recovered_edges", edges);
+        dispatchers.PushBack(item);
+    }
+
+    object.Set("state_variables", states);
+    object.Set("dispatchers", dispatchers);
+    object.Set("notes", BuildStringArray(request.Facts.Obfuscation.Notes, 4, nullptr));
+    object.Set("confidence", JsonValue::MakeNumber(request.Facts.Obfuscation.Confidence));
+    return object;
+}
+
+JsonValue BuildTokenPressureSemanticEdgesJson(const AnalyzeRequest& request)
+{
+    JsonValue edges = JsonValue::MakeArray();
+    const size_t count = (std::min)(request.Facts.SemanticControlFlow.Edges.size(), size_t{ 16 });
+
+    for (size_t index = 0; index < count; ++index)
+    {
+        const SemanticControlFlowEdge& edge = request.Facts.SemanticControlFlow.Edges[index];
+        JsonValue item = JsonValue::MakeObject();
+        item.Set("source", JsonValue::MakeString(edge.SourceBlock));
+        item.Set("target", JsonValue::MakeString(edge.TargetBlock));
+        item.Set("condition", JsonValue::MakeString(edge.Condition));
+        item.Set("state_value", JsonValue::MakeString(edge.StateValue));
+        item.Set("dead", JsonValue::MakeBoolean(edge.Dead));
+        item.Set("confidence", JsonValue::MakeNumber(edge.Confidence));
+        edges.PushBack(item);
+    }
+
+    return edges;
+}
+
+JsonValue BuildTokenPressureFactsJson(const AnalyzeRequest& request)
+{
+    JsonValue root = JsonValue::MakeObject();
+    root.Set("prompt_profile", JsonValue::MakeString("token_pressure_compact"));
+    root.Set("query_text", JsonValue::MakeString(request.Facts.QueryText));
+    root.Set("entry_address", JsonValue::MakeString(HexU64(request.Facts.EntryAddress)));
+    root.Set("calling_convention", JsonValue::MakeString(request.Facts.CallingConvention));
+    root.Set("counts", BuildCountsJson(request));
+    root.Set("params", BuildTokenPressureRecoveredArgumentsJson(request));
+    root.Set("locals", BuildTokenPressureRecoveredLocalsJson(request));
+    root.Set("blocks", BuildTokenPressureBlocksJson(request));
+    root.Set("call_targets", BuildTokenPressureCallTargetsJson(request));
+    root.Set("call_arguments", BuildTokenPressureCallArgumentsJson(request));
+    root.Set("obfuscation", BuildTokenPressureObfuscationJson(request));
+    root.Set("deobfuscation_readiness", BuildDeobfuscationReadinessJson(request));
+    root.Set("semantic_control_flow_edges", BuildTokenPressureSemanticEdgesJson(request));
+    root.Set("global_facts", BuildStringArray(request.Facts.Facts, 10, nullptr));
+    root.Set("global_uncertainties", BuildStringArray(request.Facts.UncertainPoints, 8, nullptr));
+    root.Set("pre_llm_confidence", JsonValue::MakeNumber(request.Facts.PreLlmConfidence));
+    return root;
+}
+
+std::string BuildTokenPressureSystemPrompt(const AnalyzeRequest& request)
+{
+    return
+        "You are a reverse-engineering assistant. Return only JSON keys: status, pseudo_c, summary, params, locals, uncertainties, evidence, confidence. "
+        "This is a token-pressure fallback: keep output tiny, pseudo_c under 25 lines, summary to one short sentence, uncertainties to at most 3 short strings, evidence to at most 2 objects, and params/locals to at most 3 high-confidence entries each. "
+        "Use compact facts only. Write summary and uncertainties in " + DescribePreferredNaturalLanguage(request) + ". "
+        "Prefer semantic_control_flow_edges and obfuscation.dispatchers.recovered_edges over raw flattened dispatch. "
+        "Do not emit raw magic-state dispatcher chains when deobfuscation_readiness.safe_to_rewrite_control_flow is true. "
+        "Preserve helper call argument expressions exactly from call_arguments. Use evidence.blocks with valid block ids.";
+}
+
+std::string BuildTokenPressureUserPrompt(const AnalyzeRequest& request)
+{
+    std::string prompt;
+    prompt += "Analyze this compact x64 function fact set. Emit JSON only.\n";
+    prompt += "Compact facts JSON:\n";
+    prompt += SerializeJson(BuildTokenPressureFactsJson(request), false);
+    prompt += "\nRules:\n";
+    prompt += "1. Reconstruct pseudo_c from blocks, semantic_control_flow_edges, obfuscation recovered_edges, calls, and call_arguments.\n";
+    prompt += "2. If deobfuscation is safe, suppress the raw dispatcher and show direct high-level transitions where supported.\n";
+    prompt += "3. Preserve helper call arity and argument expressions exactly.\n";
+    prompt += "4. Keep unsupported edges or omitted facts in uncertainties; lower confidence when evidence is compact.\n";
+    prompt += "5. Keep output short enough for a small completion budget: no markdown, no repeated block comments, no long prose, no exhaustive register trace, no per-block commentary.\n";
+    prompt += "6. If detail does not fit, prefer a compact structured pseudo_c skeleton plus uncertainty over a long trace.\n";
     return prompt;
 }
 
@@ -3666,6 +3965,52 @@ AnalyzeResponse BuildMockResponse(const AnalyzeRequest& request)
     response.RawModelJson = SerializeAnalyzeResponse(response, true);
     return response;
 }
+
+bool HasBlockGroundedEvidence(const AnalyzeResponse& response)
+{
+    for (const EvidenceItem& evidence : response.Evidence)
+    {
+        if (!evidence.Blocks.empty())
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void ApplyResponseGroundingPolicy(
+    const AnalyzeRequest& request,
+    AnalyzeResponse& response)
+{
+    constexpr double kUngroundedConfidenceCeiling = 0.65;
+
+    if (request.Facts.Blocks.empty()
+        || response.Confidence <= kUngroundedConfidenceCeiling
+        || HasBlockGroundedEvidence(response))
+    {
+        return;
+    }
+
+    response.Confidence = kUngroundedConfidenceCeiling;
+    AppendUniqueText(
+        response.Uncertainties,
+        "model response omitted block-grounded evidence; confidence was capped");
+}
+
+AnalyzeResponse BuildTokenPressureDeterministicResponse(
+    const AnalyzeRequest& request,
+    const std::string& previousError)
+{
+    AnalyzeResponse response = BuildMockResponse(request);
+    response.Provider = "deterministic-token-pressure-fallback";
+    response.Summary = "Deterministic analyzer fallback used because the configured LLM provider could not accept the prompt or completion budget.";
+    response.Confidence = (std::min)(response.Confidence, 0.55);
+    response.Uncertainties.push_back("LLM provider token pressure prevented a complete model response: " + BuildPreviewText(previousError));
+    VerifyResponse(request, response);
+    response.RawModelJson = SerializeAnalyzeResponse(response, true);
+    return response;
+}
 }
 
 bool LoadLlmClientConfig(
@@ -3784,6 +4129,130 @@ uint32_t GrowCompletionTokenBudget(
     }
 
     return static_cast<uint32_t>(grownBudget);
+}
+
+std::optional<uint32_t> ExtractAffordableCompletionTokenBudget(const std::string& providerError)
+{
+    const std::string lower = ToLowerAscii(providerError);
+
+    if (lower.find("fewer max_tokens") == std::string::npos
+        && lower.find("can only afford") == std::string::npos)
+    {
+        return std::nullopt;
+    }
+
+    const std::string marker = "can only afford";
+    const size_t markerPos = lower.find(marker);
+
+    if (markerPos == std::string::npos)
+    {
+        return std::nullopt;
+    }
+
+    size_t digitPos = markerPos + marker.size();
+
+    while (digitPos < lower.size() && !std::isdigit(static_cast<unsigned char>(lower[digitPos])))
+    {
+        ++digitPos;
+    }
+
+    if (digitPos >= lower.size())
+    {
+        return std::nullopt;
+    }
+
+    uint64_t parsed = 0;
+
+    while (digitPos < lower.size() && std::isdigit(static_cast<unsigned char>(lower[digitPos])))
+    {
+        parsed = (parsed * 10ULL) + static_cast<uint64_t>(lower[digitPos] - '0');
+        ++digitPos;
+
+        if (parsed > 32000ULL)
+        {
+            parsed = 32000ULL;
+            break;
+        }
+    }
+
+    if (parsed == 0)
+    {
+        return std::nullopt;
+    }
+
+    uint64_t margin = 0;
+
+    if (parsed > 1024ULL)
+    {
+        margin = 256ULL;
+    }
+    else
+    {
+        if (parsed > 384ULL)
+        {
+            margin = 64ULL;
+        }
+        else
+        {
+            if (parsed > 128ULL)
+            {
+                margin = 32ULL;
+            }
+        }
+    }
+
+    uint64_t budget = parsed > margin ? parsed - margin : parsed;
+
+    if (parsed > 512ULL)
+    {
+        budget = (std::max)(uint64_t{ 512 }, budget);
+    }
+
+    budget = (std::min)(budget, parsed);
+    return static_cast<uint32_t>((std::min)(budget, 32000ULL));
+}
+
+bool ShouldRetryWithReducedCompletionBudget(
+    const std::string& providerError,
+    uint32_t currentBudget,
+    uint32_t& reducedBudget)
+{
+    const std::optional<uint32_t> affordableBudget = ExtractAffordableCompletionTokenBudget(providerError);
+
+    if (!affordableBudget.has_value() || affordableBudget.value() >= currentBudget)
+    {
+        return false;
+    }
+
+    reducedBudget = affordableBudget.value();
+    return true;
+}
+
+bool IsProviderPromptTokenLimitError(const std::string& providerError)
+{
+    const std::string lower = ToLowerAscii(providerError);
+    return lower.find("prompt tokens limit exceeded") != std::string::npos
+        || lower.find("context length") != std::string::npos
+        || lower.find("maximum context") != std::string::npos
+        || lower.find("input tokens") != std::string::npos;
+}
+
+bool IsProviderCreditExhaustedError(const std::string& providerError)
+{
+    const std::string lower = ToLowerAscii(providerError);
+    return lower.find("insufficient credits") != std::string::npos;
+}
+
+bool IsProviderTokenPressureError(const std::string& providerError)
+{
+    return IsProviderPromptTokenLimitError(providerError)
+        || ExtractAffordableCompletionTokenBudget(providerError).has_value()
+        || IsProviderCreditExhaustedError(providerError);
+}
+
+bool ShouldSkipSinglePassAfterChunkedFailure(const std::string& chunkedError)
+{
+    return IsProviderCreditExhaustedError(chunkedError);
 }
 
 bool SubmitChatJsonAttempt(
@@ -3919,6 +4388,43 @@ bool SubmitChatJsonWithRetry(
         return true;
     }
 
+    uint32_t reducedBudget = 0;
+
+    if (!firstSuccess && ShouldRetryWithReducedCompletionBudget(firstError, initialBudget, reducedBudget))
+    {
+        std::string retryJson;
+        std::string retryError;
+        bool retryTruncated = false;
+        if (FailIfCancellationRequested(config, error))
+        {
+            return false;
+        }
+
+        LogVerbose(
+            config,
+            "LLM request retrying with reduced token budget retry_budget=" + std::to_string(reducedBudget)
+                + " first_error=" + BuildPreviewText(firstError));
+        LogProgress(config, "LLM provider rejected the token budget; retrying with a smaller completion budget");
+
+        if (SubmitChatJsonAttempt(config, systemPrompt, userPrompt, reducedBudget, retryJson, retryError, retryTruncated))
+        {
+            modelJson = retryJson;
+            LogVerbose(config, "LLM request accepted reduced-budget retry truncated=" + std::string(retryTruncated ? "true" : "false"));
+            return true;
+        }
+
+        error = retryError;
+        LogVerbose(config, "LLM reduced-budget retry failed: " + BuildPreviewText(error));
+        return false;
+    }
+
+    if (!firstSuccess && IsProviderTokenPressureError(firstError))
+    {
+        error = firstError;
+        LogVerbose(config, "LLM request stopped before larger retry because provider reported token pressure: " + BuildPreviewText(error));
+        return false;
+    }
+
     const uint32_t retryBudget = GrowCompletionTokenBudget(initialBudget, retryFloor);
 
     if (retryBudget > initialBudget)
@@ -3993,6 +4499,7 @@ bool ParseAndMaybeRetryWithVerifier(
     }
     LogVerbose(config, "LLM model JSON parsed");
 
+    ApplyResponseGroundingPolicy(request, response);
     VerifyResponse(request, response);
     if (mergePolicy != nullptr)
     {
@@ -4041,6 +4548,7 @@ bool ParseAndMaybeRetryWithVerifier(
         return true;
     }
 
+    ApplyResponseGroundingPolicy(request, retryResponse);
     VerifyResponse(request, retryResponse);
     if (mergePolicy != nullptr)
     {
@@ -4281,6 +4789,422 @@ bool AnalyzeWithChunkedLlm(
         error);
 }
 
+uint32_t ChooseTokenPressureCompletionBudget(
+    const LlmClientConfig& config,
+    const std::string& providerError)
+{
+    const std::optional<uint32_t> affordableBudget = ExtractAffordableCompletionTokenBudget(providerError);
+
+    if (affordableBudget.has_value())
+    {
+        return (std::min)(affordableBudget.value(), uint32_t{ 1400 });
+    }
+
+    return (std::max)(uint32_t{ 768 }, (std::min)(config.MaxCompletionTokens, uint32_t{ 900 }));
+}
+
+uint32_t ChooseUltraCompactCompletionBudget(
+    const LlmClientConfig& config,
+    const std::string& providerError)
+{
+    const std::optional<uint32_t> affordableBudget = ExtractAffordableCompletionTokenBudget(providerError);
+
+    if (affordableBudget.has_value())
+    {
+        return (std::min)(affordableBudget.value(), uint32_t{ 512 });
+    }
+
+    return (std::max)(uint32_t{ 160 }, (std::min)(config.MaxCompletionTokens, uint32_t{ 256 }));
+}
+
+std::string MakeUltraPromptValue(
+    const std::string& value,
+    size_t limit)
+{
+    std::string text = TrimCopy(value);
+
+    for (char& ch : text)
+    {
+        if (ch == '\r' || ch == '\n' || ch == '\t')
+        {
+            ch = ' ';
+        }
+    }
+
+    if (text.size() > limit)
+    {
+        text = text.substr(0, limit);
+    }
+
+    return text;
+}
+
+void AppendUltraPromptField(
+    std::string& prompt,
+    const std::string& key,
+    const std::string& value,
+    size_t limit)
+{
+    const std::string text = MakeUltraPromptValue(value, limit);
+
+    if (text.empty())
+    {
+        return;
+    }
+
+    prompt += key;
+    prompt += "=";
+    prompt += text;
+    prompt += ";";
+}
+
+std::string BuildTokenPressureUltraCompactSystemPrompt()
+{
+    return "Return one-line JSON only: status,pseudo_c,summary,params,locals,uncertainties,evidence,confidence. params=[], locals=[], evidence=[], confidence<=0.50, pseudo_c<=3 C lines.";
+}
+
+std::string BuildTokenPressureUltraCompactUserPrompt(const AnalyzeRequest& request)
+{
+    std::string prompt = "facts:";
+    const AnalysisFacts& facts = request.Facts;
+    const std::string functionName = !facts.QueryText.empty()
+        ? facts.QueryText
+        : (!facts.Pdb.FunctionName.empty() ? facts.Pdb.FunctionName : facts.Module.ModuleName);
+
+    AppendUltraPromptField(prompt, "fn", functionName, 80);
+    AppendUltraPromptField(prompt, "entry", HexU64(facts.EntryAddress), 24);
+    AppendUltraPromptField(prompt, "blocks", std::to_string(facts.Blocks.size()), 16);
+    AppendUltraPromptField(prompt, "insn", std::to_string(facts.Instructions.size()), 16);
+
+    if (!facts.Blocks.empty())
+    {
+        AppendUltraPromptField(prompt, "evidence_block", facts.Blocks.front().Id, 32);
+    }
+
+    std::string calls;
+    size_t callCount = 0;
+
+    for (const CallTargetInfo& call : facts.CallTargets)
+    {
+        if (call.DisplayName.empty())
+        {
+            continue;
+        }
+
+        if (!calls.empty())
+        {
+            calls += ",";
+        }
+
+        calls += MakeUltraPromptValue(call.DisplayName, 40);
+        ++callCount;
+
+        if (callCount >= 4)
+        {
+            break;
+        }
+    }
+
+    AppendUltraPromptField(prompt, "calls", calls, 180);
+
+    std::string deobf = facts.DeobfuscationReadiness.Enabled ? "on" : "off";
+    deobf += ",disp=" + std::to_string(facts.DeobfuscationReadiness.DispatcherCount);
+    deobf += ",edges=" + std::to_string(facts.DeobfuscationReadiness.RecoveredEdgeCount);
+    deobf += ",opaque=" + std::to_string(facts.DeobfuscationReadiness.OpaqueDeadEdgeCount);
+    deobf += ",subst=" + std::to_string(facts.DeobfuscationReadiness.SubstitutionIdiomCount);
+    AppendUltraPromptField(prompt, "deobf", deobf, 96);
+
+    if (!facts.Obfuscation.Dispatchers.empty())
+    {
+        const ObfuscationDispatcher& dispatcher = facts.Obfuscation.Dispatchers.front();
+        std::string dispatcherText = dispatcher.Kind;
+        dispatcherText += ",state=" + dispatcher.StateVariable;
+        dispatcherText += ",header=" + dispatcher.HeaderBlock;
+        AppendUltraPromptField(prompt, "dispatcher", dispatcherText, 120);
+
+        std::string edges;
+        size_t edgeCount = 0;
+
+        for (const RecoveredControlFlowEdge& edge : dispatcher.RecoveredEdges)
+        {
+            if (edge.SourceBlock.empty() || edge.TargetBlock.empty())
+            {
+                continue;
+            }
+
+            if (!edges.empty())
+            {
+                edges += ",";
+            }
+
+            edges += edge.SourceBlock;
+            edges += ">";
+            edges += edge.TargetBlock;
+            ++edgeCount;
+
+            if (edgeCount >= 4)
+            {
+                break;
+            }
+        }
+
+        AppendUltraPromptField(prompt, "edges", edges, 160);
+    }
+
+    if (!facts.Obfuscation.OpaquePredicates.empty())
+    {
+        const OpaquePredicateFact& predicate = facts.Obfuscation.OpaquePredicates.front();
+        std::string opaque = predicate.BlockId;
+        opaque += ":dead=" + predicate.DeadTargetBlock;
+        opaque += ",live=" + predicate.LiveTargetBlock;
+        AppendUltraPromptField(prompt, "opaque", opaque, 120);
+    }
+
+    prompt += "Return tiny conservative pseudocode; prefer uncertainty over detail.";
+    return prompt;
+}
+
+bool SubmitTokenPressureJsonWithReducedRetry(
+    const LlmClientConfig& config,
+    const std::string& systemPrompt,
+    const std::string& userPrompt,
+    uint32_t completionBudget,
+    const std::string& logPrefix,
+    std::string& modelJson,
+    std::string& error,
+    bool& outputTruncated,
+    uint32_t& activeCompletionBudget)
+{
+    activeCompletionBudget = completionBudget;
+    outputTruncated = false;
+
+    bool submitted = SubmitChatJsonAttempt(
+        config,
+        systemPrompt,
+        userPrompt,
+        completionBudget,
+        modelJson,
+        error,
+        outputTruncated);
+
+    if (!submitted && !outputTruncated)
+    {
+        uint32_t reducedBudget = 0;
+
+        if (ShouldRetryWithReducedCompletionBudget(error, completionBudget, reducedBudget))
+        {
+            std::string retryError;
+            bool retryTruncated = false;
+
+            LogVerbose(
+                config,
+                logPrefix + " retrying with reduced token budget retry_budget=" + std::to_string(reducedBudget)
+                    + " first_error=" + BuildPreviewText(error));
+            LogProgress(config, logPrefix + " retrying with smaller completion budget");
+
+            submitted = SubmitChatJsonAttempt(
+                config,
+                systemPrompt,
+                userPrompt,
+                reducedBudget,
+                modelJson,
+                retryError,
+                retryTruncated);
+            activeCompletionBudget = reducedBudget;
+            outputTruncated = retryTruncated;
+
+            if (!submitted)
+            {
+                error = retryError;
+            }
+            else
+            {
+                if (retryTruncated)
+                {
+                    error = "model output was truncated at reduced compact budget";
+                }
+                else
+                {
+                    error.clear();
+                }
+            }
+        }
+    }
+
+    return submitted && !outputTruncated;
+}
+
+bool AnalyzeWithTokenPressureUltraCompactLlm(
+    const AnalyzeRequest& request,
+    const LlmClientConfig& config,
+    const std::string& previousError,
+    AnalyzeResponse& response,
+    std::string& error)
+{
+    std::string modelJson;
+    const std::string systemPrompt = BuildTokenPressureUltraCompactSystemPrompt();
+    const std::string userPrompt = BuildTokenPressureUltraCompactUserPrompt(request);
+    const uint32_t completionBudget = ChooseUltraCompactCompletionBudget(config, previousError);
+    uint32_t activeCompletionBudget = completionBudget;
+    bool outputTruncated = false;
+
+    LogVerbose(
+        config,
+        "token-pressure ultra-compact LLM prompts built system_chars=" + std::to_string(systemPrompt.size())
+            + " user_chars=" + std::to_string(userPrompt.size())
+            + " completion_budget=" + std::to_string(completionBudget));
+    LogProgress(config, "LLM token-pressure ultra-compact fallback started");
+
+    if (!SubmitTokenPressureJsonWithReducedRetry(
+            config,
+            systemPrompt,
+            userPrompt,
+            completionBudget,
+            "token-pressure ultra-compact",
+            modelJson,
+            error,
+            outputTruncated,
+            activeCompletionBudget))
+    {
+        if (!outputTruncated || modelJson.empty())
+        {
+            error = outputTruncated
+                ? "token-pressure ultra-compact analysis failed: model output was truncated at budget " + std::to_string(activeCompletionBudget)
+                : "token-pressure ultra-compact analysis failed: " + error;
+            return false;
+        }
+    }
+
+    std::string parseError;
+    bool repairedUltraJson = false;
+
+    if (!ParseAnalyzeResponse(modelJson, response, parseError))
+    {
+        std::string repairedJson;
+        std::string repairError;
+
+        if (!TryRepairTruncatedChunkJson(modelJson, repairedJson, repairError)
+            || !ParseAnalyzeResponse(repairedJson, response, parseError))
+        {
+            error = "token-pressure ultra-compact parse failed: " + parseError + "; repair_error=" + repairError + "; preview: " + BuildPreviewText(modelJson);
+            return false;
+        }
+
+        modelJson = repairedJson;
+        repairedUltraJson = true;
+    }
+
+    ApplyResponseGroundingPolicy(request, response);
+    VerifyResponse(request, response);
+    response.Provider = "openai-compatible-direct-ultra-compact";
+    response.RawModelJson = modelJson;
+    response.Status = response.Status.empty() ? "ok" : response.Status;
+    response.Uncertainties.push_back("token-pressure ultra-compact fallback was used after compact prompt limits: " + BuildPreviewText(previousError));
+
+    if (outputTruncated)
+    {
+        response.Uncertainties.push_back("token-pressure ultra-compact provider flagged the output as truncated");
+    }
+
+    if (repairedUltraJson)
+    {
+        response.Uncertainties.push_back("token-pressure ultra-compact JSON was repaired after truncation");
+    }
+
+    return true;
+}
+
+bool AnalyzeWithTokenPressureCompactLlm(
+    const AnalyzeRequest& request,
+    const LlmClientConfig& config,
+    const std::string& previousError,
+    AnalyzeResponse& response,
+    std::string& error)
+{
+    if (IsProviderCreditExhaustedError(previousError))
+    {
+        LogVerbose(config, "provider credit exhausted; using deterministic token-pressure fallback without compact retry");
+        response = BuildTokenPressureDeterministicResponse(request, previousError);
+        return true;
+    }
+
+    std::string modelJson;
+    const std::string systemPrompt = BuildTokenPressureSystemPrompt(request);
+    const std::string userPrompt = BuildTokenPressureUserPrompt(request);
+    const uint32_t completionBudget = ChooseTokenPressureCompletionBudget(config, previousError);
+    LogVerbose(
+        config,
+        "token-pressure compact LLM prompts built system_chars=" + std::to_string(systemPrompt.size())
+            + " user_chars=" + std::to_string(userPrompt.size())
+            + " completion_budget=" + std::to_string(completionBudget));
+    LogProgress(config, "LLM token-pressure compact fallback started");
+
+    bool outputTruncated = false;
+    uint32_t activeCompletionBudget = completionBudget;
+
+    if (!SubmitTokenPressureJsonWithReducedRetry(
+            config,
+            systemPrompt,
+            userPrompt,
+            completionBudget,
+            "token-pressure compact",
+            modelJson,
+            error,
+            outputTruncated,
+            activeCompletionBudget))
+    {
+        const std::string compactSubmitError = outputTruncated
+            ? "token-pressure compact analysis failed: model output was truncated at compact budget " + std::to_string(activeCompletionBudget)
+            : "token-pressure compact analysis failed: " + error;
+
+        if (IsProviderCreditExhaustedError(compactSubmitError))
+        {
+            response = BuildTokenPressureDeterministicResponse(request, compactSubmitError);
+            return true;
+        }
+
+        std::string ultraError;
+
+        if (AnalyzeWithTokenPressureUltraCompactLlm(request, config, compactSubmitError, response, ultraError))
+        {
+            return true;
+        }
+
+        error = compactSubmitError + "; " + ultraError;
+        response = BuildTokenPressureDeterministicResponse(request, error);
+        return true;
+    }
+
+    if (!ParseAndMaybeRetryWithVerifier(
+            request,
+            config,
+            systemPrompt,
+            userPrompt,
+            activeCompletionBudget,
+            activeCompletionBudget,
+            modelJson,
+            "openai-compatible-direct-compact",
+            nullptr,
+            response,
+            error))
+    {
+        const std::string compactParseError = error;
+        std::string ultraError;
+
+        if (AnalyzeWithTokenPressureUltraCompactLlm(request, config, compactParseError, response, ultraError))
+        {
+            return true;
+        }
+
+        error = compactParseError + "; " + ultraError;
+        response = BuildTokenPressureDeterministicResponse(request, error);
+        return true;
+    }
+
+    response.Uncertainties.push_back("token-pressure compact fallback was used after provider prompt/token limits: " + BuildPreviewText(previousError));
+    return true;
+}
+
 bool AnalyzeWithLlm(
     const AnalyzeRequest& request,
     const LlmClientConfig& config,
@@ -4314,12 +5238,56 @@ bool AnalyzeWithLlm(
             return true;
         }
 
+        if (ShouldSkipSinglePassAfterChunkedFailure(chunkedError))
+        {
+            LogVerbose(config, "chunked LLM path failed with provider credit exhaustion; using deterministic fallback before single-pass");
+            response = BuildTokenPressureDeterministicResponse(request, chunkedError);
+            response.Uncertainties.push_back("chunked analysis hit provider credit exhaustion before single-pass fallback");
+            return true;
+        }
+
         LogVerbose(config, "chunked LLM path failed; falling back to single-pass: " + BuildPreviewText(chunkedError));
         if (AnalyzeWithSinglePassLlm(request, config, response, error))
         {
             response.Provider = "openai-compatible-direct-fallback";
             response.Uncertainties.push_back("chunked analysis failed and single-pass fallback was used: " + BuildPreviewText(chunkedError));
             return true;
+        }
+
+        const std::string singlePassError = error;
+
+        if (IsProviderTokenPressureError(chunkedError) || IsProviderTokenPressureError(singlePassError))
+        {
+            std::string compactError;
+
+            if (AnalyzeWithTokenPressureCompactLlm(
+                    request,
+                    config,
+                    singlePassError.empty() ? chunkedError : singlePassError,
+                    response,
+                    compactError))
+            {
+                if (response.Provider != "deterministic-token-pressure-fallback")
+                {
+                    if (response.Provider.empty())
+                    {
+                        response.Provider = "openai-compatible-direct-compact-fallback";
+                    }
+                    else
+                    {
+                        if (!EndsWithInsensitive(response.Provider, "-fallback"))
+                        {
+                            response.Provider += "-fallback";
+                        }
+                    }
+                }
+
+                response.Uncertainties.push_back("chunked and single-pass analysis hit provider token pressure before compact fallback");
+                return true;
+            }
+
+            error = compactError;
+            return false;
         }
 
         if (error.empty())
@@ -4331,7 +5299,24 @@ bool AnalyzeWithLlm(
     }
 
     LogVerbose(config, "choosing single-pass LLM path");
-    return AnalyzeWithSinglePassLlm(request, config, response, error);
+    if (AnalyzeWithSinglePassLlm(request, config, response, error))
+    {
+        return true;
+    }
+
+    if (IsProviderTokenPressureError(error))
+    {
+        std::string compactError;
+
+        if (AnalyzeWithTokenPressureCompactLlm(request, config, error, response, compactError))
+        {
+            return true;
+        }
+
+        error = compactError;
+    }
+
+    return false;
 }
 
 std::string BuildDebugPromptDump(const AnalyzeRequest& request)
@@ -4409,6 +5394,19 @@ std::string BuildDebugMergePromptDump(
     return dump;
 }
 
+std::string BuildDebugTokenPressureCompactPromptDump(const AnalyzeRequest& request)
+{
+    std::string dump;
+    dump += "token_pressure_system_prompt:\n";
+    dump += BuildTokenPressureSystemPrompt(request);
+    dump += "\n\ntoken_pressure_user_prompt:\n";
+    dump += BuildTokenPressureUserPrompt(request);
+    dump += "\n\ntoken_pressure_facts_json:\n";
+    dump += SerializeJson(BuildTokenPressureFactsJson(request), true);
+    dump += "\n";
+    return dump;
+}
+
 std::string BuildDebugVerifierFeedbackPrompt(const VerifyReport& report)
 {
     return BuildVerifierFeedbackPrompt(report);
@@ -4432,6 +5430,44 @@ bool DebugParseChunkAnalysisJson(
     return true;
 }
 
+bool DebugExtractAffordableCompletionTokenBudget(
+    const std::string& providerError,
+    uint32_t& budget)
+{
+    const std::optional<uint32_t> parsed = ExtractAffordableCompletionTokenBudget(providerError);
+
+    if (!parsed.has_value())
+    {
+        budget = 0;
+        return false;
+    }
+
+    budget = parsed.value();
+    return true;
+}
+
+bool DebugIsProviderTokenPressureError(const std::string& providerError)
+{
+    return IsProviderTokenPressureError(providerError);
+}
+
+bool DebugIsProviderCreditExhaustedError(const std::string& providerError)
+{
+    return IsProviderCreditExhaustedError(providerError);
+}
+
+bool DebugShouldSkipSinglePassAfterChunkedFailure(const std::string& chunkedError)
+{
+    return ShouldSkipSinglePassAfterChunkedFailure(chunkedError);
+}
+
+uint32_t DebugChooseTokenPressureCompletionBudget(
+    const LlmClientConfig& config,
+    const std::string& providerError)
+{
+    return ChooseTokenPressureCompletionBudget(config, providerError);
+}
+
 void ApplyDebugMergeOutputPolicy(
     const AnalyzeRequest& request,
     const LlmClientConfig& config,
@@ -4449,5 +5485,13 @@ void ApplyDebugMergeOutputPolicy(
     const MergeOutputPostPolicy policy = BuildMergeOutputPostPolicy(request, chunkPlans, chunkAnalyses);
     VerifyResponse(request, response);
     ApplyMergeOutputPostPolicy(policy, response);
+}
+
+void ApplyDebugResponseGroundingPolicy(
+    const AnalyzeRequest& request,
+    AnalyzeResponse& response)
+{
+    ApplyResponseGroundingPolicy(request, response);
+    VerifyResponse(request, response);
 }
 }

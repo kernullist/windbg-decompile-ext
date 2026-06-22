@@ -232,12 +232,21 @@ std::string BuildAnalyzerSkeletonPseudoC(const AnalyzeRequest& request)
         }
 
         text += " result="
-            + predicate.ConstantResult
-            + " live="
-            + predicate.LiveTargetBlock
-            + " dead="
-            + predicate.DeadTargetBlock
-            + " */\n";
+            + predicate.ConstantResult;
+
+        if (!predicate.LiveTargetBlock.empty() || !predicate.DeadTargetBlock.empty())
+        {
+            text += " live="
+                + predicate.LiveTargetBlock
+                + " dead="
+                + predicate.DeadTargetBlock;
+        }
+        else
+        {
+            text += " constant_return=true";
+        }
+
+        text += " */\n";
     }
 
     for (size_t index = 0; index < request.Facts.Obfuscation.SubstitutionIdioms.size() && index < 6; ++index)
@@ -2286,7 +2295,7 @@ JsonValue BuildObfuscationJson(
     object.Set("scope", JsonValue::MakeString(blockIds == nullptr ? "function" : "chunk"));
     object.Set(
         "usage_guidance",
-        JsonValue::MakeString("Prefer high-confidence recovered_edges over raw dispatcher loop edges; use opaque_predicates only for proven dead edges; use substitution_idioms only as local simplification evidence; preserve uncertainty for unresolved state transitions."));
+        JsonValue::MakeString("Prefer high-confidence recovered_edges over raw dispatcher loop edges; use opaque_predicates for proven dead edges or proven constant-return predicate bits; use substitution_idioms only as local simplification evidence; preserve uncertainty for unresolved state transitions."));
 
     if (truncated != nullptr)
     {

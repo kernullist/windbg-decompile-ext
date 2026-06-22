@@ -4957,6 +4957,7 @@ using PendingStackArgumentMap = std::map<uint32_t, PendingStackArgument>;
 struct CallArgumentFlowState
 {
     StringMap Registers;
+    StringMap RegisterCopies;
     PendingStackArgumentMap PendingStackArguments;
 };
 
@@ -5000,7 +5001,37 @@ bool PendingStackArgumentMapsEqual(const PendingStackArgumentMap& left, const Pe
 bool CallArgumentFlowStatesEqual(const CallArgumentFlowState& left, const CallArgumentFlowState& right)
 {
     return StringMapsEqual(left.Registers, right.Registers)
+        && StringMapsEqual(left.RegisterCopies, right.RegisterCopies)
         && PendingStackArgumentMapsEqual(left.PendingStackArguments, right.PendingStackArguments);
+}
+
+StringMap MergeIdenticalStringMaps(const std::vector<StringMap>& incoming)
+{
+    if (incoming.empty())
+    {
+        return {};
+    }
+
+    StringMap merged = incoming.front();
+
+    for (size_t index = 1; index < incoming.size(); ++index)
+    {
+        for (auto it = merged.begin(); it != merged.end();)
+        {
+            const auto nextIt = incoming[index].find(it->first);
+
+            if (nextIt == incoming[index].end() || nextIt->second != it->second)
+            {
+                it = merged.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+
+    return merged;
 }
 
 PendingStackArgumentMap MergePendingStackArgumentMaps(const std::vector<PendingStackArgumentMap>& incoming)
@@ -5042,33 +5073,18 @@ CallArgumentFlowState MergeCallArgumentFlowStates(const std::vector<CallArgument
     }
 
     std::vector<StringMap> registers;
+    std::vector<StringMap> registerCopies;
     std::vector<PendingStackArgumentMap> pendingStackArguments;
 
     for (const CallArgumentFlowState& state : incoming)
     {
         registers.push_back(state.Registers);
+        registerCopies.push_back(state.RegisterCopies);
         pendingStackArguments.push_back(state.PendingStackArguments);
     }
 
-    merged.Registers = registers.front();
-
-    for (size_t index = 1; index < registers.size(); ++index)
-    {
-        for (auto it = merged.Registers.begin(); it != merged.Registers.end();)
-        {
-            const auto nextIt = registers[index].find(it->first);
-
-            if (nextIt == registers[index].end() || nextIt->second != it->second)
-            {
-                it = merged.Registers.erase(it);
-            }
-            else
-            {
-                ++it;
-            }
-        }
-    }
-
+    merged.Registers = MergeIdenticalStringMaps(registers);
+    merged.RegisterCopies = MergeIdenticalStringMaps(registerCopies);
     merged.PendingStackArguments = MergePendingStackArgumentMaps(pendingStackArguments);
     return merged;
 }
@@ -5146,6 +5162,217 @@ std::vector<CallArgumentFact> CollectCallArgumentFacts(
         return MergeCallArgumentFlowStates(incoming);
     };
 
+    auto bareRegisterOperand = [](const std::string& operand) -> std::string
+    {
+        if (operand.find('[') != std::string::npos)
+        {
+            return std::string();
+        }
+
+        const std::string stripped = StripPointerDecorators(operand);
+        const std::string canonical = NormalizeRegisterAlias(stripped);
+        return IsRegisterName(canonical) ? canonical : std::string();
+    };
+
+    auto rewriteOperandWithCallState = [&](
+        const std::string& operand,
+        const std::vector<const MemoryAccess*>& operandAccesses,
+        const CallArgumentFlowState& state) -> std::string
+    {
+        const std::string sourceRegister = bareRegisterOperand(operand);
+
+        if (!sourceRegister.empty())
+        {
+            const auto stateIt = state.Registers.find(sourceRegister);
+
+            if (stateIt != state.Registers.end() && !stateIt->second.empty())
+            {
+                return stateIt->second;
+            }
+        }
+
+        return RewriteOperandWithRecoveredNames(operand, operandAccesses, argumentRegisterMap, localKeyNameMap);
+    };
+
+    auto describeAssignmentValueWithCallState = [&](
+        const DisassembledInstruction& instruction,
+        const std::vector<std::string>& operands,
+        const std::vector<const MemoryAccess*>& operandAccesses,
+        const CallArgumentFlowState& state) -> std::string
+    {
+        const std::string mnemonic = ToLowerAscii(instruction.Mnemonic);
+
+        if (mnemonic == "xor" && operands.size() >= 2)
+        {
+            const std::string left = StripPointerDecorators(operands[0]);
+            const std::string right = StripPointerDecorators(operands[1]);
+
+            if (!left.empty() && left == right)
+            {
+                if (!IsWholeRegisterZeroIdiomOperand(operands[0]))
+                {
+                    const std::string destinationRegister = NormalizeRegisterAlias(FirstRegisterTokenRaw(operands[0]));
+                    return "merge_partial(" + destinationRegister + ", 0)";
+                }
+
+                return "0";
+            }
+        }
+
+        if (instruction.IsCall)
+        {
+            return "call_result";
+        }
+
+        if (StartsWithInsensitive(mnemonic, "set"))
+        {
+            return mnemonic + "_result";
+        }
+
+        if (operands.size() >= 2)
+        {
+            const std::string left = rewriteOperandWithCallState(operands[0], operandAccesses, state);
+            const std::string right = rewriteOperandWithCallState(operands[1], operandAccesses, state);
+
+            if (mnemonic == "mov")
+            {
+                if (IsPartialRegisterWriteOperand(operands[0]))
+                {
+                    const std::string destinationRegister = NormalizeRegisterAlias(FirstRegisterTokenRaw(operands[0]));
+                    return "merge_partial(" + destinationRegister + ", " + right + ")";
+                }
+
+                return right;
+            }
+
+            if (mnemonic == "movzx" || mnemonic == "movsx" || mnemonic == "movsxd")
+            {
+                return right;
+            }
+
+            if (mnemonic == "lea")
+            {
+                return "&" + right;
+            }
+
+            if (mnemonic == "imul" && operands.size() >= 3)
+            {
+                const std::string middle = rewriteOperandWithCallState(operands[1], operandAccesses, state);
+                const std::string last = rewriteOperandWithCallState(operands[2], operandAccesses, state);
+                return middle + " * " + last;
+            }
+
+            if (mnemonic == "add")
+            {
+                return left + " + " + right;
+            }
+
+            if (mnemonic == "sub")
+            {
+                return left + " - " + right;
+            }
+
+            if (mnemonic == "and")
+            {
+                return left + " & " + right;
+            }
+
+            if (mnemonic == "or")
+            {
+                return left + " | " + right;
+            }
+
+            if (mnemonic == "shl")
+            {
+                return left + " << " + right;
+            }
+
+            if (mnemonic == "shr")
+            {
+                return left + " >> " + right;
+            }
+
+            if (mnemonic == "imul")
+            {
+                return left + " * " + right;
+            }
+        }
+
+        if (!operands.empty())
+        {
+            const std::string operand = rewriteOperandWithCallState(operands[0], operandAccesses, state);
+
+            if (mnemonic == "inc")
+            {
+                return operand + " + 1";
+            }
+
+            if (mnemonic == "dec")
+            {
+                return operand + " - 1";
+            }
+
+            if (mnemonic == "neg")
+            {
+                return "-" + operand;
+            }
+        }
+
+        return mnemonic;
+    };
+
+    auto clearRegisterCopyLinks = [](CallArgumentFlowState& state, const std::string& reg)
+    {
+        state.RegisterCopies.erase(reg);
+
+        for (auto copyIt = state.RegisterCopies.begin(); copyIt != state.RegisterCopies.end();)
+        {
+            if (copyIt->second == reg)
+            {
+                copyIt = state.RegisterCopies.erase(copyIt);
+            }
+            else
+            {
+                ++copyIt;
+            }
+        }
+    };
+
+    auto isForwardedToLowerArgumentRegister = [](
+        const CallArgumentFlowState& state,
+        const std::string& reg,
+        uint32_t ordinal) -> bool
+    {
+        const auto sourceIt = state.Registers.find(reg);
+
+        if (sourceIt == state.Registers.end() || sourceIt->second.empty())
+        {
+            return false;
+        }
+
+        for (const CallArgumentRegisterSlot& lowerSlot : argumentRegisters)
+        {
+            if (lowerSlot.Ordinal >= ordinal)
+            {
+                continue;
+            }
+
+            const std::string lowerReg = lowerSlot.Register;
+            const auto copyIt = state.RegisterCopies.find(lowerReg);
+            const auto lowerStateIt = state.Registers.find(lowerReg);
+
+            if (copyIt != state.RegisterCopies.end()
+                && copyIt->second == reg
+                && lowerStateIt != state.Registers.end()
+                && lowerStateIt->second == sourceIt->second)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    };
+
     auto transferBlock = [&](
         const BasicBlock& block,
         CallArgumentFlowState state,
@@ -5177,6 +5404,11 @@ std::vector<CallArgumentFact> CollectCallArgumentFacts(
                         const auto stateIt = state.Registers.find(reg);
 
                         if (stateIt == state.Registers.end() || stateIt->second.empty())
+                        {
+                            continue;
+                        }
+
+                        if (isForwardedToLowerArgumentRegister(state, reg, argumentSlot.Ordinal))
                         {
                             continue;
                         }
@@ -5216,11 +5448,13 @@ std::vector<CallArgumentFact> CollectCallArgumentFacts(
                 for (const char* reg : VolatileIntegerRegisters())
                 {
                     state.Registers.erase(reg);
+                    clearRegisterCopyLinks(state, reg);
                 }
 
                 for (const char* reg : VolatileVectorRegisters())
                 {
                     state.Registers.erase(reg);
+                    clearRegisterCopyLinks(state, reg);
                 }
 
                 continue;
@@ -5233,7 +5467,7 @@ std::vector<CallArgumentFact> CollectCallArgumentFacts(
                 state.PendingStackArguments.clear();
             }
 
-            const std::string value = DescribeAssignmentValue(instruction, operands, accesses, argumentRegisterMap, localKeyNameMap);
+            const std::string value = describeAssignmentValueWithCallState(instruction, operands, accesses, state);
 
             for (const CallArgumentRegisterSlot& argumentSlot : argumentRegisters)
             {
@@ -5241,7 +5475,21 @@ std::vector<CallArgumentFact> CollectCallArgumentFacts(
 
                 if (InstructionWritesRegister(instruction, operands, canonicalRegister))
                 {
+                    clearRegisterCopyLinks(state, canonicalRegister);
                     state.Registers[canonicalRegister] = value;
+
+                    if ((mnemonic == "mov" || mnemonic == "movzx" || mnemonic == "movsx" || mnemonic == "movsxd")
+                        && operands.size() >= 2)
+                    {
+                        const std::string sourceRegister = bareRegisterOperand(operands[1]);
+
+                        if (!sourceRegister.empty()
+                            && sourceRegister != canonicalRegister
+                            && state.Registers.find(sourceRegister) != state.Registers.end())
+                        {
+                            state.RegisterCopies[canonicalRegister] = sourceRegister;
+                        }
+                    }
                 }
             }
 
@@ -5878,6 +6126,147 @@ std::string NormalizeStateVariableExpression(const std::string& expression)
     return canonical.empty() ? stripped : canonical;
 }
 
+bool IsLikelyObfuscationStateAlias(const std::string& value)
+{
+    const std::string trimmed = TrimCopy(value);
+    uint64_t ignored = 0;
+
+    if (trimmed.empty()
+        || IsRegisterName(trimmed)
+        || TryParseUnsigned(trimmed, ignored))
+    {
+        return false;
+    }
+
+    return trimmed.find("slot_") == 0
+        || trimmed.find("local_") == 0
+        || trimmed.find('[') != std::string::npos;
+}
+
+const BlockValueState* FindBlockValueStateById(
+    const std::vector<BlockValueState>* blockValueStates,
+    const std::string& blockId)
+{
+    if (blockValueStates == nullptr)
+    {
+        return nullptr;
+    }
+
+    for (const BlockValueState& state : *blockValueStates)
+    {
+        if (state.BlockId == blockId)
+        {
+            return &state;
+        }
+    }
+
+    return nullptr;
+}
+
+void AppendObfuscationAliasCandidates(
+    std::vector<std::string>& variables,
+    const std::vector<ReachingValue>& values,
+    const std::string& operand)
+{
+    const std::string operandRegister = NormalizeRegisterAlias(FirstRegisterTokenRaw(operand));
+
+    if (operandRegister.empty())
+    {
+        return;
+    }
+
+    for (const ReachingValue& value : values)
+    {
+        const std::string valueRegister = NormalizeRegisterAlias(FirstRegisterTokenRaw(value.Name));
+
+        if (valueRegister != operandRegister)
+        {
+            continue;
+        }
+
+        const std::string alias = NormalizeStateVariableExpression(value.Canonical);
+
+        if (IsLikelyObfuscationStateAlias(alias)
+            && std::find(variables.begin(), variables.end(), alias) == variables.end())
+        {
+            variables.push_back(alias);
+        }
+    }
+}
+
+void AppendBlockStateAliasCandidates(
+    std::vector<std::string>& variables,
+    const std::vector<BlockValueState>* blockValueStates,
+    const std::string& blockId,
+    const std::string& operand)
+{
+    const BlockValueState* state = FindBlockValueStateById(blockValueStates, blockId);
+
+    if (state == nullptr)
+    {
+        return;
+    }
+
+    AppendObfuscationAliasCandidates(variables, state->LiveIn, operand);
+    AppendObfuscationAliasCandidates(variables, state->LiveOut, operand);
+}
+
+bool OperandAliasesObfuscationVariableInBlock(
+    const std::vector<BlockValueState>* blockValueStates,
+    const std::string& blockId,
+    const std::string& operand,
+    const std::string& variable)
+{
+    if (OperandMatchesObfuscationVariable(operand, variable))
+    {
+        return true;
+    }
+
+    const BlockValueState* state = FindBlockValueStateById(blockValueStates, blockId);
+
+    if (state == nullptr)
+    {
+        return false;
+    }
+
+    const std::string operandRegister = NormalizeRegisterAlias(FirstRegisterTokenRaw(operand));
+
+    if (operandRegister.empty())
+    {
+        return false;
+    }
+
+    const auto matchesAlias = [&operandRegister, &variable](const ReachingValue& value)
+    {
+        const std::string valueRegister = NormalizeRegisterAlias(FirstRegisterTokenRaw(value.Name));
+        return valueRegister == operandRegister
+            && OperandMatchesObfuscationVariable(value.Canonical, variable);
+    };
+
+    return std::find_if(state->LiveIn.begin(), state->LiveIn.end(), matchesAlias) != state->LiveIn.end()
+        || std::find_if(state->LiveOut.begin(), state->LiveOut.end(), matchesAlias) != state->LiveOut.end();
+}
+
+std::string NormalizeStateCompareValue(const std::string& expression)
+{
+    std::string normalized;
+
+    if (TryNormalizeStateValue(expression, normalized))
+    {
+        return normalized;
+    }
+
+    const std::string stripped = StripPointerDecorators(expression);
+    const std::string canonical = NormalizeRegisterAlias(stripped);
+
+    if (!canonical.empty())
+    {
+        return canonical;
+    }
+
+    return NormalizeStateVariableExpression(stripped);
+}
+
 std::string FormatConditionOperand(const std::string& operand)
 {
     const std::string stripped = StripPointerDecorators(operand);
@@ -5906,7 +6295,8 @@ std::vector<const DisassembledInstruction*> GetBlockInstructions(
 
 std::vector<std::string> CollectStateCompareVariables(
     const BasicBlock& block,
-    const std::vector<DisassembledInstruction>& instructions)
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::vector<BlockValueState>* blockValueStates)
 {
     std::vector<std::string> variables;
 
@@ -5931,12 +6321,32 @@ std::vector<std::string> CollectStateCompareVariables(
             const std::string operand = StripPointerDecorators(operands[0]);
             const std::string canonical = NormalizeRegisterAlias(operand);
             variables.push_back(canonical.empty() ? operand : canonical);
+            AppendBlockStateAliasCandidates(variables, blockValueStates, block.Id, operands[0]);
         }
         else if (TryNormalizeStateValue(operands[0], ignored))
         {
             const std::string operand = StripPointerDecorators(operands[1]);
             const std::string canonical = NormalizeRegisterAlias(operand);
             variables.push_back(canonical.empty() ? operand : canonical);
+            AppendBlockStateAliasCandidates(variables, blockValueStates, block.Id, operands[1]);
+        }
+        else
+        {
+            const std::string left = NormalizeStateCompareValue(operands[0]);
+            const std::string right = NormalizeStateCompareValue(operands[1]);
+
+            if (!left.empty() && !right.empty())
+            {
+                const std::string leftOperand = StripPointerDecorators(operands[0]);
+                const std::string leftCanonical = NormalizeRegisterAlias(leftOperand);
+                variables.push_back(leftCanonical.empty() ? leftOperand : leftCanonical);
+                AppendBlockStateAliasCandidates(variables, blockValueStates, block.Id, operands[0]);
+
+                const std::string rightOperand = StripPointerDecorators(operands[1]);
+                const std::string rightCanonical = NormalizeRegisterAlias(rightOperand);
+                variables.push_back(rightCanonical.empty() ? rightOperand : rightCanonical);
+                AppendBlockStateAliasCandidates(variables, blockValueStates, block.Id, operands[1]);
+            }
         }
     }
 
@@ -6022,6 +6432,7 @@ void AppendUniqueStrings(std::vector<std::string>& destination, const std::vecto
 bool TryExtractStateCompareConstant(
     const BasicBlock& block,
     const std::vector<DisassembledInstruction>& instructions,
+    const std::vector<BlockValueState>* blockValueStates,
     const std::string& stateVariable,
     std::string& stateValue)
 {
@@ -6039,31 +6450,41 @@ bool TryExtractStateCompareConstant(
             continue;
         }
 
-        if (OperandMatchesObfuscationVariable(operands[0], stateVariable)
-            && TryNormalizeStateValue(operands[1], stateValue))
+        if (OperandAliasesObfuscationVariableInBlock(blockValueStates, block.Id, operands[0], stateVariable))
         {
-            return true;
+            stateValue = NormalizeStateCompareValue(operands[1]);
+            return !stateValue.empty();
         }
 
-        if (OperandMatchesObfuscationVariable(operands[1], stateVariable)
-            && TryNormalizeStateValue(operands[0], stateValue))
+        if (OperandAliasesObfuscationVariableInBlock(blockValueStates, block.Id, operands[1], stateVariable))
         {
-            return true;
+            stateValue = NormalizeStateCompareValue(operands[0]);
+            return !stateValue.empty();
         }
     }
 
     return false;
 }
 
+bool TryExtractStateCompareConstant(
+    const BasicBlock& block,
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::string& stateVariable,
+    std::string& stateValue)
+{
+    return TryExtractStateCompareConstant(block, instructions, nullptr, stateVariable, stateValue);
+}
+
 bool BlockContainsStateCompare(
     const std::vector<BasicBlock>& blocks,
     const std::vector<DisassembledInstruction>& instructions,
+    const std::vector<BlockValueState>* blockValueStates,
     const std::string& blockId,
     const std::string& stateVariable)
 {
     const BasicBlock* block = FindBlockById(blocks, blockId);
     std::string ignored;
-    return block != nullptr && TryExtractStateCompareConstant(*block, instructions, stateVariable, ignored);
+    return block != nullptr && TryExtractStateCompareConstant(*block, instructions, blockValueStates, stateVariable, ignored);
 }
 
 uint64_t FindFirstAssignmentSite(
@@ -6156,6 +6577,7 @@ struct ObfuscationStateTarget
 std::unordered_map<std::string, ObfuscationStateTarget> BuildStateTargetMapForDispatcher(
     const std::vector<DisassembledInstruction>& instructions,
     const std::vector<BasicBlock>& blocks,
+    const std::vector<BlockValueState>* blockValueStates,
     const std::vector<NormalizedCondition>& conditions,
     const std::string& headerBlockId,
     const std::string& stateVariable,
@@ -6180,7 +6602,7 @@ std::unordered_map<std::string, ObfuscationStateTarget> BuildStateTargetMapForDi
 
         std::string stateValue;
 
-        if (!TryExtractStateCompareConstant(*block, instructions, stateVariable, stateValue))
+        if (!TryExtractStateCompareConstant(*block, instructions, blockValueStates, stateVariable, stateValue))
         {
             break;
         }
@@ -6222,7 +6644,7 @@ std::unordered_map<std::string, ObfuscationStateTarget> BuildStateTargetMapForDi
 
         if (nextDispatcher.empty()
             || dispatcherBlocks.find(nextDispatcher) != dispatcherBlocks.end()
-            || !BlockContainsStateCompare(blocks, instructions, nextDispatcher, stateVariable))
+            || !BlockContainsStateCompare(blocks, instructions, blockValueStates, nextDispatcher, stateVariable))
         {
             break;
         }
@@ -6231,6 +6653,104 @@ std::unordered_map<std::string, ObfuscationStateTarget> BuildStateTargetMapForDi
     }
 
     return targets;
+}
+
+std::string FindBranchFallthroughBlock(
+    const std::vector<BasicBlock>& blocks,
+    const BasicBlock& block,
+    const std::string& branchTargetBlock)
+{
+    for (const std::string& successor : block.Successors)
+    {
+        if (successor != branchTargetBlock)
+        {
+            return successor;
+        }
+    }
+
+    const uint64_t fallthroughAddress = block.EndAddress;
+    return FindBlockContainingAddress(blocks, fallthroughAddress);
+}
+
+void MergeCompareTreeStateTargetMapForDispatcher(
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::vector<BasicBlock>& blocks,
+    const std::vector<BlockValueState>* blockValueStates,
+    const std::string& stateVariable,
+    std::set<std::string>& dispatcherBlocks,
+    std::unordered_map<std::string, ObfuscationStateTarget>& targets)
+{
+    for (const BasicBlock& block : blocks)
+    {
+        std::string pendingStateValue;
+
+        for (const DisassembledInstruction* instruction : GetBlockInstructions(block, instructions))
+        {
+            if (instruction == nullptr)
+            {
+                continue;
+            }
+
+            const std::vector<std::string> operands = SplitOperands(instruction->OperandText);
+            const std::string mnemonic = ToLowerAscii(TrimCopy(instruction->Mnemonic));
+
+            if (mnemonic == "cmp" && operands.size() >= 2)
+            {
+                pendingStateValue.clear();
+
+                if (OperandAliasesObfuscationVariableInBlock(blockValueStates, block.Id, operands[0], stateVariable))
+                {
+                    pendingStateValue = NormalizeStateCompareValue(operands[1]);
+                }
+                else if (OperandAliasesObfuscationVariableInBlock(blockValueStates, block.Id, operands[1], stateVariable))
+                {
+                    pendingStateValue = NormalizeStateCompareValue(operands[0]);
+                }
+            }
+            else if (InstructionWritesFlags(*instruction) && !instruction->IsConditionalBranch)
+            {
+                pendingStateValue.clear();
+            }
+
+            if (!instruction->IsConditionalBranch || pendingStateValue.empty())
+            {
+                continue;
+            }
+
+            dispatcherBlocks.insert(block.Id);
+
+            const std::string branchTargetBlock = instruction->HasBranchTarget
+                ? FindBlockContainingAddress(blocks, instruction->BranchTarget)
+                : std::string();
+            const std::string fallthroughBlock = FindBranchFallthroughBlock(blocks, block, branchTargetBlock);
+            std::string caseTarget;
+
+            if (IsEqualityBranchMnemonic(mnemonic))
+            {
+                caseTarget = branchTargetBlock;
+            }
+            else if (IsInequalityBranchMnemonic(mnemonic))
+            {
+                caseTarget = fallthroughBlock;
+            }
+            else
+            {
+                continue;
+            }
+
+            if (caseTarget.empty() || targets.find(pendingStateValue) != targets.end())
+            {
+                continue;
+            }
+
+            ObfuscationStateTarget target;
+            target.TargetBlock = caseTarget;
+            target.Condition = stateVariable + " == " + pendingStateValue;
+            target.Evidence = block.Id + " compare-tree dispatches " + stateVariable + " value " + pendingStateValue;
+            target.Confidence = 0.74;
+            targets[pendingStateValue] = std::move(target);
+        }
+    }
 }
 
 bool MergeSwitchStateTargetMapForDispatcher(
@@ -6370,6 +6890,76 @@ struct EvaluatedStateTransition
     bool Conditional = false;
     double Confidence = 0.0;
 };
+
+std::vector<std::string> SplitTopLevelCommaList(const std::string& text)
+{
+    std::vector<std::string> parts;
+    std::string current;
+    int depth = 0;
+
+    for (const char ch : text)
+    {
+        if (ch == '(' || ch == '[')
+        {
+            ++depth;
+            current.push_back(ch);
+            continue;
+        }
+
+        if ((ch == ')' || ch == ']') && depth > 0)
+        {
+            --depth;
+            current.push_back(ch);
+            continue;
+        }
+
+        if (ch == ',' && depth == 0)
+        {
+            parts.push_back(TrimCopy(current));
+            current.clear();
+            continue;
+        }
+
+        current.push_back(ch);
+    }
+
+    if (!current.empty() || !parts.empty())
+    {
+        parts.push_back(TrimCopy(current));
+    }
+
+    return parts;
+}
+
+bool TryExtractSelectParts(
+    const std::string& expression,
+    std::string& condition,
+    std::string& trueValue,
+    std::string& falseValue)
+{
+    const std::string trimmed = TrimCopy(expression);
+    const std::string prefix = "select(";
+
+    if (trimmed.size() <= prefix.size()
+        || ToLowerAscii(trimmed.substr(0, prefix.size())) != prefix
+        || trimmed.back() != ')')
+    {
+        return false;
+    }
+
+    const std::string body = trimmed.substr(prefix.size(), trimmed.size() - prefix.size() - 1U);
+    const std::vector<std::string> parts = SplitTopLevelCommaList(body);
+
+    if (parts.size() != 3 || parts[1].empty() || parts[2].empty())
+    {
+        return false;
+    }
+
+    condition = parts[0];
+    trueValue = parts[1];
+    falseValue = parts[2];
+    return true;
+}
 
 std::string BuildStateEvalTargetName(const std::string& operand)
 {
@@ -6724,6 +7314,58 @@ std::vector<EvaluatedStateTransition> EvaluateStateTransitionsInBlock(
     return {};
 }
 
+std::vector<EvaluatedStateTransition> EvaluateStateTransitionsFromIrValue(const IrValue& value)
+{
+    std::vector<EvaluatedStateTransition> transitions;
+    const std::string source = value.Canonical.empty() ? value.Expression : value.Canonical;
+    std::string condition;
+    std::string trueValue;
+    std::string falseValue;
+
+    if (TryExtractSelectParts(source, condition, trueValue, falseValue))
+    {
+        EvaluatedStateTransition trueTransition;
+        trueTransition.StateValue = NormalizeStateCompareValue(trueValue);
+        trueTransition.Condition = condition;
+        trueTransition.Evidence = HexU64(value.DefSite) + " stores selected state " + trueTransition.StateValue;
+        trueTransition.Conditional = true;
+        trueTransition.Confidence = Clamp01(0.70 + (value.Confidence * 0.20));
+
+        EvaluatedStateTransition falseTransition;
+        falseTransition.StateValue = NormalizeStateCompareValue(falseValue);
+        falseTransition.Condition = "!(" + condition + ")";
+        falseTransition.Evidence = HexU64(value.DefSite) + " stores retained state " + falseTransition.StateValue;
+        falseTransition.Conditional = true;
+        falseTransition.Confidence = Clamp01(0.68 + (value.Confidence * 0.20));
+
+        if (!trueTransition.StateValue.empty())
+        {
+            transitions.push_back(std::move(trueTransition));
+        }
+
+        if (!falseTransition.StateValue.empty())
+        {
+            transitions.push_back(std::move(falseTransition));
+        }
+
+        return transitions;
+    }
+
+    const std::string stateValue = NormalizeStateCompareValue(source);
+
+    if (!stateValue.empty())
+    {
+        EvaluatedStateTransition transition;
+        transition.StateValue = stateValue;
+        transition.Evidence = HexU64(value.DefSite) + " stores state " + stateValue;
+        transition.Conditional = false;
+        transition.Confidence = Clamp01(0.70 + (value.Confidence * 0.20));
+        transitions.push_back(std::move(transition));
+    }
+
+    return transitions;
+}
+
 struct OpaqueBranchProof
 {
     bool Proven = false;
@@ -6889,6 +7531,458 @@ bool TryBuildOpaqueBranchProof(
     return false;
 }
 
+enum class LowBitState
+{
+    Unknown,
+    Zero,
+    One
+};
+
+struct OpaqueParityValue
+{
+    LowBitState LowBit = LowBitState::Unknown;
+    bool ForcedOddByOrOne = false;
+    bool ProductOfOddValues = false;
+    bool OddProductMinusOdd = false;
+    bool InvertedOddProductMinusOdd = false;
+    bool MaskedToLowBit = false;
+    uint64_t FirstSite = 0;
+    uint64_t LastSite = 0;
+};
+
+struct OpaqueParityReturnFacts
+{
+    std::vector<OpaquePredicateFact> Predicates;
+    std::vector<SubstitutionIdiomFact> Substitutions;
+};
+
+OpaqueParityValue MakeUnknownParityValue()
+{
+    return OpaqueParityValue();
+}
+
+OpaqueParityValue MakeKnownParityValue(LowBitState lowBit, uint64_t site)
+{
+    OpaqueParityValue value;
+    value.LowBit = lowBit;
+    value.FirstSite = site;
+    value.LastSite = site;
+    return value;
+}
+
+bool IsKnownLowBit(LowBitState value)
+{
+    return value == LowBitState::Zero || value == LowBitState::One;
+}
+
+LowBitState FlipLowBit(LowBitState value)
+{
+    if (value == LowBitState::Zero)
+    {
+        return LowBitState::One;
+    }
+
+    if (value == LowBitState::One)
+    {
+        return LowBitState::Zero;
+    }
+
+    return LowBitState::Unknown;
+}
+
+LowBitState XorLowBit(LowBitState left, LowBitState right)
+{
+    if (!IsKnownLowBit(left) || !IsKnownLowBit(right))
+    {
+        return LowBitState::Unknown;
+    }
+
+    return left == right ? LowBitState::Zero : LowBitState::One;
+}
+
+LowBitState AndLowBit(LowBitState left, LowBitState right)
+{
+    if (left == LowBitState::Zero || right == LowBitState::Zero)
+    {
+        return LowBitState::Zero;
+    }
+
+    if (left == LowBitState::One && right == LowBitState::One)
+    {
+        return LowBitState::One;
+    }
+
+    return LowBitState::Unknown;
+}
+
+LowBitState OrLowBit(LowBitState left, LowBitState right)
+{
+    if (left == LowBitState::One || right == LowBitState::One)
+    {
+        return LowBitState::One;
+    }
+
+    if (left == LowBitState::Zero && right == LowBitState::Zero)
+    {
+        return LowBitState::Zero;
+    }
+
+    return LowBitState::Unknown;
+}
+
+std::string BuildParityStorageKey(const std::string& operand)
+{
+    const std::string stripped = StripPointerDecorators(operand);
+
+    if (stripped.empty())
+    {
+        return std::string();
+    }
+
+    if (stripped.find('[') != std::string::npos)
+    {
+        return "mem:" + stripped;
+    }
+
+    const std::string reg = NormalizeRegisterAlias(FirstRegisterTokenRaw(stripped));
+
+    if (!reg.empty() && IsRegisterName(reg))
+    {
+        return "reg:" + reg;
+    }
+
+    return std::string();
+}
+
+bool TryGetImmediateLowBit(const std::string& operand, LowBitState& lowBit)
+{
+    int64_t value = 0;
+
+    if (!TryParseSignedValue(StripPointerDecorators(operand), value))
+    {
+        return false;
+    }
+
+    lowBit = (value & 1) == 0 ? LowBitState::Zero : LowBitState::One;
+    return true;
+}
+
+OpaqueParityValue ReadOpaqueParityValue(
+    const std::unordered_map<std::string, OpaqueParityValue>& values,
+    const std::string& operand,
+    uint64_t site)
+{
+    LowBitState immediateLowBit = LowBitState::Unknown;
+
+    if (TryGetImmediateLowBit(operand, immediateLowBit))
+    {
+        return MakeKnownParityValue(immediateLowBit, site);
+    }
+
+    const std::string key = BuildParityStorageKey(operand);
+
+    if (key.empty())
+    {
+        return MakeUnknownParityValue();
+    }
+
+    const auto valueIt = values.find(key);
+    return valueIt == values.end() ? MakeUnknownParityValue() : valueIt->second;
+}
+
+void WriteOpaqueParityValue(
+    std::unordered_map<std::string, OpaqueParityValue>& values,
+    const std::string& operand,
+    const OpaqueParityValue& value)
+{
+    const std::string key = BuildParityStorageKey(operand);
+
+    if (!key.empty())
+    {
+        values[key] = value;
+    }
+}
+
+std::string FormatOpaqueParityExpression(bool inverted)
+{
+    if (inverted)
+    {
+        return "(~((odd_value * odd_value) - odd_value)) & 1";
+    }
+
+    return "((odd_value * odd_value) - odd_value) & 1";
+}
+
+void AppendOpaqueParityReturnFact(
+    OpaqueParityReturnFacts& facts,
+    const BasicBlock& block,
+    const DisassembledInstruction& ret,
+    const OpaqueParityValue& value)
+{
+    if (!value.MaskedToLowBit
+        || (!value.OddProductMinusOdd && !value.InvertedOddProductMinusOdd)
+        || !IsKnownLowBit(value.LowBit))
+    {
+        return;
+    }
+
+    const bool inverted = value.InvertedOddProductMinusOdd;
+    const std::string constant = value.LowBit == LowBitState::One ? "1" : "0";
+    const std::string expression = FormatOpaqueParityExpression(inverted);
+    const std::string evidence =
+        "odd_square_minus_self_return_low_bit; site_range="
+        + HexU64(value.FirstSite)
+        + ".."
+        + HexU64(ret.Address);
+
+    OpaquePredicateFact predicate;
+    predicate.Site = ret.Address;
+    predicate.BlockId = block.Id;
+    predicate.Predicate = "return_low_bit " + expression;
+    predicate.ConstantResult = constant;
+    predicate.Evidence = evidence;
+    predicate.Confidence = 0.92;
+    facts.Predicates.push_back(std::move(predicate));
+
+    SubstitutionIdiomFact substitution;
+    substitution.Site = ret.Address;
+    substitution.BlockId = block.Id;
+    substitution.OriginalExpression = expression;
+    substitution.SimplifiedExpression = constant;
+    substitution.Pattern = inverted
+        ? "odd_square_minus_self_parity_inverted"
+        : "odd_square_minus_self_parity";
+    substitution.Evidence = evidence;
+    substitution.Confidence = 0.91;
+    facts.Substitutions.push_back(std::move(substitution));
+}
+
+OpaqueParityReturnFacts AnalyzeOpaqueParityReturnFacts(
+    const std::vector<DisassembledInstruction>& instructions,
+    const std::vector<BasicBlock>& blocks)
+{
+    OpaqueParityReturnFacts facts;
+    std::set<std::string> seen;
+
+    for (const BasicBlock& block : blocks)
+    {
+        std::unordered_map<std::string, OpaqueParityValue> values;
+
+        for (const DisassembledInstruction* instruction : GetBlockInstructions(block, instructions))
+        {
+            if (instruction == nullptr)
+            {
+                continue;
+            }
+
+            const std::string mnemonic = ToLowerAscii(TrimCopy(instruction->Mnemonic));
+            const std::vector<std::string> operands = SplitOperands(instruction->OperandText);
+
+            if (instruction->IsReturn)
+            {
+                const OpaqueParityValue returnValue = ReadOpaqueParityValue(values, "rax", instruction->Address);
+                const size_t before = facts.Predicates.size();
+                AppendOpaqueParityReturnFact(facts, block, *instruction, returnValue);
+
+                if (facts.Predicates.size() != before)
+                {
+                    const OpaquePredicateFact& predicate = facts.Predicates.back();
+                    const std::string key = predicate.BlockId
+                        + "\n"
+                        + HexU64(predicate.Site)
+                        + "\n"
+                        + predicate.ConstantResult;
+
+                    if (!seen.insert(key).second)
+                    {
+                        facts.Predicates.pop_back();
+
+                        if (!facts.Substitutions.empty())
+                        {
+                            facts.Substitutions.pop_back();
+                        }
+                    }
+                }
+
+                continue;
+            }
+
+            if (instruction->IsCall)
+            {
+                values.erase("reg:rax");
+                values.erase("reg:rcx");
+                values.erase("reg:rdx");
+                values.erase("reg:r8");
+                values.erase("reg:r9");
+                values.erase("reg:r10");
+                values.erase("reg:r11");
+                continue;
+            }
+
+            if (operands.empty())
+            {
+                continue;
+            }
+
+            OpaqueParityValue result = MakeUnknownParityValue();
+            bool writesResult = false;
+
+            if ((mnemonic == "mov" || mnemonic == "movzx" || mnemonic == "movsx" || mnemonic == "movsxd")
+                && operands.size() >= 2)
+            {
+                result = ReadOpaqueParityValue(values, operands[1], instruction->Address);
+                writesResult = true;
+            }
+            else if (mnemonic == "xor" && operands.size() >= 2)
+            {
+                const std::string left = StripPointerDecorators(operands[0]);
+                const std::string right = StripPointerDecorators(operands[1]);
+
+                if (!left.empty() && left == right)
+                {
+                    result = MakeKnownParityValue(LowBitState::Zero, instruction->Address);
+                }
+                else
+                {
+                    const OpaqueParityValue leftValue = ReadOpaqueParityValue(values, operands[0], instruction->Address);
+                    const OpaqueParityValue rightValue = ReadOpaqueParityValue(values, operands[1], instruction->Address);
+                    result.LowBit = XorLowBit(leftValue.LowBit, rightValue.LowBit);
+                    result.FirstSite = leftValue.FirstSite != 0 ? leftValue.FirstSite : instruction->Address;
+                    result.LastSite = instruction->Address;
+                }
+
+                writesResult = true;
+            }
+            else if ((mnemonic == "add" || mnemonic == "sub") && operands.size() >= 2)
+            {
+                const OpaqueParityValue leftValue = ReadOpaqueParityValue(values, operands[0], instruction->Address);
+                const OpaqueParityValue rightValue = ReadOpaqueParityValue(values, operands[1], instruction->Address);
+                result.LowBit = XorLowBit(leftValue.LowBit, rightValue.LowBit);
+                result.FirstSite = leftValue.FirstSite != 0 ? leftValue.FirstSite : instruction->Address;
+                result.LastSite = instruction->Address;
+
+                if (mnemonic == "sub"
+                    && leftValue.ProductOfOddValues
+                    && rightValue.LowBit == LowBitState::One)
+                {
+                    result.LowBit = LowBitState::Zero;
+                    result.OddProductMinusOdd = true;
+                    result.FirstSite = leftValue.FirstSite != 0 ? leftValue.FirstSite : instruction->Address;
+                }
+
+                writesResult = true;
+            }
+            else if (mnemonic == "or" && operands.size() >= 2)
+            {
+                const OpaqueParityValue leftValue = ReadOpaqueParityValue(values, operands[0], instruction->Address);
+                const OpaqueParityValue rightValue = ReadOpaqueParityValue(values, operands[1], instruction->Address);
+                result.LowBit = OrLowBit(leftValue.LowBit, rightValue.LowBit);
+                result.FirstSite = leftValue.FirstSite != 0 ? leftValue.FirstSite : instruction->Address;
+                result.LastSite = instruction->Address;
+
+                if (rightValue.LowBit == LowBitState::One)
+                {
+                    result.LowBit = LowBitState::One;
+                    result.ForcedOddByOrOne = true;
+                    result.FirstSite = instruction->Address;
+                }
+
+                writesResult = true;
+            }
+            else if (mnemonic == "and" && operands.size() >= 2)
+            {
+                const OpaqueParityValue leftValue = ReadOpaqueParityValue(values, operands[0], instruction->Address);
+                const OpaqueParityValue rightValue = ReadOpaqueParityValue(values, operands[1], instruction->Address);
+                result.LowBit = AndLowBit(leftValue.LowBit, rightValue.LowBit);
+                result.FirstSite = leftValue.FirstSite != 0 ? leftValue.FirstSite : instruction->Address;
+                result.LastSite = instruction->Address;
+                result.OddProductMinusOdd = leftValue.OddProductMinusOdd;
+                result.InvertedOddProductMinusOdd = leftValue.InvertedOddProductMinusOdd;
+
+                if (rightValue.LowBit == LowBitState::One
+                    && (leftValue.OddProductMinusOdd || leftValue.InvertedOddProductMinusOdd))
+                {
+                    result.MaskedToLowBit = true;
+                }
+
+                writesResult = true;
+            }
+            else if (mnemonic == "imul")
+            {
+                OpaqueParityValue leftValue;
+                OpaqueParityValue rightValue;
+
+                if (operands.size() >= 3)
+                {
+                    leftValue = ReadOpaqueParityValue(values, operands[1], instruction->Address);
+                    rightValue = ReadOpaqueParityValue(values, operands[2], instruction->Address);
+                }
+                else if (operands.size() >= 2)
+                {
+                    leftValue = ReadOpaqueParityValue(values, operands[0], instruction->Address);
+                    rightValue = ReadOpaqueParityValue(values, operands[1], instruction->Address);
+                }
+
+                result.LowBit = AndLowBit(leftValue.LowBit, rightValue.LowBit);
+                result.FirstSite = leftValue.FirstSite != 0 ? leftValue.FirstSite : rightValue.FirstSite;
+                result.LastSite = instruction->Address;
+                result.ProductOfOddValues =
+                    result.LowBit == LowBitState::One
+                    && (leftValue.ForcedOddByOrOne || rightValue.ForcedOddByOrOne);
+                writesResult = operands.size() >= 2;
+            }
+            else if (mnemonic == "not")
+            {
+                const OpaqueParityValue oldValue = ReadOpaqueParityValue(values, operands[0], instruction->Address);
+                result.LowBit = FlipLowBit(oldValue.LowBit);
+                result.FirstSite = oldValue.FirstSite != 0 ? oldValue.FirstSite : instruction->Address;
+                result.LastSite = instruction->Address;
+                result.InvertedOddProductMinusOdd =
+                    oldValue.OddProductMinusOdd || oldValue.InvertedOddProductMinusOdd;
+                writesResult = true;
+            }
+            else if (mnemonic == "neg")
+            {
+                result = ReadOpaqueParityValue(values, operands[0], instruction->Address);
+                result.LastSite = instruction->Address;
+                writesResult = true;
+            }
+            else if (mnemonic == "inc" || mnemonic == "dec")
+            {
+                const OpaqueParityValue oldValue = ReadOpaqueParityValue(values, operands[0], instruction->Address);
+                result.LowBit = FlipLowBit(oldValue.LowBit);
+                result.FirstSite = oldValue.FirstSite != 0 ? oldValue.FirstSite : instruction->Address;
+                result.LastSite = instruction->Address;
+                writesResult = true;
+            }
+            else if ((mnemonic == "shl" || mnemonic == "sal") && operands.size() >= 2)
+            {
+                int64_t shift = 0;
+                const OpaqueParityValue oldValue = ReadOpaqueParityValue(values, operands[0], instruction->Address);
+
+                if (TryParseSignedValue(StripPointerDecorators(operands[1]), shift) && shift == 0)
+                {
+                    result = oldValue;
+                }
+                else
+                {
+                    result = MakeKnownParityValue(LowBitState::Zero, instruction->Address);
+                }
+
+                result.LastSite = instruction->Address;
+                writesResult = true;
+            }
+
+            if (writesResult)
+            {
+                WriteOpaqueParityValue(values, operands[0], result);
+            }
+        }
+    }
+
+    return facts;
+}
+
 std::vector<OpaquePredicateFact> AnalyzeOpaquePredicateFacts(
     const std::vector<DisassembledInstruction>& instructions,
     const std::vector<BasicBlock>& blocks,
@@ -6970,6 +8064,7 @@ std::vector<OpaquePredicateFact> AnalyzeOpaquePredicateFacts(
 std::vector<RecoveredControlFlowEdge> RecoverObfuscationEdges(
     const std::vector<DisassembledInstruction>& instructions,
     const std::vector<BasicBlock>& blocks,
+    const std::vector<IrValue>& irValues,
     const std::vector<std::string>& predecessors,
     const std::set<std::string>& dispatcherBlocks,
     const std::string& stateVariable,
@@ -6977,6 +8072,52 @@ std::vector<RecoveredControlFlowEdge> RecoverObfuscationEdges(
 {
     std::vector<RecoveredControlFlowEdge> edges;
     std::set<std::string> seen;
+    const auto appendTransition = [&edges, &seen, &stateTargets, &stateVariable](
+        const std::string& sourceBlock,
+        const EvaluatedStateTransition& transition)
+    {
+        if (transition.StateValue.empty())
+        {
+            return;
+        }
+
+        const auto targetIt = stateTargets.find(transition.StateValue);
+
+        if (targetIt == stateTargets.end() || targetIt->second.TargetBlock.empty())
+        {
+            return;
+        }
+
+        const std::string seenKey = sourceBlock
+            + "\n"
+            + targetIt->second.TargetBlock
+            + "\n"
+            + transition.StateValue
+            + "\n"
+            + transition.Condition;
+
+        if (!seen.insert(seenKey).second)
+        {
+            return;
+        }
+
+        RecoveredControlFlowEdge edge;
+        edge.SourceBlock = sourceBlock;
+        edge.TargetBlock = targetIt->second.TargetBlock;
+        edge.Condition = transition.Condition.empty() ? targetIt->second.Condition : transition.Condition;
+        edge.StateValue = transition.StateValue;
+        edge.Evidence = "state "
+            + stateVariable
+            + "="
+            + transition.StateValue
+            + "; "
+            + transition.Evidence
+            + "; "
+            + targetIt->second.Evidence;
+        edge.Conditional = transition.Conditional;
+        edge.Confidence = Clamp01(0.64 + (transition.Confidence * 0.18) + (targetIt->second.Confidence * 0.18));
+        edges.push_back(std::move(edge));
+    };
 
     for (const std::string& predecessor : predecessors)
     {
@@ -6996,51 +8137,41 @@ std::vector<RecoveredControlFlowEdge> RecoverObfuscationEdges(
 
         for (const EvaluatedStateTransition& transition : transitions)
         {
-            if (transition.StateValue.empty())
-            {
-                continue;
-            }
+            appendTransition(predecessor, transition);
+        }
+    }
 
-            const auto targetIt = stateTargets.find(transition.StateValue);
+    for (const IrValue& value : irValues)
+    {
+        if (value.BlockId.empty()
+            || dispatcherBlocks.find(value.BlockId) != dispatcherBlocks.end()
+            || !OperandMatchesObfuscationVariable(value.Target, stateVariable))
+        {
+            continue;
+        }
 
-            if (targetIt == stateTargets.end() || targetIt->second.TargetBlock.empty())
-            {
-                continue;
-            }
+        const std::vector<EvaluatedStateTransition> transitions = EvaluateStateTransitionsFromIrValue(value);
 
-            const std::string seenKey = predecessor
-                + "\n"
-                + targetIt->second.TargetBlock
-                + "\n"
-                + transition.StateValue
-                + "\n"
-                + transition.Condition;
-
-            if (!seen.insert(seenKey).second)
-            {
-                continue;
-            }
-
-            RecoveredControlFlowEdge edge;
-            edge.SourceBlock = predecessor;
-            edge.TargetBlock = targetIt->second.TargetBlock;
-            edge.Condition = transition.Condition.empty() ? targetIt->second.Condition : transition.Condition;
-            edge.StateValue = transition.StateValue;
-            edge.Evidence = "state "
-                + stateVariable
-                + "="
-                + transition.StateValue
-                + "; "
-                + transition.Evidence
-                + "; "
-                + targetIt->second.Evidence;
-            edge.Conditional = transition.Conditional;
-            edge.Confidence = Clamp01(0.64 + (transition.Confidence * 0.18) + (targetIt->second.Confidence * 0.18));
-            edges.push_back(std::move(edge));
+        for (const EvaluatedStateTransition& transition : transitions)
+        {
+            appendTransition(value.BlockId, transition);
         }
     }
 
     return edges;
+}
+
+bool HasLocalStateVariableCandidate(const std::vector<std::string>& stateVariables)
+{
+    for (const std::string& stateVariable : stateVariables)
+    {
+        if (!IsRegisterName(stateVariable))
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 ObfuscationFacts AnalyzeObfuscationFacts(
@@ -7051,15 +8182,29 @@ ObfuscationFacts AnalyzeObfuscationFacts(
     const std::vector<NormalizedCondition>& conditions,
     const std::vector<SwitchInfo>& switches)
 {
-    (void)blockValueStates;
     ObfuscationFacts facts;
     facts.OpaquePredicates = AnalyzeOpaquePredicateFacts(instructions, blocks, conditions);
+    const OpaqueParityReturnFacts parityReturnFacts = AnalyzeOpaqueParityReturnFacts(instructions, blocks);
+
+    facts.OpaquePredicates.insert(
+        facts.OpaquePredicates.end(),
+        parityReturnFacts.Predicates.begin(),
+        parityReturnFacts.Predicates.end());
+    facts.SubstitutionIdioms.insert(
+        facts.SubstitutionIdioms.end(),
+        parityReturnFacts.Substitutions.begin(),
+        parityReturnFacts.Substitutions.end());
 
     if (blocks.size() < 5)
     {
         for (const OpaquePredicateFact& predicate : facts.OpaquePredicates)
         {
             facts.Confidence = (std::max)(facts.Confidence, predicate.Confidence);
+        }
+
+        for (const SubstitutionIdiomFact& idiom : facts.SubstitutionIdioms)
+        {
+            facts.Confidence = (std::max)(facts.Confidence, idiom.Confidence);
         }
 
         return facts;
@@ -7079,7 +8224,7 @@ ObfuscationFacts AnalyzeObfuscationFacts(
             continue;
         }
 
-        std::vector<std::string> stateVariables = CollectStateCompareVariables(header, instructions);
+        std::vector<std::string> stateVariables = CollectStateCompareVariables(header, instructions, &blockValueStates);
         AppendUniqueStrings(stateVariables, CollectStateSwitchVariables(blocks, switches, header));
 
         if (stateVariables.empty())
@@ -7089,14 +8234,27 @@ ObfuscationFacts AnalyzeObfuscationFacts(
 
         for (const std::string& stateVariable : stateVariables)
         {
+            if (HasLocalStateVariableCandidate(stateVariables) && IsRegisterName(stateVariable))
+            {
+                continue;
+            }
+
             std::set<std::string> dispatcherBlockSet;
             std::unordered_map<std::string, ObfuscationStateTarget> stateTargets = BuildStateTargetMapForDispatcher(
                 instructions,
                 blocks,
+                &blockValueStates,
                 conditions,
                 header.Id,
                 stateVariable,
                 dispatcherBlockSet);
+            MergeCompareTreeStateTargetMapForDispatcher(
+                instructions,
+                blocks,
+                &blockValueStates,
+                stateVariable,
+                dispatcherBlockSet,
+                stateTargets);
             const bool hasSwitchDispatcher = MergeSwitchStateTargetMapForDispatcher(
                 blocks,
                 switches,
@@ -7117,6 +8275,7 @@ ObfuscationFacts AnalyzeObfuscationFacts(
             std::vector<RecoveredControlFlowEdge> recoveredEdges = RecoverObfuscationEdges(
                 instructions,
                 blocks,
+                irValues,
                 predecessorIt->second,
                 dispatcherBlockSet,
                 stateVariable,
@@ -7128,6 +8287,9 @@ ObfuscationFacts AnalyzeObfuscationFacts(
                 continue;
             }
 
+            const bool hasCompareTreeDispatcher = stateTargets.size() >= 4
+                && dispatcherBlockSet.size() >= 4
+                && recoveredEdges.size() >= 3;
             double confidence = 0.0;
             confidence += predecessorIt->second.size() >= 3 ? 0.20 : 0.0;
             confidence += !stateTargets.empty() ? 0.20 : 0.0;
@@ -7135,7 +8297,9 @@ ObfuscationFacts AnalyzeObfuscationFacts(
             confidence += writeBlocks >= 3 ? 0.15 : 0.0;
             confidence += hasBackEdge ? 0.10 : 0.0;
             confidence += recoveredEdges.size() >= 2 ? 0.10 : 0.0;
+            confidence += recoveredEdges.size() >= 4 ? 0.05 : 0.0;
             confidence += dispatcherBlockSet.size() >= 2 ? 0.05 : 0.0;
+            confidence += hasCompareTreeDispatcher ? 0.10 : 0.0;
             confidence += hasSwitchDispatcher ? 0.10 : 0.0;
             confidence = Clamp01(confidence);
 
@@ -7149,7 +8313,9 @@ ObfuscationFacts AnalyzeObfuscationFacts(
             dispatcher.HeaderBlock = header.Id;
             dispatcher.Kind = hasSwitchDispatcher
                 ? "control_flow_flattening_switch_dispatcher"
-                : "control_flow_flattening_dispatcher";
+                : hasCompareTreeDispatcher
+                    ? "control_flow_flattening_compare_tree_dispatcher"
+                    : "control_flow_flattening_dispatcher";
             dispatcher.StateVariable = stateVariable;
             dispatcher.DispatcherBlocks.assign(dispatcherBlockSet.begin(), dispatcherBlockSet.end());
             dispatcher.OriginalBlockCandidates = predecessorIt->second;
@@ -7164,6 +8330,7 @@ ObfuscationFacts AnalyzeObfuscationFacts(
                 + "; dominated_ratio="
                 + std::to_string(dominatorCoverage)
                 + (hasSwitchDispatcher ? "; switch_dispatcher" : "")
+                + (hasCompareTreeDispatcher ? "; compare_tree_dispatcher" : "")
                 + (hasBackEdge ? "; back_edge" : "");
             dispatcher.Confidence = confidence;
 
@@ -7200,6 +8367,11 @@ ObfuscationFacts AnalyzeObfuscationFacts(
     for (const OpaquePredicateFact& predicate : facts.OpaquePredicates)
     {
         bestConfidence = (std::max)(bestConfidence, predicate.Confidence);
+    }
+
+    for (const SubstitutionIdiomFact& idiom : facts.SubstitutionIdioms)
+    {
+        bestConfidence = (std::max)(bestConfidence, idiom.Confidence);
     }
 
     facts.Confidence = bestConfidence;
