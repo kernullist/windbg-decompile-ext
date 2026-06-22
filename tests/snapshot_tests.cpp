@@ -330,6 +330,34 @@ decomp::AnalysisFacts BuildForwardedRegisterCallArgumentFacts()
         instructions);
 }
 
+decomp::AnalysisFacts BuildLeaAddressCallArgumentFacts()
+{
+    decomp::ModuleInfo module;
+    module.ModuleName = "snapshot";
+    module.ImageName = "snapshot.exe";
+    module.Base = 0x5400;
+    module.Size = 0x1000;
+
+    std::vector<decomp::FunctionRegion> regions = { { 0x5400, 0x5420 } };
+    std::vector<uint8_t> bytes(0x20, 0x90);
+    std::vector<decomp::DisassembledInstruction> instructions;
+    instructions.push_back(MakeInstruction(0x5400, 0x5405, "lea", "ecx, [rsi+rdx*1]"));
+    instructions.push_back(MakeBranch(0x5405, 0x540a, "call", 0x5500));
+    instructions.push_back(MakeInstruction(0x540a, 0x540b, "ret"));
+
+    decomp::DecompOptions options;
+    return decomp::BuildAnalysisFacts(
+        "snapshot!LeaAddressCallArgument",
+        module,
+        decomp::DebugSessionKind::User,
+        options,
+        0x5400,
+        0x5400,
+        regions,
+        bytes,
+        instructions);
+}
+
 decomp::AnalysisFacts BuildStackCallArgumentWindowFacts()
 {
     decomp::ModuleInfo module;
@@ -1502,6 +1530,23 @@ void TestImplicitAndCallSnapshot()
 
     Expect(foundForwardedArg1, "call-site argument facts should preserve register-forwarded first arguments");
     Expect(!leakedForwardedArg2, "register-forwarded temporaries should not leak as independent higher ordinal call arguments");
+
+    const decomp::AnalysisFacts leaAddressFacts = BuildLeaAddressCallArgumentFacts();
+    bool foundTentativeLeaAddressArg = false;
+
+    for (const decomp::CallArgumentFact& argument : leaAddressFacts.CallArguments)
+    {
+        if (argument.Site == 0x5405
+            && argument.Ordinal == 1
+            && argument.Source == "address_register_state"
+            && argument.Expression == "&[rsi+rdx*1]"
+            && argument.Confidence < 0.65)
+        {
+            foundTentativeLeaAddressArg = true;
+        }
+    }
+
+    Expect(foundTentativeLeaAddressArg, "LEA address expressions should remain call arity evidence without becoming exact high-confidence source expressions");
 }
 
 void TestCallArgumentStackWindowSnapshot()
@@ -1573,17 +1618,22 @@ void TestCfgSensitiveFactsSnapshot()
     Expect(foundLoopStackAccess, "loop back-edges should not poison stack pointer facts before predecessor states converge");
 
     const decomp::AnalysisFacts callFacts = BuildCfgCallArgumentFacts();
-    bool leakedMergedRcx = false;
+    bool foundMergedRcx = false;
+    bool leakedHighConfidenceMergedRcx = false;
 
     for (const decomp::CallArgumentFact& argument : callFacts.CallArguments)
     {
         if (argument.Site == 0x9010 && argument.Ordinal == 1)
         {
-            leakedMergedRcx = true;
+            foundMergedRcx = argument.Source == "merged_register_state"
+                && argument.Expression == "value_merge(1, 2)"
+                && argument.Confidence < 0.65;
+            leakedHighConfidenceMergedRcx = argument.Confidence >= 0.65;
         }
     }
 
-    Expect(!leakedMergedRcx, "conflicting predecessor register values should not be emitted as call-site arguments");
+    Expect(foundMergedRcx, "conflicting predecessor register values should be preserved as low-confidence merged call-site arity evidence");
+    Expect(!leakedHighConfidenceMergedRcx, "conflicting predecessor register values should not be emitted as high-confidence exact call arguments");
 }
 
 void TestStackAliasSnapshot()
@@ -2765,6 +2815,7 @@ void TestObfuscationFactsSnapshot()
     Expect(ollvmPromptDump.find("prune_proven_opaque_dead_edges") != std::string::npos, "OLLVM-like prompt should include opaque dead-edge readiness action");
     Expect(ollvmPromptDump.find("assign state variables only to recovered state constants") != std::string::npos, "OLLVM-like prompt should require recovered state constants for flattened state assignments");
     Expect(ollvmPromptDump.find("Preserve helper call argument expressions") != std::string::npos, "OLLVM-like prompt should require helper call argument expression preservation");
+    Expect(ollvmPromptDump.find("never synthesize switch/case/default syntax") != std::string::npos, "OLLVM-like prompt should forbid synthetic switches without switch facts");
     Expect(ollvmPromptDump.find("semantic edge:") != std::string::npos, "OLLVM-like analyzer skeleton should render semantic CFG overlay comments");
     Expect(ollvmPromptDump.find("opaque predicate:") != std::string::npos, "OLLVM-like analyzer skeleton should render opaque predicate comments");
     Expect(ollvmPromptDump.find("substitution:") != std::string::npos, "OLLVM-like analyzer skeleton should render substitution comments");
@@ -2816,6 +2867,15 @@ void TestObfuscationFactsSnapshot()
     const decomp::VerifyReport symbolicStateReport = decomp::VerifyResponse(ollvmRequest, symbolicStateResponse);
     Expect(!HasIssueCode(symbolicStateReport, "obfuscation.state_assignment_non_state_value"), "OLLVM-like verifier should accept symbolic state constants bound to recovered state values");
     Expect(!HasIssueCode(symbolicStateReport, "obfuscation.state_transition_assignment_omitted"), "OLLVM-like verifier should count symbolic state constants as recovered state transition assignments");
+
+    decomp::AnalyzeResponse numericRegisterAliasStateResponse;
+    numericRegisterAliasStateResponse.Status = "ok";
+    numericRegisterAliasStateResponse.PseudoC = "uint32_t f(void) { const uint32_t STATE_R12 = 0x22B0C002; const uint32_t STATE_R13 = 0x44D0C004; uint32_t state = 0x11A0C001; state = STATE_R12; state = 0x66F0C006; state = STATE_R13; state = 0xAAD0C00A; return state; }";
+    numericRegisterAliasStateResponse.Summary = "explicit flattened state transitions using numeric aliases for r12 and r13";
+    numericRegisterAliasStateResponse.Confidence = 0.92;
+
+    const decomp::VerifyReport numericRegisterAliasStateReport = decomp::VerifyResponse(ollvmRequest, numericRegisterAliasStateResponse);
+    Expect(!HasIssueCode(numericRegisterAliasStateReport, "obfuscation.state_transition_assignment_omitted"), "OLLVM-like verifier should count numeric aliases for recovered r12/r13 state values");
 
     decomp::LlmClientConfig ollvmChunkConfig;
     ollvmChunkConfig.ChunkBlockLimit = 4;
@@ -3272,6 +3332,16 @@ void TestVerifierCoverageSnapshot()
     const decomp::VerifyReport suffixWithArgsReport = decomp::VerifyResponse(request, symbolSuffixWithArgsResponse);
     Expect(!HasIssueCode(suffixWithArgsReport, "call.arguments_omitted"), "verifier should accept pseudo calls that preserve recovered argument arity");
 
+    decomp::AnalyzeResponse mixedArityHelperResponse;
+    mixedArityHelperResponse.Status = "ok";
+    mixedArityHelperResponse.PseudoC = "void f(void) { ImportantHelper(1, 2); ImportantHelper(); }";
+    mixedArityHelperResponse.Summary = "calls helper once with arguments and once without arguments";
+    mixedArityHelperResponse.Confidence = 0.92;
+
+    const decomp::VerifyReport mixedArityHelperReport = decomp::VerifyResponse(request, mixedArityHelperResponse);
+    Expect(HasIssueCode(mixedArityHelperReport, "call.arguments_omitted"), "verifier should flag omitted arguments even when another same-callee pseudo call preserves arity");
+    Expect(IssueEvidenceContains(mixedArityHelperReport, "call.arguments_omitted", "pseudo_arities=[2,0]"), "omitted argument issue should report same-callee pseudo arity details");
+
     decomp::AnalyzeResponse symbolSuffixTooManyArgsResponse;
     symbolSuffixTooManyArgsResponse.Status = "ok";
     symbolSuffixTooManyArgsResponse.PseudoC = "void f(void) { ImportantHelper(1, 2, stale_r8); }";
@@ -3480,6 +3550,8 @@ void TestVerifierCoverageSnapshot()
     Expect(HasIssueCode(droppedExpressionCallReport, "call.argument_expression_omitted"), "verifier should flag recovered helper call argument expression operand loss");
     Expect(HasIssueCode(droppedExpressionCallReport, "call.result_not_captured"), "verifier should flag used helper call results emitted as standalone statements");
     Expect(HasIssueSeverity(droppedExpressionCallReport, "call.argument_expression_omitted", "error"), "verifier should hard-fail recovered helper call argument expression operand loss");
+    Expect(IssueEvidenceContains(droppedExpressionCallReport, "call.argument_expression_omitted", "sample!AddSubstituted"), "helper expression loss issue should include the recovered callee");
+    Expect(IssueEvidenceContains(droppedExpressionCallReport, "call.argument_expression_omitted", "arg1=accumulator ^ shifted"), "helper expression loss issue should include the expected argument expression");
     Expect(droppedExpressionCallReport.FactConflicts >= 2, "helper call argument expression loss should carry a stronger confidence penalty");
     Expect(decomp::CountHardVerifierIssues(droppedExpressionCallReport) >= 2, "hard verifier issue count should include helper expression and return capture loss");
     Expect(!decomp::ShouldAcceptVerifierFeedbackRetry(droppedExpressionCallReport, droppedExpressionCallReport), "verifier feedback retry should reject unchanged hard verifier issues");
@@ -3527,6 +3599,42 @@ void TestVerifierCoverageSnapshot()
     const decomp::VerifyReport changedOperatorCallReport = decomp::VerifyResponse(callExpressionRequest, changedOperatorCallResponse);
     Expect(HasIssueCode(changedOperatorCallReport, "call.argument_expression_omitted"), "verifier should flag recovered helper call argument operator changes");
     Expect(HasIssueSeverity(changedOperatorCallReport, "call.argument_expression_omitted", "error"), "verifier should hard-fail recovered helper call argument operator changes");
+
+    decomp::AnalyzeRequest registerAliasExpressionRequest;
+    registerAliasExpressionRequest.RequestId = "verifier_register_alias_expression_snapshot";
+    registerAliasExpressionRequest.Facts = BuildDiamondFacts();
+
+    decomp::CallTargetInfo registerAliasCall;
+    registerAliasCall.Site = 0x1044;
+    registerAliasCall.DisplayName = "sample!AddSubstituted";
+    registerAliasCall.TargetKind = "internal_direct";
+    registerAliasCall.Confidence = 0.84;
+    registerAliasExpressionRequest.Facts.CallTargets.push_back(registerAliasCall);
+
+    decomp::CallArgumentFact registerAliasArg1;
+    registerAliasArg1.Site = 0x1044;
+    registerAliasArg1.Ordinal = 1;
+    registerAliasArg1.Location = "rcx";
+    registerAliasArg1.Expression = "esi | 0x01";
+    registerAliasArg1.Confidence = 0.82;
+    registerAliasExpressionRequest.Facts.CallArguments.push_back(registerAliasArg1);
+
+    decomp::CallArgumentFact registerAliasArg2;
+    registerAliasArg2.Site = 0x1044;
+    registerAliasArg2.Ordinal = 2;
+    registerAliasArg2.Location = "rdx";
+    registerAliasArg2.Expression = "ebp";
+    registerAliasArg2.Confidence = 0.82;
+    registerAliasExpressionRequest.Facts.CallArguments.push_back(registerAliasArg2);
+
+    decomp::AnalyzeResponse renamedRegisterAliasResponse;
+    renamedRegisterAliasResponse.Status = "ok";
+    renamedRegisterAliasResponse.PseudoC = "void f(void) { sample_AddSubstituted(shifted | 1, index); }";
+    renamedRegisterAliasResponse.Summary = "calls helper with semantic local names";
+    renamedRegisterAliasResponse.Confidence = 0.92;
+
+    const decomp::VerifyReport renamedRegisterAliasReport = decomp::VerifyResponse(registerAliasExpressionRequest, renamedRegisterAliasResponse);
+    Expect(!HasIssueCode(renamedRegisterAliasReport, "call.argument_expression_omitted"), "verifier should allow raw register terms to be renamed when operators and constants are preserved");
 
     decomp::AnalyzeRequest prototypeOnlyRequest;
     prototypeOnlyRequest.RequestId = "verifier_prototype_arity_snapshot";

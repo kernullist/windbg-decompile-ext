@@ -1696,8 +1696,16 @@ JsonValue BuildHelperCallContractGroupsJson(
                 continue;
             }
 
-            JsonValue argument = BuildCallArgumentJsonItem(request.Facts.CallArguments[argumentIndex]);
-            argument.Set("expression_required", JsonValue::MakeBoolean(true));
+            const CallArgumentFact& fact = request.Facts.CallArguments[argumentIndex];
+            JsonValue argument = BuildCallArgumentJsonItem(fact);
+            const bool expressionRequired = fact.Confidence >= 0.65 && fact.Source != "merged_register_state";
+            argument.Set("expression_required", JsonValue::MakeBoolean(expressionRequired));
+
+            if (!expressionRequired)
+            {
+                argument.Set("expression_policy", JsonValue::MakeString("Preserve this argument arity and use the expression as tentative merge evidence; do not treat it as an exact source expression."));
+            }
+
             arguments.PushBack(argument);
         }
 
@@ -1707,7 +1715,7 @@ JsonValue BuildHelperCallContractGroupsJson(
         item.Set("target_address", JsonValue::MakeString(target != nullptr ? HexU64(target->TargetAddress) : std::string()));
         item.Set("required", JsonValue::MakeBoolean(true));
         item.Set("argument_count", JsonValue::MakeNumber(static_cast<double>(arguments.GetArray().size())));
-        item.Set("argument_policy", JsonValue::MakeString("Emit helper calls with these argument expressions exactly; do not drop operands, operators, or nested expressions."));
+        item.Set("argument_policy", JsonValue::MakeString("Emit helper calls with the listed argument arity. Preserve arguments marked expression_required exactly; treat low-confidence merged arguments as tentative arity evidence rather than exact source expressions."));
         item.Set("arguments", arguments);
         item.Set("return_value", BuildHelperCallReturnValueJson(callResult));
         item.Set("confidence", JsonValue::MakeNumber(target != nullptr ? target->Confidence : 0.0));

@@ -85,6 +85,63 @@ P0 분석 코어의 초기 구현은 들어갔지만, 다음 영역은 아직 �
    - pseudo token 수준을 넘어 lightweight pseudo AST를 도입한다.
    - use-before-def, dead-store, call arity, side-effect coverage, return path, region edge coverage를 graph 기반으로 검증한다.
 
+## 2026-06-22 OLLVM-style Deobfuscation Hardening Wave
+
+이번 wave의 현재 수준은 "WinDbg 안에서 OLLVM-style flattening/bogus/substitution 샘플을 실험적으로 해제해볼 수 있는 lab-grade helper"다.
+직접 만든 OLLVM-like fixture의 `FlattenedTransform`, `FlattenedDecision`, `BogusMixer`는 CDB 기반 end-to-end 검증에서 verifier issue 0까지 도달했다.
+다만 아직 실제 OLLVM/obfuscator-llvm 변종, 최적화 레벨, 컴파일러별 codegen, cross-function opaque predicate 요약까지 견디는 범용 디옵퓨스케이터라고 보기는 이르다.
+
+최근 보강된 영역:
+
+- CFG join 지점의 call-argument register state를 보존해 helper call arity evidence가 사라지지 않게 했다.
+- low-confidence merged/address argument를 exact expression contract와 분리해 LLM이 부정확한 표현을 과신하지 않게 했다.
+- same-callee call arity verifier가 한 call site의 성공으로 다른 call site 누락을 숨기지 않게 강화했다.
+- verifier feedback이 omitted/excess/helper-call argument 문제를 더 직접적으로 수정 지시하게 했다.
+- numeric literal equivalence, register alias rename, recovered state constant alias를 verifier가 인식하게 했다.
+- switch evidence가 없을 때 compare-tree flattened dispatcher를 `switch/case/default`로 합성하지 않도록 prompt rule을 강화했다.
+
+다음 개선 우선순위:
+
+1. 실제 OLLVM corpus 구축
+   - `obfuscator-llvm`/OLLVM 계열로 flattening, bogus control flow, instruction substitution 샘플을 빌드한다.
+   - `O0`/`O1`/`O2`, MSVC/Clang-cl/LLVM-mingw, x64 user-mode 기준으로 같은 소스의 변형 세트를 만든다.
+   - 각 함수별 expected semantic summary와 허용 가능한 uncertainty를 snapshot oracle로 둔다.
+   - 목표는 synthetic fixture 통과가 아니라 실제 obfuscator output에서 regression을 잡는 것이다.
+
+2. Cross-function callee summary propagation
+   - `OpaqueFalse`, `OpaqueTrue`, small arithmetic helper처럼 constant-return 또는 pure helper로 판정 가능한 callee를 module-local summary로 저장한다.
+   - caller 분석 시 summary를 opaque predicate/dead edge proof로 보수적으로 병합한다.
+   - summary key는 module identity, RVA, byte hash를 함께 사용하고 stale summary는 자동 폐기한다.
+   - summary confidence가 낮으면 branch pruning 대신 verifier hint/uncertainty로만 노출한다.
+
+3. Deterministic deobfuscation skeleton
+   - flattened state transition graph를 LLM prompt 이전에 analyzer skeleton으로 최대한 구조화한다.
+   - recovered state constants, semantic edges, dead edges, helper-call contracts를 stable order로 출력한다.
+   - LLM은 skeleton을 재작성하는 역할로 제한하고, unsupported switch/loop/call synthesis는 verifier가 강하게 감점한다.
+   - 목표는 같은 입력에서 매번 비슷한 pseudocode와 같은 verifier result를 얻는 것이다.
+
+4. Opaque predicate and bogus edge proof 강화
+   - substitution idiom, flag-producing compare, constant-return helper, branch edge reachability를 하나의 proof object로 묶는다.
+   - proof가 완전한 경우에만 dead edge로 rewrite하고, 불완전하면 suspicious/bogus candidate로 남긴다.
+   - false positive를 막기 위해 branch target, input dependency, memory side effect 여부를 verifier에서 재확인한다.
+
+5. Provider/automation robustness
+   - CDB 자동 실행 스크립트를 유지해 sample load, extension load, `/refresh`, `/view:plan`, normal decomp를 반복 검증한다.
+   - LLM HTTP body read timeout/hang은 실제 재현 로그가 있을 때 transport-level watchdog으로 보강한다.
+   - `/doctor`에 config, provider, timeout, chunk setting, deployed DLL timestamp를 더 명확히 노출한다.
+
+6. Verifier 2.0 for deobfuscation
+   - pseudo token 기반 검증을 lightweight pseudo AST 검증으로 확장한다.
+   - flattened dispatcher state coverage, helper-call effect coverage, dead-edge proof coverage, return-path coverage를 issue code별로 분리한다.
+   - verifier feedback retry가 고친 항목과 새로 만든 항목을 비교해 regression loop를 감지한다.
+
+완료 기준:
+
+- 실제 OLLVM corpus의 대표 함수에서 `/deobf:on`이 `/deobf:off`보다 구조적으로 더 읽히고, verifier high-severity issue가 줄어든다.
+- 같은 함수 반복 실행에서 verifier score와 주요 issue code가 안정적으로 유지된다.
+- cross-function opaque helper가 있는 샘플에서 caller branch pruning이 보수적으로 동작한다.
+- unsupported switch/case synthesis, helper argument omission, bogus edge over-pruning 회귀가 snapshot으로 잡힌다.
+
 ## 제품 비전
 
 이 프로젝트는 범용 오프라인 디컴파일러를 새로 만드는 것보다, 아래 조합을 강점으로 삼는 것이 가장 현실적이다.
@@ -763,11 +820,11 @@ P0 분석 코어의 초기 구현은 들어갔지만, 다음 영역은 아직 �
 
 즉시 시작할 작업은 아래 순서를 권장한다.
 
-1. post-dominator / region tree 기반 structuring 고도화
-2. unwind metadata opcode 해석과 epilog pattern 정밀화
-3. 실제 최적화 바이너리 corpus로 snapshot 테스트 확대
-4. persistent direct callee summary cache 설계
-5. 실제 TTD call table 질의 실행 및 인수/반환값 샘플링
-6. IDebugHost data model provider와 JavaScript bridge 검토
+1. 실제 OLLVM/obfuscator-llvm corpus를 구축하고 fixture별 expected semantic oracle을 작성한다.
+2. module-local cross-function callee summary propagation을 도입해 constant-return opaque helper를 caller 분석에 보수적으로 반영한다.
+3. flattened state transition graph를 deterministic analyzer skeleton으로 승격해 LLM variability를 줄인다.
+4. opaque predicate/bogus edge proof object를 추가하고 verifier가 dead-edge pruning 근거를 재확인하게 한다.
+5. CDB 자동 검증 루프를 정식 테스트 workflow로 정리하고 provider/timeout/setting 진단을 `/doctor`에 더 노출한다.
+6. post-dominator / region tree 기반 structuring, unwind metadata opcode 해석, 실제 TTD call table 질의는 OLLVM hardening wave 이후의 일반 품질 개선으로 이어서 진행한다.
 
-이 순서가 가장 적은 리스크로 가장 큰 품질 향상을 기대할 수 있다.
+이 순서가 현재의 synthetic fixture 성공을 실제 obfuscated binary 품질로 확장하는 데 가장 직접적이다.

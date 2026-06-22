@@ -2074,6 +2074,7 @@ std::string BuildChunkSystemPrompt(const AnalyzeRequest& request)
         "Preserve helper call argument expressions from helper_call_contract, call_arguments, and ir_values, including operands and operators; helper_call_contract is the highest-priority call-argument and return-value contract. "
         "When helper_call_contract.return_value.present is true and the return is used, capture it as target = Callee(args) directly; never invent undefined placeholders such as result. "
         "Use control_flow loop, branch, and switch region metadata as structure evidence without inventing unsupported regions. "
+        "If switches is empty or no recovered switch case targets exist, do not emit C switch/case/default syntax; for compare-tree flattened dispatchers use semantic_control_flow edges, if/else blocks, direct structured flow, or explicit uncertainty instead. "
         "Use abi facts for Microsoft x64 stack home slots, tail-call, thunk, no-return, and frame-base hints. "
         "Use session_policy to distinguish live, dump, kernel, and trace-like analysis constraints. "
         "Use observed_behavior for concrete register samples, current-frame pointers, memory hotspots, and TTD query hints without treating them as static proof. "
@@ -2126,6 +2127,7 @@ std::string BuildMergeSystemPrompt(const AnalyzeRequest& request)
         "When reconstructing flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never use data reads such as bytes[index] as state values. "
         "Preserve helper call argument expressions from helper_call_contract, call_arguments, and ir_values, including operands and operators; helper_call_contract is the highest-priority call-argument and return-value contract. "
         "When helper_call_contract.return_value.present is true and the return is used, capture it as target = Callee(args) directly; never invent undefined placeholders such as result. "
+        "If switches is empty or no recovered switch case targets exist, do not emit C switch/case/default syntax; for compare-tree flattened dispatchers use semantic_control_flow edges, if/else blocks, direct structured flow, or explicit uncertainty instead. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
         "Prefer reconstructing concrete reads, writes, branches, and helper interactions when the chunk evidence supports them. "
         "Do not invent calls or fields that are not grounded by the chunk summaries or global facts. "
@@ -2166,6 +2168,7 @@ std::string BuildMergeUserPrompt(
     prompt += "18. Treat the analyzer skeleton and graph-derived facts as a draft to refine; do not invent unsupported loops, switches, or calls during merge.\n";
     prompt += "19. For flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never replace a state transition with a data read such as bytes[index]. Preserve helper call argument expressions from helper_call_contract, call_arguments, and ir_values without dropping operands or operators.\n";
     prompt += "20. When helper_call_contract lists a call site, any emitted helper call for that site or callee must use the listed argument expressions exactly; if return_value.present is true, capture the helper return directly as target = callee(arguments), never as a later assignment from result.\n";
+    prompt += "21. If switches is empty or has no recovered case targets, never synthesize switch/case/default syntax in final pseudo_c. Compare-tree flattened dispatchers should use semantic edges, if/else blocks, direct structured flow, or uncertainty.\n";
     return prompt;
 }
 
@@ -2184,6 +2187,7 @@ std::string BuildSystemPrompt(const AnalyzeRequest& request)
         "When reconstructing flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never use data reads such as bytes[index] as state values. "
         "Preserve helper call argument expressions from helper_call_contract, call_arguments, and ir_values, including operands and operators; helper_call_contract is the highest-priority call-argument and return-value contract. "
         "When helper_call_contract.return_value.present is true and the return is used, capture it as target = Callee(args) directly; never invent undefined placeholders such as result. "
+        "If switches is empty or no recovered switch case targets exist, do not emit C switch/case/default syntax; for compare-tree flattened dispatchers use semantic_control_flow edges, if/else blocks, direct structured flow, or explicit uncertainty instead. "
         "Treat opaque_predicates as dead-edge proof only when present, and treat substitution_idioms as local expression simplifications rather than source-level intent. "
         "Use evidence.blocks values that reference only valid basic block ids from the input. "
         "Blocks are a representative selection, not necessarily the first contiguous blocks in the function. "
@@ -2220,6 +2224,7 @@ std::string BuildUserPrompt(const AnalyzeRequest& request)
     prompt += "15. Use semantic_control_flow dead edges and obfuscation.opaque_predicates to justify proven dead edges or proven constant-return predicate bits, and use obfuscation.substitution_idioms only as local simplification evidence.\n";
     prompt += "16. For flattened state machines, assign state variables only to recovered state constants or explicitly uncertain state values; never replace a state transition with a data read such as bytes[index]. Preserve helper call argument expressions from helper_call_contract, call_arguments, and ir_values without dropping operands or operators.\n";
     prompt += "17. When helper_call_contract lists a call site, any emitted helper call for that site or callee must use the listed argument expressions exactly; if return_value.present is true, capture the helper return directly as target = callee(arguments), never as a later assignment from result.\n";
+    prompt += "18. If switches is empty or has no recovered case targets, never synthesize switch/case/default syntax. Compare-tree flattened dispatchers should use semantic edges, if/else blocks, direct structured flow, or uncertainty.\n";
     return prompt;
 }
 

@@ -5034,6 +5034,117 @@ StringMap MergeIdenticalStringMaps(const std::vector<StringMap>& incoming)
     return merged;
 }
 
+bool IsCallArgumentRegisterForMergedState(const std::string& reg)
+{
+    static const char* registers[] = {
+        "rcx",
+        "rdx",
+        "r8",
+        "r9",
+        "xmm0",
+        "xmm1",
+        "xmm2",
+        "xmm3"
+    };
+
+    for (const char* candidate : registers)
+    {
+        if (reg == candidate)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool IsMergedCallArgumentExpression(const std::string& expression)
+{
+    return StartsWithInsensitive(expression, "value_merge(");
+}
+
+bool IsTentativeAddressCallArgumentExpression(const std::string& expression)
+{
+    return StartsWithInsensitive(TrimCopy(expression), "&[");
+}
+
+std::string BuildMergedCallArgumentExpression(const std::set<std::string>& values)
+{
+    std::string expression = "value_merge(";
+    bool first = true;
+
+    for (const std::string& value : values)
+    {
+        if (!first)
+        {
+            expression += ", ";
+        }
+
+        expression += value;
+        first = false;
+    }
+
+    expression += ")";
+    return expression;
+}
+
+StringMap MergeCallArgumentRegisterMaps(const std::vector<StringMap>& incoming)
+{
+    if (incoming.empty())
+    {
+        return {};
+    }
+
+    StringMap merged;
+
+    for (const auto& entry : incoming.front())
+    {
+        const std::string& reg = entry.first;
+        std::set<std::string> values;
+        bool presentInAll = !entry.second.empty();
+        bool hasNestedMerge = IsMergedCallArgumentExpression(entry.second);
+
+        if (presentInAll)
+        {
+            values.insert(entry.second);
+        }
+
+        for (size_t index = 1; presentInAll && index < incoming.size(); ++index)
+        {
+            const auto nextIt = incoming[index].find(reg);
+
+            if (nextIt == incoming[index].end() || nextIt->second.empty())
+            {
+                presentInAll = false;
+                break;
+            }
+
+            hasNestedMerge = hasNestedMerge || IsMergedCallArgumentExpression(nextIt->second);
+            values.insert(nextIt->second);
+        }
+
+        if (!presentInAll)
+        {
+            continue;
+        }
+
+        if (values.size() == 1U)
+        {
+            merged[reg] = *values.begin();
+            continue;
+        }
+
+        if (!IsCallArgumentRegisterForMergedState(reg) || hasNestedMerge || values.size() > 4U)
+        {
+            continue;
+        }
+
+        merged[reg] = BuildMergedCallArgumentExpression(values);
+    }
+
+    return merged;
+}
+
 PendingStackArgumentMap MergePendingStackArgumentMaps(const std::vector<PendingStackArgumentMap>& incoming)
 {
     if (incoming.empty())
@@ -5083,7 +5194,7 @@ CallArgumentFlowState MergeCallArgumentFlowStates(const std::vector<CallArgument
         pendingStackArguments.push_back(state.PendingStackArguments);
     }
 
-    merged.Registers = MergeIdenticalStringMaps(registers);
+    merged.Registers = MergeCallArgumentRegisterMaps(registers);
     merged.RegisterCopies = MergeIdenticalStringMaps(registerCopies);
     merged.PendingStackArguments = MergePendingStackArgumentMaps(pendingStackArguments);
     return merged;
@@ -5420,10 +5531,22 @@ std::vector<CallArgumentFact> CollectCallArgumentFacts(
                         fact.Expression = stateIt->second;
                         fact.TypeHint = InferRegisterArgumentTypeHint(reg, false);
                         const auto incomingIt = argumentRegisterMap.find(reg);
-                        fact.Source = incomingIt != argumentRegisterMap.end() && incomingIt->second == stateIt->second
+                        const bool isMergedArgument = IsMergedCallArgumentExpression(stateIt->second);
+                        const bool isTentativeAddressArgument = IsTentativeAddressCallArgumentExpression(stateIt->second);
+                        fact.Source = isMergedArgument
+                            ? "merged_register_state"
+                            : isTentativeAddressArgument
+                            ? "address_register_state"
+                            : incomingIt != argumentRegisterMap.end() && incomingIt->second == stateIt->second
                             ? "incoming_register"
                             : "register_state";
-                        fact.Confidence = fact.Source == "incoming_register" ? 0.58 : 0.70;
+                        fact.Confidence = isMergedArgument
+                            ? 0.56
+                            : isTentativeAddressArgument
+                            ? 0.64
+                            : fact.Source == "incoming_register"
+                            ? 0.58
+                            : 0.70;
                         emitted->push_back(std::move(fact));
                     }
 

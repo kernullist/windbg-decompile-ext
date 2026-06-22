@@ -935,6 +935,133 @@ bool PseudoArgumentPreservesExpectedOperators(
     return true;
 }
 
+bool TryParseExpressionIntegerTerm(const std::string& term, uint64_t& value)
+{
+    const std::string text = ToLowerAscii(TrimCopy(term));
+
+    if (text.empty())
+    {
+        return false;
+    }
+
+    try
+    {
+        size_t consumed = 0;
+        const int base = StartsWithInsensitive(text, "0x") ? 16 : 10;
+        value = std::stoull(text, &consumed, base);
+        return consumed == text.size();
+    }
+    catch (const std::exception&)
+    {
+        return false;
+    }
+}
+
+std::string NormalizeVerifierRegisterAlias(const std::string& term)
+{
+    const std::string lower = ToLowerAscii(TrimCopy(term));
+
+    if (lower == "al" || lower == "ah" || lower == "ax" || lower == "eax" || lower == "rax")
+    {
+        return "rax";
+    }
+
+    if (lower == "bl" || lower == "bh" || lower == "bx" || lower == "ebx" || lower == "rbx")
+    {
+        return "rbx";
+    }
+
+    if (lower == "cl" || lower == "ch" || lower == "cx" || lower == "ecx" || lower == "rcx")
+    {
+        return "rcx";
+    }
+
+    if (lower == "dl" || lower == "dh" || lower == "dx" || lower == "edx" || lower == "rdx")
+    {
+        return "rdx";
+    }
+
+    if (lower == "sil" || lower == "si" || lower == "esi" || lower == "rsi")
+    {
+        return "rsi";
+    }
+
+    if (lower == "dil" || lower == "di" || lower == "edi" || lower == "rdi")
+    {
+        return "rdi";
+    }
+
+    if (lower == "bpl" || lower == "bp" || lower == "ebp" || lower == "rbp")
+    {
+        return "rbp";
+    }
+
+    if (lower == "spl" || lower == "sp" || lower == "esp" || lower == "rsp")
+    {
+        return "rsp";
+    }
+
+    for (const char* prefix : { "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" })
+    {
+        if (StartsWithInsensitive(lower, prefix))
+        {
+            return prefix;
+        }
+    }
+
+    return lower;
+}
+
+bool IsVerifierRegisterName(const std::string& term)
+{
+    const std::string canonical = NormalizeVerifierRegisterAlias(term);
+    static const char* registers[] = {
+        "rax",
+        "rbx",
+        "rcx",
+        "rdx",
+        "rsi",
+        "rdi",
+        "rbp",
+        "rsp",
+        "r8",
+        "r9",
+        "r10",
+        "r11",
+        "r12",
+        "r13",
+        "r14",
+        "r15"
+    };
+
+    for (const char* reg : registers)
+    {
+        if (canonical == reg)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool ExpressionContainsIntegerTerm(const std::string& expression, uint64_t expectedValue)
+{
+    const std::vector<std::string> terms = ExtractSignificantExpressionTerms(expression);
+
+    for (const std::string& term : terms)
+    {
+        uint64_t value = 0;
+
+        if (TryParseExpressionIntegerTerm(term, value) && value == expectedValue)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool PseudoArgumentPreservesExpectedExpression(
     const std::string& pseudoArgument,
     const std::string& expectedExpression)
@@ -964,13 +1091,25 @@ bool PseudoArgumentPreservesExpectedExpression(
 
     const std::vector<std::string> terms = ExtractSignificantExpressionTerms(expectedExpression);
 
-    if (terms.size() < 2)
-    {
-        return true;
-    }
-
     for (const std::string& term : terms)
     {
+        if (IsVerifierRegisterName(term))
+        {
+            continue;
+        }
+
+        uint64_t expectedValue = 0;
+
+        if (TryParseExpressionIntegerTerm(term, expectedValue))
+        {
+            if (!ExpressionContainsIntegerTerm(pseudoArgument, expectedValue))
+            {
+                return false;
+            }
+
+            continue;
+        }
+
         if (pseudo.find(term) == std::string::npos)
         {
             return false;
@@ -2313,6 +2452,23 @@ uint32_t PrototypeParameterArity(const std::vector<PrototypeParameter>& paramete
     return arity;
 }
 
+std::string BuildCallAritiesEvidence(
+    const std::string& callee,
+    uint32_t expectedArity,
+    const std::vector<uint32_t>& pseudoArities)
+{
+    std::vector<std::string> arities;
+
+    for (const uint32_t pseudoArity : pseudoArities)
+    {
+        arities.push_back(std::to_string(pseudoArity));
+    }
+
+    return "callee=" + callee
+        + " expected_arity=" + std::to_string(expectedArity)
+        + " pseudo_arities=[" + JoinStrings(arities, ",") + "]";
+}
+
 void CheckRecoveredCallArgumentConsistency(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
 {
     if (response.Confidence <= 0.60)
@@ -2322,6 +2478,8 @@ void CheckRecoveredCallArgumentConsistency(const AnalyzeRequest& request, const 
 
     size_t suspiciousCalls = 0;
     size_t excessiveCalls = 0;
+    std::vector<std::string> omittedContexts;
+    std::vector<std::string> excessContexts;
     std::set<uint64_t> checkedSites;
     std::map<std::string, uint32_t> expectedArityByCallee;
 
@@ -2354,20 +2512,6 @@ void CheckRecoveredCallArgumentConsistency(const AnalyzeRequest& request, const 
 
         rememberExpectedArity(call.DisplayName, expectedArity);
 
-        const std::vector<uint32_t> pseudoArities = FindCallArities(response, call.DisplayName);
-
-        if (pseudoArities.empty())
-        {
-            continue;
-        }
-
-        const uint32_t maxPseudoArity = *std::max_element(pseudoArities.begin(), pseudoArities.end());
-
-        if (maxPseudoArity < expectedArity)
-        {
-            ++suspiciousCalls;
-        }
-
         checkedSites.insert(call.Site);
     }
 
@@ -2389,30 +2533,37 @@ void CheckRecoveredCallArgumentConsistency(const AnalyzeRequest& request, const 
 
         rememberExpectedArity(summary.Callee, expectedArity);
 
-        const std::vector<uint32_t> pseudoArities = FindCallArities(response, summary.Callee);
-
-        if (pseudoArities.empty())
-        {
-            continue;
-        }
-
-        const uint32_t maxPseudoArity = *std::max_element(pseudoArities.begin(), pseudoArities.end());
-
-        if (maxPseudoArity < expectedArity)
-        {
-            ++suspiciousCalls;
-        }
     }
 
     for (const auto& expected : expectedArityByCallee)
     {
         const std::vector<uint32_t> pseudoArities = FindCallArities(response, expected.first);
 
+        if (pseudoArities.empty())
+        {
+            continue;
+        }
+
         for (const uint32_t pseudoArity : pseudoArities)
         {
+            if (pseudoArity < expected.second)
+            {
+                ++suspiciousCalls;
+
+                if (omittedContexts.size() < 3U)
+                {
+                    omittedContexts.push_back(BuildCallAritiesEvidence(expected.first, expected.second, pseudoArities));
+                }
+            }
+
             if (pseudoArity > expected.second)
             {
                 ++excessiveCalls;
+
+                if (excessContexts.size() < 3U)
+                {
+                    excessContexts.push_back(BuildCallAritiesEvidence(expected.first, expected.second, pseudoArities));
+                }
             }
         }
     }
@@ -2424,7 +2575,8 @@ void CheckRecoveredCallArgumentConsistency(const AnalyzeRequest& request, const 
             "call.arguments_omitted",
             "warning",
             "pseudo_c calls recovered callees with fewer arguments than recovered call-site or prototype facts",
-            "calls_with_too_few_arguments=" + std::to_string(suspiciousCalls));
+            "calls_with_too_few_arguments=" + std::to_string(suspiciousCalls)
+                + "; details=" + JoinStrings(omittedContexts, " | "));
         ++report.MissingEvidence;
     }
 
@@ -2436,7 +2588,8 @@ void CheckRecoveredCallArgumentConsistency(const AnalyzeRequest& request, const 
             "call.arguments_excess",
             "error",
             "pseudo_c calls recovered callees with more arguments than recovered call-site or prototype facts",
-            "calls_with_too_many_arguments=" + std::to_string(excessiveCalls));
+            "calls_with_too_many_arguments=" + std::to_string(excessiveCalls)
+                + "; details=" + JoinStrings(excessContexts, " | "));
     }
 }
 
@@ -2492,6 +2645,35 @@ bool PseudoCallPreservesRecoveredExpressions(
     return checkedExpression;
 }
 
+std::string BuildRecoveredCallArgumentExpressionEvidence(
+    const CallTargetInfo& call,
+    const std::vector<CallArgumentFact>& recoveredArguments,
+    const std::vector<std::vector<std::string>>& pseudoArgumentLists)
+{
+    std::vector<std::string> expected;
+    std::vector<std::string> pseudo;
+
+    for (const CallArgumentFact& argument : recoveredArguments)
+    {
+        expected.push_back("arg" + std::to_string(argument.Ordinal) + "=" + argument.Expression);
+    }
+
+    for (const std::vector<std::string>& pseudoArguments : pseudoArgumentLists)
+    {
+        if (pseudo.size() >= 3U)
+        {
+            break;
+        }
+
+        pseudo.push_back("(" + JoinStrings(pseudoArguments, ",") + ")");
+    }
+
+    return "site=" + HexU64(call.Site)
+        + " callee=" + call.DisplayName
+        + " expected=[" + JoinStrings(expected, ";") + "]"
+        + " pseudo=[" + JoinStrings(pseudo, ";") + "]";
+}
+
 void CheckRecoveredCallArgumentExpressionConsistency(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
 {
     if (response.Confidence <= 0.60)
@@ -2500,6 +2682,7 @@ void CheckRecoveredCallArgumentExpressionConsistency(const AnalyzeRequest& reque
     }
 
     size_t suspiciousCalls = 0;
+    std::vector<std::string> contexts;
 
     for (const CallTargetInfo& call : request.Facts.CallTargets)
     {
@@ -2547,6 +2730,11 @@ void CheckRecoveredCallArgumentExpressionConsistency(const AnalyzeRequest& reque
         if (!hasPreservingCall)
         {
             ++suspiciousCalls;
+
+            if (contexts.size() < 3U)
+            {
+                contexts.push_back(BuildRecoveredCallArgumentExpressionEvidence(call, recoveredArguments, pseudoArgumentLists));
+            }
         }
     }
 
@@ -2558,7 +2746,8 @@ void CheckRecoveredCallArgumentExpressionConsistency(const AnalyzeRequest& reque
             "call.argument_expression_omitted",
             "error",
             "pseudo_c calls recovered callees but drops high-confidence recovered argument expression operands",
-            "calls_with_argument_expression_loss=" + std::to_string(suspiciousCalls));
+            "calls_with_argument_expression_loss=" + std::to_string(suspiciousCalls)
+                + "; details=" + JoinStrings(contexts, " | "));
     }
 }
 
@@ -3161,6 +3350,84 @@ std::set<std::string> BuildRequiredObfuscationStateTransitionValues(const Analys
     return values;
 }
 
+bool LooksLikeVerifierConstantExpression(const std::string& expression)
+{
+    uint64_t value = 0;
+    return TryParseExpressionIntegerTerm(LowerNoSpace(expression), value);
+}
+
+std::map<std::string, std::set<std::string>> BuildObfuscationStateValueAliases(const AnalysisFacts& facts)
+{
+    std::map<std::string, std::set<std::string>> aliases;
+
+    auto addValue = [&aliases](const ReachingValue& value)
+    {
+        if (value.Confidence < 0.65 || value.Name.empty() || value.Canonical.empty())
+        {
+            return;
+        }
+
+        if (value.Storage != "register" || !LooksLikeVerifierConstantExpression(value.Canonical))
+        {
+            return;
+        }
+
+        const std::string name = LowerNoSpace(value.Name);
+        const std::string canonical = LowerNoSpace(value.Canonical);
+
+        if (name.empty() || canonical.empty() || name == canonical)
+        {
+            return;
+        }
+
+        aliases[name].insert(canonical);
+        aliases[canonical].insert(name);
+    };
+
+    for (const BlockValueState& state : facts.BlockValueStates)
+    {
+        for (const ReachingValue& value : state.LiveIn)
+        {
+            addValue(value);
+        }
+
+        for (const ReachingValue& value : state.LiveOut)
+        {
+            addValue(value);
+        }
+    }
+
+    return aliases;
+}
+
+bool AssignedObfuscationStateValuesContain(
+    const std::set<std::string>& assignedValues,
+    const std::map<std::string, std::set<std::string>>& aliases,
+    const std::string& requiredValue)
+{
+    if (assignedValues.find(requiredValue) != assignedValues.end())
+    {
+        return true;
+    }
+
+    const auto aliasIt = aliases.find(requiredValue);
+
+    if (aliasIt == aliases.end())
+    {
+        return false;
+    }
+
+    for (const std::string& alias : aliasIt->second)
+    {
+        if (assignedValues.find(alias) != assignedValues.end())
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void CheckObfuscationStateTransitionAssignments(const AnalyzeRequest& request, const AnalyzeResponse& response, VerifyReport& report)
 {
     if (response.Confidence <= 0.60)
@@ -3194,6 +3461,7 @@ void CheckObfuscationStateTransitionAssignments(const AnalyzeRequest& request, c
         tokens,
         stateVariables,
         knownStateValues);
+    const std::map<std::string, std::set<std::string>> stateValueAliases = BuildObfuscationStateValueAliases(request.Facts);
     const std::set<std::string> assignedValues = CollectAssignedObfuscationStateValues(
         tokens,
         stateVariables,
@@ -3209,7 +3477,7 @@ void CheckObfuscationStateTransitionAssignments(const AnalyzeRequest& request, c
 
     for (const std::string& value : requiredValues)
     {
-        if (assignedValues.find(value) == assignedValues.end())
+        if (!AssignedObfuscationStateValuesContain(assignedValues, stateValueAliases, value))
         {
             missingValues.push_back(value);
         }

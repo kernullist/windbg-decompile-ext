@@ -12,7 +12,7 @@ namespace
 {
 struct VerifierIssueCorrectionRule
 {
-    std::array<const char*, 3> Codes = {};
+    std::array<const char*, 4> Codes = {};
     size_t CodeCount = 0;
     const char* Hint = "";
 };
@@ -127,6 +127,7 @@ std::string BuildVerifierIssueCorrectionHint(const VerificationIssue& issue)
         },
         {
             {
+                "call.arguments_omitted",
                 "call.arguments_excess",
                 "call.argument_expression_omitted",
                 "call.result_not_captured",
