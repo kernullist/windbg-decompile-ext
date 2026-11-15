@@ -4055,6 +4055,20 @@ void TestMergeOutputPolicySnapshot()
     Expect(HasIssueCode(response.Verifier, "merge.acceptance_blockers_high_confidence"), "merge output policy should flag high confidence with acceptance blockers");
 }
 
+void TestJsonUnicodeEscapeSnapshot()
+{
+    const decomp::JsonParseResult parsed = decomp::ParseJson(
+        R"({"pseudo_c":"if (a \u003c b) x \u0026= 1;","summary":"\u00e9 \ud83d\ude00"})");
+
+    Expect(parsed.Success, "unicode escape JSON should parse: " + parsed.Error);
+
+    const decomp::JsonValue* pseudoC = parsed.Value.Find("pseudo_c");
+    const decomp::JsonValue* summary = parsed.Value.Find("summary");
+
+    Expect(pseudoC != nullptr && pseudoC->GetString() == "if (a < b) x &= 1;", "JSON unicode escapes should decode to the escaped characters");
+    Expect(summary != nullptr && summary->GetString() == "\xC3\xA9 \xF0\x9F\x98\x80", "JSON unicode escapes should decode to UTF-8, including surrogate pairs");
+}
+
 void TestUxHelperSnapshot()
 {
     decomp::AnalyzeRequest request;
@@ -4233,6 +4247,7 @@ int main()
     TestVerifierCoverageSnapshot();
     TestMergeOutputPolicySnapshot();
     TestUxHelperSnapshot();
+    TestJsonUnicodeEscapeSnapshot();
 
     if (g_failures != 0)
     {

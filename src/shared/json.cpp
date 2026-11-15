@@ -1,380 +1,94 @@
 ﻿#include "decomp/json.h"
 
-#include <cctype>
 #include <cmath>
-#include <exception>
 #include <iomanip>
 #include <sstream>
-#include <stdexcept>
+
+#define LLM_JSON_IMPLEMENTATION
+#include "llm_json.hpp"
 
 namespace decomp
 {
 namespace
 {
-class JsonParser
+// llm_json decodes a \uD83D\uDE00 escape pair as two separate 3-byte sequences.
+// Join such pairs into the 4-byte UTF-8 encoding of the real code point.
+std::string JoinUtf8SurrogatePairs(const std::string& text)
 {
-public:
-    explicit JsonParser(const std::string& text)
-        : Text_(text)
+    if (text.find('\xED') == std::string::npos)
     {
+        return text;
     }
 
-    JsonParseResult Parse()
+    std::string result;
+    result.reserve(text.size());
+
+    for (size_t index = 0; index < text.size();)
     {
-        JsonParseResult result;
-
-        do
+        const auto byteAt = [&text](size_t offset)
         {
-            SkipWhitespace();
-            result.Value = ParseValue();
-            SkipWhitespace();
+            return static_cast<unsigned char>(text[offset]);
+        };
 
-            if (!Error_.empty())
-            {
-                break;
-            }
+        if (index + 6 <= text.size()
+            && byteAt(index) == 0xED && (byteAt(index + 1) & 0xF0) == 0xA0
+            && byteAt(index + 3) == 0xED && (byteAt(index + 4) & 0xF0) == 0xB0)
+        {
+            const unsigned high = ((byteAt(index + 1) & 0x0F) << 6) | (byteAt(index + 2) & 0x3F);
+            const unsigned low = ((byteAt(index + 4) & 0x0F) << 6) | (byteAt(index + 5) & 0x3F);
+            const unsigned codePoint = 0x10000 + (high << 10) + low;
 
-            if (Position_ != Text_.size())
-            {
-                Error_ = "unexpected trailing input";
-                break;
-            }
-
-            result.Success = true;
+            result += static_cast<char>(0xF0 | (codePoint >> 18));
+            result += static_cast<char>(0x80 | ((codePoint >> 12) & 0x3F));
+            result += static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F));
+            result += static_cast<char>(0x80 | (codePoint & 0x3F));
+            index += 6;
+            continue;
         }
-        while (false);
 
-        result.Error = Error_;
-        return result;
+        result += text[index++];
     }
 
-private:
-    JsonValue ParseValue()
+    return result;
+}
+
+JsonValue ConvertValue(const llm::json::Value& value)
+{
+    switch (value.type())
     {
-        SkipWhitespace();
-
-        if (Position_ >= Text_.size())
+    case llm::json::Value::Type::Bool:
+        return JsonValue::MakeBoolean(value.as_bool());
+    case llm::json::Value::Type::Int:
+    case llm::json::Value::Type::Float:
+        return JsonValue::MakeNumber(value.as_number());
+    case llm::json::Value::Type::String:
+        return JsonValue::MakeString(JoinUtf8SurrogatePairs(value.as_string()));
+    case llm::json::Value::Type::Array:
         {
-            Error_ = "unexpected end of input";
-            return JsonValue::MakeNull();
-        }
+            JsonValue array = JsonValue::MakeArray();
 
-        const char ch = Text_[Position_];
-
-        if (ch == 'n')
-        {
-            return ParseNull();
-        }
-
-        if (ch == 't' || ch == 'f')
-        {
-            return ParseBoolean();
-        }
-
-        if (ch == '"')
-        {
-            return JsonValue::MakeString(ParseString());
-        }
-
-        if (ch == '[')
-        {
-            return ParseArray();
-        }
-
-        if (ch == '{')
-        {
-            return ParseObject();
-        }
-
-        if (ch == '-' || std::isdigit(static_cast<unsigned char>(ch)) != 0)
-        {
-            return ParseNumber();
-        }
-
-        Error_ = "unexpected token";
-        return JsonValue::MakeNull();
-    }
-
-    JsonValue ParseNull()
-    {
-        if (Text_.compare(Position_, 4, "null") != 0)
-        {
-            Error_ = "invalid null literal";
-            return JsonValue::MakeNull();
-        }
-
-        Position_ += 4;
-        return JsonValue::MakeNull();
-    }
-
-    JsonValue ParseBoolean()
-    {
-        if (Text_.compare(Position_, 4, "true") == 0)
-        {
-            Position_ += 4;
-            return JsonValue::MakeBoolean(true);
-        }
-
-        if (Text_.compare(Position_, 5, "false") == 0)
-        {
-            Position_ += 5;
-            return JsonValue::MakeBoolean(false);
-        }
-
-        Error_ = "invalid boolean literal";
-        return JsonValue::MakeNull();
-    }
-
-    JsonValue ParseNumber()
-    {
-        const size_t start = Position_;
-
-        if (Text_[Position_] == '-')
-        {
-            ++Position_;
-        }
-
-        while (Position_ < Text_.size() && std::isdigit(static_cast<unsigned char>(Text_[Position_])) != 0)
-        {
-            ++Position_;
-        }
-
-        if (Position_ < Text_.size() && Text_[Position_] == '.')
-        {
-            ++Position_;
-
-            while (Position_ < Text_.size() && std::isdigit(static_cast<unsigned char>(Text_[Position_])) != 0)
+            for (const llm::json::Value& item : value)
             {
-                ++Position_;
-            }
-        }
-
-        if (Position_ < Text_.size() && (Text_[Position_] == 'e' || Text_[Position_] == 'E'))
-        {
-            ++Position_;
-
-            if (Position_ < Text_.size() && (Text_[Position_] == '+' || Text_[Position_] == '-'))
-            {
-                ++Position_;
+                array.PushBack(ConvertValue(item));
             }
 
-            while (Position_ < Text_.size() && std::isdigit(static_cast<unsigned char>(Text_[Position_])) != 0)
-            {
-                ++Position_;
-            }
-        }
-
-        try
-        {
-            return JsonValue::MakeNumber(std::stod(Text_.substr(start, Position_ - start)));
-        }
-        catch (const std::exception&)
-        {
-            Error_ = "invalid number literal";
-            return JsonValue::MakeNull();
-        }
-    }
-
-    std::string ParseString()
-    {
-        std::ostringstream stream;
-
-        if (Text_[Position_] != '"')
-        {
-            Error_ = "expected string";
-            return std::string();
-        }
-
-        ++Position_;
-
-        while (Position_ < Text_.size())
-        {
-            const char ch = Text_[Position_++];
-
-            if (ch == '"')
-            {
-                return stream.str();
-            }
-
-            if (ch != '\\')
-            {
-                stream << ch;
-                continue;
-            }
-
-            if (Position_ >= Text_.size())
-            {
-                Error_ = "invalid string escape";
-                return std::string();
-            }
-
-            const char escaped = Text_[Position_++];
-
-            switch (escaped)
-            {
-            case '"':
-                stream << '"';
-                break;
-            case '\\':
-                stream << '\\';
-                break;
-            case '/':
-                stream << '/';
-                break;
-            case 'b':
-                stream << '\b';
-                break;
-            case 'f':
-                stream << '\f';
-                break;
-            case 'n':
-                stream << '\n';
-                break;
-            case 'r':
-                stream << '\r';
-                break;
-            case 't':
-                stream << '\t';
-                break;
-            case 'u':
-                if (Position_ + 4 > Text_.size())
-                {
-                    Error_ = "invalid unicode escape";
-                    return std::string();
-                }
-                Position_ += 4;
-                stream << '?';
-                break;
-            default:
-                Error_ = "invalid string escape";
-                return std::string();
-            }
-        }
-
-        Error_ = "unterminated string";
-        return std::string();
-    }
-
-    JsonValue ParseArray()
-    {
-        JsonValue array = JsonValue::MakeArray();
-        ++Position_;
-        SkipWhitespace();
-
-        if (Position_ < Text_.size() && Text_[Position_] == ']')
-        {
-            ++Position_;
             return array;
         }
-
-        while (Position_ < Text_.size())
+    case llm::json::Value::Type::Object:
         {
-            array.PushBack(ParseValue());
-            SkipWhitespace();
+            JsonValue object = JsonValue::MakeObject();
 
-            if (!Error_.empty())
+            for (const std::string& key : value.keys())
             {
-                return JsonValue::MakeNull();
+                object.Set(JoinUtf8SurrogatePairs(key), ConvertValue(value[key]));
             }
 
-            if (Position_ < Text_.size() && Text_[Position_] == ',')
-            {
-                ++Position_;
-                SkipWhitespace();
-                continue;
-            }
-
-            if (Position_ < Text_.size() && Text_[Position_] == ']')
-            {
-                ++Position_;
-                return array;
-            }
-
-            Error_ = "expected array delimiter";
-            return JsonValue::MakeNull();
-        }
-
-        Error_ = "unterminated array";
-        return JsonValue::MakeNull();
-    }
-
-    JsonValue ParseObject()
-    {
-        JsonValue object = JsonValue::MakeObject();
-        ++Position_;
-        SkipWhitespace();
-
-        if (Position_ < Text_.size() && Text_[Position_] == '}')
-        {
-            ++Position_;
             return object;
         }
-
-        while (Position_ < Text_.size())
-        {
-            if (Text_[Position_] != '"')
-            {
-                Error_ = "expected object key";
-                return JsonValue::MakeNull();
-            }
-
-            const std::string key = ParseString();
-            SkipWhitespace();
-
-            if (!Error_.empty())
-            {
-                return JsonValue::MakeNull();
-            }
-
-            if (Position_ >= Text_.size() || Text_[Position_] != ':')
-            {
-                Error_ = "expected key separator";
-                return JsonValue::MakeNull();
-            }
-
-            ++Position_;
-            SkipWhitespace();
-            object.Set(key, ParseValue());
-            SkipWhitespace();
-
-            if (!Error_.empty())
-            {
-                return JsonValue::MakeNull();
-            }
-
-            if (Position_ < Text_.size() && Text_[Position_] == ',')
-            {
-                ++Position_;
-                SkipWhitespace();
-                continue;
-            }
-
-            if (Position_ < Text_.size() && Text_[Position_] == '}')
-            {
-                ++Position_;
-                return object;
-            }
-
-            Error_ = "expected object delimiter";
-            return JsonValue::MakeNull();
-        }
-
-        Error_ = "unterminated object";
+    default:
         return JsonValue::MakeNull();
     }
-
-    void SkipWhitespace()
-    {
-        while (Position_ < Text_.size() && std::isspace(static_cast<unsigned char>(Text_[Position_])) != 0)
-        {
-            ++Position_;
-        }
-    }
-
-    const std::string& Text_;
-    size_t Position_ = 0;
-    std::string Error_;
-};
+}
 
 std::string MakeIndent(size_t indent)
 {
@@ -533,8 +247,18 @@ const JsonValue* JsonValue::Find(const std::string& key) const
 
 JsonParseResult ParseJson(const std::string& text)
 {
-    JsonParser parser(text);
-    return parser.Parse();
+    JsonParseResult result;
+    const llm::json::ParseResult parsed = llm::json::try_parse(text);
+
+    if (!parsed.ok)
+    {
+        result.Error = parsed.error;
+        return result;
+    }
+
+    result.Value = ConvertValue(parsed.value);
+    result.Success = true;
+    return result;
 }
 
 std::string EscapeJsonString(const std::string& value)
